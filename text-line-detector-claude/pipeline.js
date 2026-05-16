@@ -111,6 +111,10 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
   const sauvK  = params.invertBinary ? -params.sauvolaK : params.sauvolaK;
   const uBase  = gpu.uni(W, H);
   const uSauv  = gpu.uni(W, H, params.sauvolaRadius, sauvK);
+  // Pre-rotation uniforms (small radii — skew-detection blob building only)
+  const uPreDilH = gpu.uni(W, H, params.preDilationH, 0);
+  const uPreDilV = gpu.uni(W, H, params.preDilationV, 0);
+  // Post-rotation uniforms (larger radii — CCA + skeleton line detection)
   const uDilH  = gpu.uni(W, H, params.dilationH, 0);
   const uDilV  = gpu.uni(W, H, params.dilationV, 0);
   const uZS1   = gpu.uni(W, H, 0, 0);  // sub-iteration 1
@@ -153,8 +157,10 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
   //   image has complex layout. Blobs are never ambiguous.
   {
     const enc = d.createCommandEncoder();
-    gpu.dispatch(enc, pDilH, [bBin, bDilH, uDilH], W, H);
-    gpu.dispatch(enc, pDilV, [bDilH, bDil,  uDilV], W, H);
+    // WHY uPreDilH/V (small): keeps blobs narrow and line-separated for PCA.
+    // Large uDilH/V would merge adjacent lines → wrong skew angle.
+    gpu.dispatch(enc, pDilH, [bBin, bDilH, uPreDilH], W, H);
+    gpu.dispatch(enc, pDilV, [bDilH, bDil,  uPreDilV], W, H);
     d.queue.submit([enc.finish()]);
   }
   await d.queue.onSubmittedWorkDone();
@@ -162,7 +168,9 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
 
   log('Detecting skew from dilated blobs...', 'hi');
   const t1 = performance.now();
-  const skewAngle = detectSkewFromBlobs(dataDilPre, W, H, params.dilationH, params.dilationV, dataBin0);
+  const skewAngle = detectSkewFromBlobs(dataDilPre, W, H, params.preDilationH, params.preDilationV, dataBin0);
+  // Pass preDilationH/V (not dilationH/V): the B-correction formula inside
+  // detectSkewFromBlobs must match the radii used to build dataDilPre.
   log(`Skew: ${skewAngle > 0 ? '+' : ''}${skewAngle.toFixed(1)}deg in ${(performance.now()-t1).toFixed(0)} ms`, 'ok');
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -201,6 +209,18 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
   } else {
     showBinary(canvases.rot, dataBin0, W, H, [80, 80, 80]);
     if (canvases.infoRot) canvases.infoRot.textContent = 'no correction needed';
+
+    // WHY RE-DILATE EVEN WHEN NO ROTATION IS APPLIED:
+    //   Phase 2.5 used preDilationH/V (small) for skew detection.
+    //   CCA and skeleton need dilationH/V (larger) to bridge word gaps.
+    //   Must always overwrite bDil with post-rotation params.
+    {
+      const enc = d.createCommandEncoder();
+      gpu.dispatch(enc, pDilH, [bBin, bDilH, uDilH], W, H);
+      gpu.dispatch(enc, pDilV, [bDilH, bDil,  uDilV], W, H);
+      d.queue.submit([enc.finish()]);
+    }
+    await d.queue.onSubmittedWorkDone();
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -260,8 +280,10 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
     //  GPU Phase 5: Morphological dilation + Zhang-Suen skeleton
     // ════════════════════════════════════════════════════════════════════════
     // Appended to the same encoder to avoid an extra submit/await.
-    // bDil is already computed (Phase 2.5 for no-rotation, Phase 3 for rotation)
-    // Seed skeleton directly from bDil — no re-dilation needed.
+    // bDil always holds the POST-ROTATION dilation at this point:
+    //   rotation path    → Phase 3 re-dilated bBinRot with dilH/V
+    //   no-rotation path → else-branch re-dilated bBin with dilH/V
+    // Both paths use the larger post-rotation radii. Seed skeleton from bDil.
     enc.copyBufferToBuffer(bDil, 0, bSkelA, 0, N * 4);
 
     // ZS thinning: N full iterations, each = sub1 (A→B) + sub2 (B→A).
@@ -385,7 +407,7 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
   // unreleased VRAM buffers, causing OOM on integrated graphics.
   [bRGBA, bGray, bBlurH, bBlur, bSatS, bSatSq, bBin, bBinRot,
    bJfaXA, bJfaYA, bJfaXB, bJfaYB, bDist, bDilH, bDil, bSkelA, bSkelB,
-   uBase, uSauv, uDilH, uDilV, uZS1, uZS2
+   uBase, uSauv, uPreDilH, uPreDilV, uDilH, uDilV, uZS1, uZS2
   ].forEach(b => b.destroy());
 
   return finalPolys;

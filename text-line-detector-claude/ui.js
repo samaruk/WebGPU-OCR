@@ -145,6 +145,8 @@ async function onRun() {
     skewRangeDeg:    +document.getElementById('sSR').value,
     skewStepDeg:      0.5,
     skewThreshDeg:   +document.getElementById('sST').value / 10,
+    preDilationH:    +document.getElementById('sPreDH').value,
+    preDilationV:    +document.getElementById('sPreDV').value,
     dilationH:       +document.getElementById('sDH').value,
     dilationV:       +document.getElementById('sDV').value,
     zsIterations:    +document.getElementById('sZI').value,
@@ -182,7 +184,8 @@ async function onRun() {
 const SLIDERS = [
   ['sWR','vWR',v=>v],        ['sKF','vKF',v=>(v/100).toFixed(2)],
   ['sSR','vSR',v=>v],        ['sST','vST',v=>(v/10).toFixed(1)],
-  ['sDH','vDH',v=>v],        ['sDV','vDV',v=>v],
+  ['sPreDH','vPreDH',v=>v],  ['sPreDV','vPreDV',v=>v],   // pre-rotation dilation
+  ['sDH','vDH',v=>v],        ['sDV','vDV',v=>v],          // post-rotation dilation
   ['sZI','vZI',v=>v],        ['sBP','vBP',v=>v],
   ['sRE','vRE',v=>(v/10).toFixed(1)], ['sCS','vCS',v=>v],
   ['sHP','vHP',v=>(v/10).toFixed(1)], ['sML','vML',v=>v],

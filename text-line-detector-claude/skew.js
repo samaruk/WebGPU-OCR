@@ -246,8 +246,8 @@ export function detectSkewFromBlobs(dilData, W, H, dilH = 30, dilV = 4, binData 
   angles.sort((a, b) => a - b);
 
   // Coarse angle from bias-corrected PCA — accurate to ~1–2°.
-    const coarse = angles[Math.floor(angles.length / 2)];
-    console.log(['angles, coarse, stats', angles, coarse, stats]);
+  const coarse = angles[Math.floor(angles.length / 2)];
+
   // ── Pass 4: fine projection-profile refinement ────────────────────────────
   //
   // WHY USE THE ORIGINAL BINARY (NOT THE DILATED IMAGE) FOR REFINEMENT:
@@ -308,8 +308,7 @@ function _refineAngle(dilData, W, H, seedDeg, rangeDeg = 2, stepDeg = 0.1) {
     // (Equivalent to variance since total count is constant across angles.)
     let sum2 = 0;
     for (let i = 0; i < pSize; i++) sum2 += profile[i] * profile[i];
-      if (sum2 > bestScore) { bestScore = sum2; bestAngle = a; }
-      console.log(['bestAngle, a, seedDeg, sum2, bestScore', bestAngle, a, seedDeg, sum2, bestScore]);
+    if (sum2 > bestScore) { bestScore = sum2; bestAngle = a; }
   }
   return bestAngle;
 }

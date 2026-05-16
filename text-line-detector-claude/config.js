@@ -93,31 +93,40 @@ export const CONFIG = {
   // Avoids unnecessary GPU work and bilinear blur for near-zero angles.
 
 
-  // ── MORPHOLOGICAL PROCESSING ─────────────────────────────────────────────
+  // ── MORPHOLOGICAL PROCESSING — TWO SETS OF PARAMETERS ─────────────────────
   //
-  // WHY DILATION BEFORE CCA:
-  //   Individual characters have gaps between them (inter-character and inter-word
-  //   spacing). Connected Component Analysis on the raw binary would find hundreds
-  //   of tiny per-character blobs rather than one blob per text line.
-  //   Horizontal dilation (max-pooling) expands each character blob rightward and
-  //   leftward until it overlaps with its neighbours, merging the whole line into
-  //   one connected region. CCA then finds one blob per line.
+  // WHY TWO SETS (PRE-ROTATION and POST-ROTATION):
   //
-  // WHY SEPARATE H AND V PASSES:
-  //   A single 2D dilation kernel would be O(r²) per pixel. Two 1D passes
-  //   (horizontal then vertical) are O(r) each — separable morphology.
-  //   It also gives independent control: dilH bridges word gaps, dilV adds
-  //   just enough vertical thickness to close small vertical gaps within letters.
+  //   PRE-ROTATION dilation (Phase 2.5) runs on the original binary just before
+  //   skew detection. It only needs to merge adjacent characters within words into
+  //   short, elongated blobs. Small radii preserve line separation so PCA can
+  //   measure each line's orientation independently.
+  //   If these radii are too large, adjacent lines merge into one blob → PCA
+  //   averages across lines → wrong skew angle.
+  //
+  //   POST-ROTATION dilation (Phase 3/5) runs on the skew-corrected binary and
+  //   must bridge full inter-word gaps so CCA groups every character of a line
+  //   into one connected region. Larger radii are needed here.
+  //
+  // WHY SEPARABLE H + V PASSES:
+  //   Two 1D passes (H then V) = O(r) each vs O(r²) for a 2D kernel.
 
+  // --- PRE-ROTATION (skew detection only) ---
+  preDilationH: 15,
+  // Merges characters within a word. Keep < half the average word gap.
+  // Too large → adjacent lines merge → PCA returns wrong skew angle.
+
+  preDilationV: 2,
+  // Closes small vertical gaps inside characters. Keep small (1–4px).
+
+  // --- POST-ROTATION (CCA + skeleton, line detection) ---
   dilationH: 30,
-  // Horizontal dilation radius (pixels).
+  // Bridges full inter-word gaps so one CCA blob = one text line.
   // Should exceed the widest inter-word gap in the image.
-  // Too large: merges adjacent columns of text → one blob for two columns.
-  // Too small: word gaps remain open → fragmented line blobs.
+  // Too large: merges adjacent text columns. Too small: fragmented blobs.
 
   dilationV: 4,
-  // Vertical dilation radius (pixels).
-  // Small value: just closes small within-character vertical gaps.
+  // Small value: just closes within-character vertical gaps.
   // Large value: merges adjacent text lines into one tall blob (paragraph).
 
 

@@ -206,9 +206,30 @@ main{overflow-y:auto;padding:12px;display:grid;grid-template-columns:repeat(auto
     </div>
   </div>
 
-  <!-- Morphological processing -->
+  <!-- Pre-rotation morphological parameters (for skew detection only) -->
   <div class="sec">
-    <div class="sec-lbl">MORPHOLOGY</div>
+    <div class="sec-lbl">MORPHOLOGY — BEFORE ROTATION</div>
+    <div style="color:var(--muted);font-size:10px;margin-bottom:8px;line-height:1.6">
+      Small radii: merges chars within words.<br>
+      Too large → lines merge → wrong skew angle.
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">PRE DILATION H</span><span class="pval" id="vPreDH">15</span></div>
+      <input type="range" id="sPreDH" min="3" max="40" value="15">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">PRE DILATION V</span><span class="pval" id="vPreDV">2</span></div>
+      <input type="range" id="sPreDV" min="1" max="10" value="2">
+    </div>
+  </div>
+
+  <!-- Post-rotation morphological parameters (for CCA + skeleton) -->
+  <div class="sec">
+    <div class="sec-lbl">MORPHOLOGY — AFTER ROTATION</div>
+    <div style="color:var(--muted);font-size:10px;margin-bottom:8px;line-height:1.6">
+      Large radii: bridges word gaps so one<br>
+      CCA blob = one full text line.
+    </div>
     <div class="param">
       <div class="prow"><span class="pname">DILATION H</span><span class="pval" id="vDH">30</span></div>
       <input type="range" id="sDH" min="5" max="80" value="30">
