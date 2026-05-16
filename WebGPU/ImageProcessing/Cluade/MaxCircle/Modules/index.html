@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU MAX CIRCLE · WEBGPU</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     MAX INSCRIBED CIRCLE  ·  All-GPU WebGPU Pipeline
+     ═══════════════════════════════════════════════════════════════════════
+     Index.html is intentionally thin — all logic lives in JS modules.
+     Module tree rooted at main.js.
+-->
+
+<header>
+  <h1>MAX CIRCLE</h1>
+  <span class="badge gpu">WEBGPU</span>
+  <span class="badge fp16" id="fp16Tag">FP16</span>
+  <span class="badge img">IMAGE INPUT</span>
+  <span class="sub">ALL GPU · ZERO CPU COPY · JFA + PARALLEL REDUCE</span>
+</header>
+
+<div class="main">
+
+  <!-- ════ Work area ════ -->
+  <div class="left">
+
+    <!-- Drop zone / file picker -->
+    <div class="dropzone" id="dropzone" title="Click or drag an image">
+      <div class="dz-icon">⬆</div>
+      <div class="dz-text">DRAG &amp; DROP IMAGE  ·  OR CLICK TO BROWSE</div>
+      <div class="dz-hint">PNG · JPG · WEBP · BMP · GIF · SVG</div>
+      <div class="dz-name" id="dzName"></div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*">
+
+    <!-- Controls row 1: threshold, channel, invert, brush -->
+    <div class="row">
+      <span class="lbl">THRESHOLD</span>
+      <input type="range" id="thresh" min="1" max="254" value="128">
+      <span id="threshLbl" style="min-width:30px">128</span>
+      <div class="sep"></div>
+      <span class="lbl">CHANNEL</span>
+      <select id="chanSel">
+        <option value="luma">LUMA</option>
+        <option value="r">RED</option>
+        <option value="g">GREEN</option>
+        <option value="b">BLUE</option>
+        <option value="alpha">ALPHA</option>
+      </select>
+      <div class="sep"></div>
+      <button id="btnInvert">INVERT</button>
+      <div class="sep"></div>
+      <span class="lbl">BRUSH</span>
+      <input type="range" id="brushSize" min="2" max="60" value="14" style="flex:0 1 80px">
+      <span id="brushLbl">14</span>px
+      <button id="btnFore" class="on">◼ FG</button>
+      <button id="btnBack">◻ BG</button>
+    </div>
+
+    <!-- Controls row 2: run, presets -->
+    <div class="row">
+      <button class="run" id="btnRun" disabled>▶ RUN GPU PIPELINE</button>
+      <div class="sep"></div>
+      <button id="btnPreset">DEMO PRESET</button>
+      <button id="btnClear">CLEAR</button>
+      <div class="sep"></div>
+      <span class="lbl">PRESETS:</span>
+      <button class="preset" data-p="ring">RING</button>
+      <button class="preset" data-p="room">ROOM</button>
+      <button class="preset" data-p="maze">MAZE</button>
+      <button class="preset" data-p="letter">LETTER-O</button>
+      <button class="preset" data-p="poly">POLYGON</button>
+    </div>
+
+    <!-- Canvas grid: binary mask + distance field -->
+    <div class="canvas-grid">
+      <div class="cv-box">
+        <div class="cv-lbl">
+          BINARY MASK
+          <span id="srcLabel">(draw or upload image)</span>
+        </div>
+        <div class="cv-wrap">
+          <canvas id="drawCanvas"    width="380" height="380"></canvas>
+          <canvas id="overlayCanvas" width="380" height="380"></canvas>
+        </div>
+      </div>
+      <div class="cv-box">
+        <div class="cv-lbl">
+          DISTANCE FIELD
+          <span id="distLabel"></span>
+        </div>
+        <canvas id="distCanvas" width="380" height="380"></canvas>
+      </div>
+    </div>
+
+  </div><!-- /left -->
+
+  <!-- ════ Stats sidebar ════ -->
+  <div class="right">
+
+    <div class="panel">
+      <div class="plabel">Device</div>
+      <div class="sv sm" id="statDev">Initializing WebGPU…</div>
+    </div>
+
+    <div class="panel">
+      <div class="plabel">Performance</div>
+      <div class="stat-row"><span class="sn">FP16</span>       <span class="sv r" id="svFP16">—</span></div>
+      <div class="stat-row"><span class="sn">RESOLUTION</span> <span class="sv c" id="svRes">—</span></div>
+      <div class="stat-row"><span class="sn">JFA PASSES</span> <span class="sv"   id="svJFA">—</span></div>
+      <div class="stat-row"><span class="sn">GPU TIME</span>   <span class="sv"   id="svTime">—</span></div>
+      <div class="tbar"><div class="tfill" id="tfill"></div></div>
+    </div>
+
+    <div class="panel">
+      <div class="plabel">Result</div>
+      <div class="rbox" id="rbox">
+        <div class="rlines" id="rlines"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="plabel">GPU Pipeline</div>
+      <div class="pipe-wrap">
+        <div class="ps" id="ps0"><div class="dot"></div><span class="pt">BINARY UPLOAD</span>    <span class="psub">r8unorm</span></div>
+        <div class="ps" id="ps1"><div class="dot"></div><span class="pt">SEED INIT</span>        <span class="psub">8×8 wg</span></div>
+        <div class="ps" id="ps2"><div class="dot"></div><span class="pt">JUMP FLOOD</span>       <span class="psub" id="subJFA">—</span></div>
+        <div class="ps" id="ps3"><div class="dot"></div><span class="pt">DIST FIELD</span>       <span class="psub" id="subFP">—</span></div>
+        <div class="ps" id="ps4"><div class="dot"></div><span class="pt">PARALLEL MAX REDUCE</span><span class="psub">256-wide</span></div>
+        <div class="ps" id="ps5"><div class="dot"></div><span class="pt">EXTRACT CIRCLE</span>  <span class="psub">16B readback</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="plabel">Log</div>
+      <div class="log" id="logArea"></div>
+    </div>
+
+  </div><!-- /right -->
+
+</div><!-- /main -->
+
+<!--
+  ⚡ ES Module entry point.
+  All imports are resolved relative to this file's location.
+  Requires a local HTTP server (e.g. `npx serve .` or `python -m http.server`)
+  because ES module imports are blocked on file:// by browser security policy.
+-->
+<script type="module" src="main.js"></script>
+
+</body>
+</html>

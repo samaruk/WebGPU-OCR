@@ -1,0 +1,1 @@
+export class StageResult{constructor(data){Object.assign(this,data);}}

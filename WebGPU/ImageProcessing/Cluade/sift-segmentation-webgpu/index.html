@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SIFT Segmentation — WebGPU</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>SIFT Segmentation <span class="badge">WebGPU</span></h1>
+    <p class="subtitle">Scale-Invariant Feature Transform · Stroke Width Transform · Connected Component Labelling</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <label class="file-label" for="fileInput">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Load Image
+        <input type="file" id="fileInput" accept="image/*" hidden>
+      </label>
+      <button id="runBtn">&#9654; Run Pipeline</button>
+      <span id="status" class="status">Initialising WebGPU…</span>
+    </section>
+
+    <section class="canvas-area">
+      <div class="canvas-wrap">
+        <label>Output</label>
+        <canvas id="output" width="640" height="480"></canvas>
+      </div>
+    </section>
+
+    <section class="info-grid">
+      <div class="info-card">
+        <h3>Pipeline</h3>
+        <ol>
+          <li>RGB → Greyscale + CLAHE</li>
+          <li>Bilateral denoising</li>
+          <li>Gaussian scale pyramid (4 oct × 5 scales)</li>
+          <li>DoG extrema detection &amp; SIFT descriptors</li>
+          <li>Density map + Stroke Width Transform</li>
+          <li>Adaptive mask fusion</li>
+          <li>Connected Component Labelling (CCL)</li>
+          <li>Zhang-Suen skeletonisation</li>
+          <li>Graph merge / split</li>
+          <li>Polygon approximation</li>
+        </ol>
+      </div>
+      <div class="info-card">
+        <h3>Requirements</h3>
+        <ul>
+          <li>Chrome 113+ / Edge 113+ / Firefox Nightly</li>
+          <li>WebGPU enabled (chrome://flags)</li>
+          <li>Discrete or integrated GPU recommended</li>
+        </ul>
+        <h3 style="margin-top:1rem">Config</h3>
+        <ul>
+          <li>Max keypoints: 16 384</li>
+          <li>Descriptor dim: 128</li>
+          <li>Max image: 4096²</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

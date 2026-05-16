@@ -1,0 +1,436 @@
+﻿
+/* ── Reset & base ────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: 'IBM Plex Mono', monospace;
+    background: #05080f;
+    color: #c0c8d8;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+/* ── Top navigation bar ─────────────────────────────────────────────────────── */
+/*
+  WHY FIXED-HEIGHT TOPBAR (not flex-grow):
+    The topbar must never shrink or grow regardless of content. A fixed 44px height
+    with flex-shrink: 0 guarantees that the canvas area below always has predictable
+    space. Using flex-grow would make the topbar expand to fill empty space on wide
+    monitors, wasting the primary working area.
+*/
+#topbar {
+    background: #07090f;
+    border-bottom: 1px solid #0d2030;
+    padding: 0 20px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-shrink: 0;
+}
+
+    #topbar h1 {
+        font-size: 13px;
+        font-weight: 600;
+        color: #00d084;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+    }
+
+.spacer {
+    flex: 1;
+}
+
+/* Status chips shown in the topbar */
+.chip {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 2px;
+    font-weight: 500;
+    letter-spacing: 1px;
+}
+
+.chip-gpu {
+    background: #001f3a;
+    color: #0af;
+    border: 1px solid #0055aa;
+}
+
+.chip-wgsl {
+    background: #001a0f;
+    color: #00d084;
+    border: 1px solid #005530;
+}
+
+.chip-new {
+    background: #0a0820;
+    color: #aa88ff;
+    border: 1px solid #331a88;
+}
+
+/* Pipeline stage summary in topbar — dimmed until GPU is ready (toggled by main.js) */
+.pipeline-steps {
+    font-size: 10px;
+    color: #2a4060;
+    letter-spacing: 0.5px;
+    transition: color 0.6s;
+}
+
+    .pipeline-steps .new-stage {
+        color: #553388;
+    }
+
+/* ── Main layout: sidebar + canvas area ─────────────────────────────────────── */
+#layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ── Left sidebar ────────────────────────────────────────────────────────────── */
+/*
+  WHY flex-shrink: 0 ON THE SIDEBAR:
+    Without it, when the window narrows, flex would shrink the sidebar to make room
+    for the canvas area. Parameter sliders become unusable at narrow widths. The
+    sidebar has a fixed width; the canvas area scrolls instead.
+*/
+#sidebar {
+    width: 255px;
+    background: #060910;
+    border-right: 1px solid #0d2030;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    flex-shrink: 0;
+    scrollbar-width: thin;
+    scrollbar-color: #0d2030 transparent;
+}
+
+/* Sidebar sections — border-bottom creates visual grouping without heavy dividers */
+.sb-section {
+    padding: 14px 16px;
+    border-bottom: 1px solid #0a1825;
+}
+
+.sb-label {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: #1e4060;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+}
+
+    .sb-label.new-label {
+        color: #331a66;
+    }
+/* Purple tint = new GPU stage */
+
+/* ── File upload drop zone ─────────────────────────────────────────────────── */
+.upload-zone {
+    border: 1px dashed #0d3050;
+    border-radius: 4px;
+    padding: 18px 12px;
+    text-align: center;
+    cursor: pointer;
+    background: #030508;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+    .upload-zone:hover, .upload-zone.over {
+        border-color: #00d084;
+        background: #001a10;
+    }
+
+.uz-icon {
+    font-size: 22px;
+    margin-bottom: 8px;
+}
+
+.uz-main {
+    font-size: 11px;
+    color: #6080a0;
+}
+
+.uz-sub {
+    font-size: 10px;
+    color: #2a3a50;
+    margin-top: 4px;
+}
+
+/* ── Parameter sliders ─────────────────────────────────────────────────────── */
+.param-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 9px;
+}
+
+    .param-row label {
+        font-size: 10px;
+        color: #5070a0;
+        flex: 1;
+    }
+
+    .param-row input[type=range] {
+        width: 70px;
+        accent-color: #00d084;
+    }
+
+    .param-row.new-param input[type=range] {
+        accent-color: #aa88ff;
+    }
+
+/* Value display next to each slider */
+.pval {
+    font-size: 11px;
+    font-weight: 500;
+    color: #00d084;
+    min-width: 34px;
+    text-align: right;
+}
+
+    .pval.new-pval {
+        color: #aa88ff;
+    }
+
+/* ── Run button ────────────────────────────────────────────────────────────── */
+/*
+  WHY display: block + width: 100% (not inline-block):
+    The button must stretch to fill the full sidebar width for easy clicking,
+    especially on touch devices. display: block is the most reliable cross-browser
+    way to achieve this for a <button> element.
+*/
+#detectBtn {
+    display: block;
+    width: 100%;
+    background: linear-gradient(90deg, #003820, #005530);
+    color: #00d084;
+    border: 1px solid #006640;
+    border-radius: 3px;
+    padding: 9px;
+    font-family: monospace;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+    #detectBtn:hover:not(:disabled) {
+        background: linear-gradient(90deg,#004820,#007740);
+        color: #00ffaa;
+    }
+
+    #detectBtn:disabled {
+        opacity: 0.3;
+        cursor: default;
+    }
+
+/* ── Status box ────────────────────────────────────────────────────────────── */
+.status-box {
+    font-size: 10px;
+    color: #3a5070;
+    padding: 8px 10px;
+    background: #030508;
+    border: 1px solid #0a1525;
+    border-radius: 3px;
+    line-height: 1.6;
+    word-break: break-word;
+}
+
+    .status-box.ok {
+        color: #00d084;
+        border-color: #003820;
+        background: #010a05;
+    }
+
+    .status-box.err {
+        color: #ff5060;
+        border-color: #300008;
+        background: #0a0101;
+    }
+
+    .status-box.run {
+        color: #5588ff;
+        border-color: #0a1a40;
+        background: #010408;
+    }
+
+/* ── Stats grid ────────────────────────────────────────────────────────────── */
+/*
+  WHY 2×2 GRID:
+    Four metrics (Lines, Blobs, GPU ms, Total ms) fit naturally in two rows of two.
+    A wider single-row layout would require each cell to be too narrow to read the
+    values comfortably at the sidebar's fixed 255px width.
+*/
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+
+.stat-cell {
+    background: #030508;
+    border: 1px solid #0a1525;
+    border-radius: 3px;
+    padding: 6px 8px;
+}
+
+    .stat-cell .sk {
+        font-size: 9px;
+        color: #2a4060;
+        text-transform: uppercase;
+    }
+
+    .stat-cell .sv {
+        font-size: 14px;
+        font-weight: 600;
+        color: #5588ff;
+    }
+
+    .stat-cell.sv-green .sv {
+        color: #00d084;
+    }
+
+    .stat-cell.sv-purple .sv {
+        color: #aa88ff;
+    }
+
+/* ── Progress bar ──────────────────────────────────────────────────────────── */
+.progress-wrap {
+    height: 2px;
+    background: #0a1525;
+    border-radius: 1px;
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #00d084, #aa88ff);
+    width: 0%;
+    transition: width 0.3s ease-out;
+}
+
+/* ── Canvas area (right panel) ─────────────────────────────────────────────── */
+/*
+  WHY overflow: auto ON #canvas-area:
+    The canvas area may contain more rows than fit on screen (input + output + 4 debug
+    canvases). overflow: auto adds a scrollbar only when needed, keeping the topbar and
+    sidebar always visible while allowing the canvas rows to scroll independently.
+*/
+#canvas-area {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.row {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+}
+
+/* ── Canvas cards ──────────────────────────────────────────────────────────── */
+.canvas-card {
+    background: #070a12;
+    border: 1px solid #0d2030;
+    border-radius: 6px;
+    overflow: hidden;
+    flex: 1;
+    min-width: 280px;
+    max-width: 100%;
+}
+
+    .canvas-card.new-card {
+        border-color: #1a0840;
+    }
+/* Purple border = GPU-rendered output */
+
+.card-header {
+    padding: 8px 14px;
+    background: #060910;
+    border-bottom: 1px solid #0a1828;
+    display: flex;
+}
+
+    .card-header .ctitle {
+        font-size: 10px;
+        font-weight: 600;
+        color: #1e4060;
+        text-transform: uppercase;
+        flex: 1;
+    }
+
+    .card-header .cstep {
+        font-size: 9px;
+        color: #0d3050;
+    }
+
+        .card-header .cstep.new-step {
+            color: #2a0f66;
+        }
+
+.card-body {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #010104;
+    overflow: auto;
+}
+
+/* ── Canvas and image display ──────────────────────────────────────────────── */
+canvas, img {
+    display: block;
+    border-radius: 4px;
+    max-width: 100%;
+    height: auto;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Legend ────────────────────────────────────────────────────────────────── */
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+    justify-content: center;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #3a5070;
+}
+
+.legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+}
+
+/* ── Placeholder text shown before images load ─────────────────────────────── */
+.placeholder {
+    color: #2a3a50;
+    font-size: 11px;
+    text-align: center;
+    padding: 40px;
+}

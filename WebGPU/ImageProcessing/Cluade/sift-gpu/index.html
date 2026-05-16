@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SIFT-GPU &mdash; WebGPU Feature Detector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;600;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root{--bg:#0a0c0f;--panel:#0e1115;--border:#1f2937;--accent:#00e5ff;--accent2:#ff4d6d;--dim:#4a5568;--text:#c8d6e5;--mono:"Share Tech Mono",monospace;--head:"Barlow Condensed",sans-serif;}
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--mono);overflow-x:hidden;}
+    body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.18) 2px,rgba(0,0,0,.18) 4px);}
+    header{display:flex;align-items:center;gap:1.2rem;padding:1rem 2rem;border-bottom:1px solid var(--border);background:rgba(0,229,255,.03);}
+    header .logo{font-family:var(--head);font-size:2rem;font-weight:800;letter-spacing:.1em;color:var(--accent);text-shadow:0 0 20px rgba(0,229,255,.5);}
+    header .sub{font-size:.72rem;color:var(--dim);letter-spacing:.12em;text-transform:uppercase;}
+    header .badge{margin-left:auto;font-size:.7rem;background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.3);color:var(--accent);padding:.25em .7em;letter-spacing:.1em;}
+    main{display:grid;grid-template-columns:320px 1fr;grid-template-rows:1fr auto;height:calc(100vh - 64px);}
+    aside{grid-row:1/3;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;}
+    .section{padding:1.1rem 1.2rem;border-bottom:1px solid var(--border);}
+    .section-title{font-family:var(--head);font-weight:600;letter-spacing:.15em;font-size:.75rem;color:var(--accent);text-transform:uppercase;margin-bottom:.8rem;}
+    .dropzone{border:1px dashed var(--dim);padding:1.5rem;text-align:center;cursor:pointer;transition:.2s;position:relative;}
+    .dropzone:hover,.dropzone.drag{border-color:var(--accent);background:rgba(0,229,255,.04);}
+    .dropzone input{position:absolute;inset:0;opacity:0;cursor:pointer;}
+    .dropzone .dz-icon{font-size:2rem;display:block;margin-bottom:.4rem;color:var(--dim);}
+    .dropzone .dz-text{font-size:.72rem;color:var(--dim);}
+    .cfg-row{display:flex;align-items:center;gap:.6rem;margin-bottom:.55rem;}
+    .cfg-row label{font-size:.68rem;color:var(--dim);width:140px;flex-shrink:0;}
+    .cfg-row input[type=range]{flex:1;-webkit-appearance:none;background:var(--border);height:2px;accent-color:var(--accent);}
+    .cfg-row .val{font-size:.68rem;width:40px;text-align:right;color:var(--accent);}
+    .run-btn{display:block;width:100%;padding:.7rem;background:var(--accent);color:#000;border:none;cursor:pointer;font-family:var(--head);font-weight:800;font-size:1rem;letter-spacing:.15em;text-transform:uppercase;transition:.15s;}
+    .run-btn:hover{background:#33ecff;}
+    .run-btn:disabled{background:var(--dim);cursor:not-allowed;}
+    .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;}
+    .stat-cell{background:var(--bg);padding:.5rem .7rem;}
+    .stat-val{font-family:var(--head);font-size:1.5rem;font-weight:800;color:var(--accent);}
+    .stat-key{font-size:.6rem;color:var(--dim);text-transform:uppercase;letter-spacing:.1em;}
+    .progress-bar{width:100%;height:3px;background:var(--border);margin-top:.5rem;overflow:hidden;}
+    .progress-fill{height:100%;width:0%;background:var(--accent);transition:width .2s;box-shadow:0 0 8px var(--accent);}
+    .progress-label{font-size:.65rem;color:var(--dim);margin-top:.3rem;}
+    .canvas-wrap{position:relative;overflow:hidden;background:#050609;display:flex;align-items:center;justify-content:center;}
+    #cvs{max-width:100%;max-height:100%;}
+    .canvas-overlay{position:absolute;top:.6rem;right:.8rem;font-size:.65rem;color:var(--dim);text-align:right;line-height:1.8;}
+    #renderMode{position:absolute;top:.6rem;left:.8rem;}
+    .mode-btn{font-family:var(--mono);font-size:.65rem;background:rgba(0,0,0,.6);border:1px solid var(--dim);color:var(--dim);padding:.2em .6em;cursor:pointer;margin-right:.3rem;transition:.15s;}
+    .mode-btn.active,.mode-btn:hover{border-color:var(--accent);color:var(--accent);}
+    #logPane{background:var(--panel);border-top:1px solid var(--border);padding:.6rem 1rem;font-size:.65rem;color:var(--dim);max-height:110px;overflow-y:auto;line-height:1.7;}
+    .log-entry{white-space:nowrap;}
+    .log-entry.ok{color:#4ade80;}
+    .log-entry.warn{color:#fbbf24;}
+    .log-entry.err{color:var(--accent2);}
+    #kpOverlay{position:absolute;inset:0;pointer-events:none;}
+  </style>
+</head>
+<body>
+<header>
+  <span class="logo">SIFT&#x2011;GPU</span>
+  <div>
+    <div style="font-family:var(--head);font-weight:300;font-size:.95rem;letter-spacing:.08em;">WebGPU Scale-Invariant Feature Transform</div>
+    <div class="sub">sigma=1.6 &bull; RootSIFT &bull; 128-D descriptor</div>
+  </div>
+  <span class="badge">&#x25CF; WebGPU</span>
+</header>
+<main>
+  <aside>
+    <div class="section">
+      <div class="section-title">Input Image</div>
+      <label class="dropzone" id="dropzone">
+        <span class="dz-icon">&#9652;</span>
+        <span class="dz-text">Drop image or click to browse</span>
+        <input type="file" id="fileInput" accept="image/*"/>
+      </label>
+    </div>
+    <div class="section">
+      <div class="section-title">Parameters</div>
+      <div class="cfg-row"><label>sigma&#8320;</label><input type="range" id="sigma0" min="1.0" max="2.5" step="0.05" value="1.6"/><span class="val" id="sigma0Val">1.60</span></div>
+      <div class="cfg-row"><label>Octaves</label><input type="range" id="numOctaves" min="1" max="8" step="1" value="5"/><span class="val" id="numOctavesVal">5</span></div>
+      <div class="cfg-row"><label>Scales/Octave</label><input type="range" id="scalesPerOctave" min="3" max="8" step="1" value="5"/><span class="val" id="scalesPerOctaveVal">5</span></div>
+      <div class="cfg-row"><label>Contrast Thr.</label><input type="range" id="contrastThreshold" min="0.005" max="0.08" step="0.005" value="0.02"/><span class="val" id="contrastThresholdVal">0.020</span></div>
+      <div class="cfg-row"><label>Edge Thr.</label><input type="range" id="edgeThreshold" min="4" max="30" step="1" value="12"/><span class="val" id="edgeThresholdVal">12</span></div>
+      <div class="cfg-row"><label>Ratio Test</label><input type="range" id="ratioThreshold" min="0.5" max="0.95" step="0.01" value="0.7"/><span class="val" id="ratioThresholdVal">0.70</span></div>
+      <div class="cfg-row"><label>RootSIFT</label><input type="checkbox" id="rootSIFT" checked style="accent-color:var(--accent);"/></div>
+      <div class="cfg-row"><label>Cross-Check</label><input type="checkbox" id="crossCheck" checked style="accent-color:var(--accent);"/></div>
+    </div>
+    <div class="section">
+      <button class="run-btn" id="runBtn" disabled>&#9654;  Detect Features</button>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-label" id="progressLabel">awaiting image&hellip;</div>
+    </div>
+    <div class="section">
+      <div class="section-title">Statistics</div>
+      <div class="stat-grid">
+        <div class="stat-cell"><div class="stat-val" id="statKP">&#x2014;</div><div class="stat-key">Keypoints</div></div>
+        <div class="stat-cell"><div class="stat-val" id="statTime">&#x2014;</div><div class="stat-key">ms total</div></div>
+        <div class="stat-cell"><div class="stat-val" id="statW">&#x2014;</div><div class="stat-key">Width px</div></div>
+        <div class="stat-cell"><div class="stat-val" id="statH">&#x2014;</div><div class="stat-key">Height px</div></div>
+      </div>
+    </div>
+    <div class="section" style="flex:1;display:flex;flex-direction:column;">
+      <div class="section-title">Export</div>
+      <button class="run-btn" id="exportBtn" disabled style="background:transparent;border:1px solid var(--accent);color:var(--accent);">&#8595;  Export Keypoints JSON</button>
+    </div>
+  </aside>
+  <div class="canvas-wrap" id="canvasWrap">
+    <canvas id="cvs"></canvas>
+    <svg id="kpOverlay"></svg>
+    <div id="renderMode">
+      <button class="mode-btn active" data-mode="image">Image</button>
+      <button class="mode-btn" data-mode="keypoints">Keypoints</button>
+      <button class="mode-btn" data-mode="heatmap">Response Heat</button>
+    </div>
+    <div class="canvas-overlay" id="canvasInfo">No image loaded</div>
+  </div>
+  <div id="logPane"></div>
+</main>
+<script type="module">
+const logPane=document.getElementById("logPane");
+function log(msg,cls=""){const d=document.createElement("div");d.className="log-entry "+cls;const ts=new Date().toLocaleTimeString("en-GB",{hour12:false});d.textContent="["+ts+"] "+msg;logPane.appendChild(d);logPane.scrollTop=logPane.scrollHeight;}
+function setProgress(pct,label){document.getElementById("progressFill").style.width=pct+"%";document.getElementById("progressLabel").textContent=label;}
+
+["sigma0","numOctaves","scalesPerOctave","contrastThreshold","edgeThreshold","ratioThreshold"].forEach(id=>{
+  const el=document.getElementById(id),vl=document.getElementById(id+"Val");
+  if(!vl)return;
+  el.addEventListener("input",()=>{const v=parseFloat(el.value);vl.textContent=["edgeThreshold","numOctaves","scalesPerOctave"].includes(id)?v.toFixed(0):v.toFixed(id==="sigma0"?2:3);});
+});
+
+const dropzone=document.getElementById("dropzone"),fileInput=document.getElementById("fileInput");
+const runBtn=document.getElementById("runBtn"),exportBtn=document.getElementById("exportBtn");
+let loadedImage=null;
+
+dropzone.addEventListener("dragover",e=>{e.preventDefault();dropzone.classList.add("drag");});
+dropzone.addEventListener("dragleave",()=>dropzone.classList.remove("drag"));
+dropzone.addEventListener("drop",e=>{e.preventDefault();dropzone.classList.remove("drag");const f=e.dataTransfer.files[0];if(f)loadFile(f);});
+fileInput.addEventListener("change",()=>{if(fileInput.files[0])loadFile(fileInput.files[0]);});
+
+function loadFile(file){
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const img=new Image();
+    img.onload=()=>{
+      loadedImage=img;drawImage(img);
+      document.getElementById("statW").textContent=img.naturalWidth;
+      document.getElementById("statH").textContent=img.naturalHeight;
+      document.getElementById("canvasInfo").textContent=img.naturalWidth+" x "+img.naturalHeight;
+      runBtn.disabled=false;setProgress(0,"ready");
+      log("Loaded: "+file.name+" ("+img.naturalWidth+"x"+img.naturalHeight+")","ok");
+    };img.src=e.target.result;
+  };reader.readAsDataURL(file);
+}
+
+const cvs=document.getElementById("cvs"),ctx=cvs.getContext("2d"),svg=document.getElementById("kpOverlay");
+let lastFeatures=null,displayMode="image";
+
+function drawImage(img){cvs.width=img.naturalWidth;cvs.height=img.naturalHeight;ctx.drawImage(img,0,0);clearSVG();}
+function clearSVG(){while(svg.firstChild)svg.removeChild(svg.firstChild);}
+
+function drawKeypoints(features){
+  clearSVG();
+  const wrap=document.getElementById("canvasWrap");
+  const s=Math.min(wrap.clientWidth/cvs.width,wrap.clientHeight/cvs.height);
+  const dispW=cvs.width*s,dispH=cvs.height*s;
+  const offX=(wrap.clientWidth-dispW)/2,offY=(wrap.clientHeight-dispH)/2;
+  svg.style.cssText="position:absolute;pointer-events:none;left:"+offX+"px;top:"+offY+"px;width:"+dispW+"px;height:"+dispH+"px;";
+  svg.setAttribute("viewBox","0 0 "+cvs.width+" "+cvs.height);
+  const maxR=Math.max(...features.map(f=>f.keypoint.response),1);
+  features.forEach(f=>{
+    const kp=f.keypoint,r=Math.max(2,kp.scale*3);
+    const hue=Math.round((kp.response/maxR)*180);
+    const ci=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    ci.setAttribute("cx",kp.x);ci.setAttribute("cy",kp.y);ci.setAttribute("r",r);
+    ci.setAttribute("fill","none");ci.setAttribute("stroke","hsl("+hue+",100%,60%)");
+    ci.setAttribute("stroke-width","1");ci.setAttribute("stroke-opacity","0.8");
+    const lx=kp.x+r*Math.cos(kp.orientation),ly=kp.y+r*Math.sin(kp.orientation);
+    const ln=document.createElementNS("http://www.w3.org/2000/svg","line");
+    ln.setAttribute("x1",kp.x);ln.setAttribute("y1",kp.y);ln.setAttribute("x2",lx);ln.setAttribute("y2",ly);
+    ln.setAttribute("stroke","hsl("+hue+",100%,60%)");ln.setAttribute("stroke-width","1");
+    svg.appendChild(ci);svg.appendChild(ln);
+  });
+}
+
+function drawResponseHeatmap(features){
+  ctx.drawImage(loadedImage,0,0);
+  const maxR=Math.max(...features.map(f=>f.keypoint.response),1);
+  features.forEach(f=>{
+    const kp=f.keypoint,t=kp.response/maxR,r=Math.max(2,kp.scale*3);
+    const grd=ctx.createRadialGradient(kp.x,kp.y,0,kp.x,kp.y,r);
+    grd.addColorStop(0,"rgba("+Math.round(255*t)+","+Math.round(80*(1-t))+","+Math.round(255*(1-t))+",0.6)");
+    grd.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle=grd;ctx.beginPath();ctx.arc(kp.x,kp.y,r,0,Math.PI*2);ctx.fill();
+  });
+}
+
+document.querySelectorAll(".mode-btn").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    document.querySelectorAll(".mode-btn").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");displayMode=btn.dataset.mode;
+    if(!lastFeatures||!loadedImage)return;
+    ctx.drawImage(loadedImage,0,0);clearSVG();
+    if(displayMode==="keypoints")drawKeypoints(lastFeatures);
+    else if(displayMode==="heatmap")drawResponseHeatmap(lastFeatures);
+  });
+});
+
+if(!navigator.gpu){log("WebGPU not supported. Use Chrome 113+ or Edge 113+.","err");setProgress(0,"WebGPU unavailable");}
+
+runBtn.addEventListener("click",async()=>{
+  if(!loadedImage)return;
+  runBtn.disabled=true;exportBtn.disabled=true;lastFeatures=null;
+  const cfg={
+    sigma0:parseFloat(document.getElementById("sigma0").value),
+    numOctaves:parseInt(document.getElementById("numOctaves").value),
+    scalesPerOctave:parseInt(document.getElementById("scalesPerOctave").value),
+    contrastThreshold:parseFloat(document.getElementById("contrastThreshold").value),
+    edgeThreshold:parseFloat(document.getElementById("edgeThreshold").value),
+    ratioThreshold:parseFloat(document.getElementById("ratioThreshold").value),
+    rootSIFT:document.getElementById("rootSIFT").checked,
+    crossCheck:document.getElementById("crossCheck").checked,
+  };
+  log("Running SIFT-GPU: sigma="+cfg.sigma0+", octaves="+cfg.numOctaves+", S="+cfg.scalesPerOctave,"ok");
+  setProgress(2,"initialising WebGPU...");
+  try{
+    const t0=performance.now();
+    const W=loadedImage.naturalWidth,H=loadedImage.naturalHeight;
+    const offscreen=new OffscreenCanvas(W,H);
+    const octx=offscreen.getContext("2d");
+    octx.drawImage(loadedImage,0,0);
+    const imgData=octx.getImageData(0,0,W,H).data;
+    const gray=new Float32Array(W*H);
+    for(let i=0;i<W*H;i++)gray[i]=(0.299*imgData[i*4]+0.587*imgData[i*4+1]+0.114*imgData[i*4+2])/255;
+    setProgress(5,"uploading to GPU...");
+    const {detectAndCompute}=await import("./main.js");
+    const {CONFIG}=await import("./config.js");
+    Object.assign(CONFIG,cfg);
+    const features=await detectAndCompute(gray,W,H,(stage,pct)=>{setProgress(pct,stage+"...");});
+    const elapsed=(performance.now()-t0).toFixed(0);
+    lastFeatures=features;
+    document.getElementById("statKP").textContent=features.length;
+    document.getElementById("statTime").textContent=elapsed;
+    log("Done: "+features.length+" features in "+elapsed+" ms","ok");
+    ctx.drawImage(loadedImage,0,0);
+    drawKeypoints(features);
+    setProgress(100,"complete");
+    exportBtn.disabled=false;
+  }catch(e){log("ERROR: "+e.message,"err");console.error(e);setProgress(0,"error");}
+  runBtn.disabled=false;
+});
+
+exportBtn.addEventListener("click",()=>{
+  if(!lastFeatures)return;
+  const data=lastFeatures.map(f=>({x:f.keypoint.x,y:f.keypoint.y,scale:f.keypoint.scale,response:f.keypoint.response,orientation:f.keypoint.orientation,octave:f.keypoint.octave,descriptor:Array.from(f.descriptor)}));
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="sift_features.json";a.click();
+  log("Exported "+data.length+" features","ok");
+});
+
+log("SIFT-GPU ready. Load an image to begin.","ok");
+</script>
+</body>
+</html>

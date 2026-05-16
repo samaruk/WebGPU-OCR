@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Text Line Detector — Modular GPU Pipeline</title>
+
+<!--
+  index.html — Shell document: HTML structure + CSS only. Zero JavaScript here.
+
+  WHY ALL JAVASCRIPT IS IN SEPARATE MODULES (not inline <script> tags):
+    Browser ES modules loaded via <script type="module"> are deferred automatically —
+    they never block HTML parsing. Keeping JS in .js files also enables:
+      • IDE syntax highlighting, linting, and type-checking on each file independently.
+      • Hot-reload dev servers (Vite, esbuild) that can update individual modules.
+      • Clear separation of concerns: this file owns layout and visual design only.
+
+  WHY CSS IS KEPT IN THIS FILE (not a separate .css):
+    For a single-page tool with one HTML file, a linked .css would add one extra HTTP
+    round-trip with no reuse benefit. The styles are tightly coupled to the specific
+    DOM ids and class names defined here — moving them to a separate file would make
+    the coupling less visible without making it looser.
+
+  SERVING REQUIREMENT:
+    This app uses ES modules, which require a same-origin HTTP server. Opening
+    index.html as a file:// URL will cause CORS errors on all module imports.
+
+    Start a local server:
+      python3 -m http.server 8080
+      # then open: http://localhost:8080
+
+  WEBGPU REQUIREMENT:
+    WebGPU is available in Chrome 113+ and Edge 113+. Firefox support is behind a flag.
+    Safari Technology Preview supports it since TP 185. Check https://caniuse.com/webgpu.
+-->
+
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+
+/* ── Reset & base ────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: 'IBM Plex Mono', monospace;
+  background: #05080f;
+  color: #c0c8d8;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ── Top navigation bar ─────────────────────────────────────────────────────── */
+/*
+  WHY FIXED-HEIGHT TOPBAR (not flex-grow):
+    The topbar must never shrink or grow regardless of content. A fixed 44px height
+    with flex-shrink: 0 guarantees that the canvas area below always has predictable
+    space. Using flex-grow would make the topbar expand to fill empty space on wide
+    monitors, wasting the primary working area.
+*/
+#topbar {
+  background: #07090f;
+  border-bottom: 1px solid #0d2030;
+  padding: 0 20px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+#topbar h1 { font-size: 13px; font-weight: 600; color: #00d084; letter-spacing: 2px; text-transform: uppercase; }
+.spacer { flex: 1; }
+
+/* Status chips shown in the topbar */
+.chip { font-size: 10px; padding: 2px 7px; border-radius: 2px; font-weight: 500; letter-spacing: 1px; }
+.chip-gpu  { background: #001f3a; color: #0af;    border: 1px solid #0055aa; }
+.chip-wgsl { background: #001a0f; color: #00d084; border: 1px solid #005530; }
+.chip-new  { background: #0a0820; color: #aa88ff; border: 1px solid #331a88; }
+
+/* Pipeline stage summary in topbar — dimmed until GPU is ready (toggled by main.js) */
+.pipeline-steps { font-size: 10px; color: #2a4060; letter-spacing: 0.5px; transition: color 0.6s; }
+.pipeline-steps .new-stage { color: #553388; }
+
+/* ── Main layout: sidebar + canvas area ─────────────────────────────────────── */
+#layout { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Left sidebar ────────────────────────────────────────────────────────────── */
+/*
+  WHY flex-shrink: 0 ON THE SIDEBAR:
+    Without it, when the window narrows, flex would shrink the sidebar to make room
+    for the canvas area. Parameter sliders become unusable at narrow widths. The
+    sidebar has a fixed width; the canvas area scrolls instead.
+*/
+#sidebar {
+  width: 255px;
+  background: #060910;
+  border-right: 1px solid #0d2030;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #0d2030 transparent;
+}
+
+/* Sidebar sections — border-bottom creates visual grouping without heavy dividers */
+.sb-section { padding: 14px 16px; border-bottom: 1px solid #0a1825; }
+.sb-label {
+  font-size: 9px; font-weight: 600; letter-spacing: 2px;
+  color: #1e4060; text-transform: uppercase; margin-bottom: 10px;
+}
+.sb-label.new-label { color: #331a66; } /* Purple tint = new GPU stage */
+
+/* ── File upload drop zone ─────────────────────────────────────────────────── */
+.upload-zone {
+  border: 1px dashed #0d3050; border-radius: 4px;
+  padding: 18px 12px; text-align: center; cursor: pointer; background: #030508;
+  transition: border-color 0.2s, background 0.2s;
+}
+.upload-zone:hover, .upload-zone.over { border-color: #00d084; background: #001a10; }
+.uz-icon { font-size: 22px; margin-bottom: 8px; }
+.uz-main { font-size: 11px; color: #6080a0; }
+.uz-sub  { font-size: 10px; color: #2a3a50; margin-top: 4px; }
+
+/* ── Parameter sliders ─────────────────────────────────────────────────────── */
+.param-row { display: flex; align-items: center; margin-bottom: 9px; }
+.param-row label { font-size: 10px; color: #5070a0; flex: 1; }
+.param-row input[type=range] { width: 70px; accent-color: #00d084; }
+.param-row.new-param input[type=range] { accent-color: #aa88ff; }
+
+/* Value display next to each slider */
+.pval          { font-size: 11px; font-weight: 500; color: #00d084; min-width: 34px; text-align: right; }
+.pval.new-pval { color: #aa88ff; }
+
+/* ── Run button ────────────────────────────────────────────────────────────── */
+/*
+  WHY display: block + width: 100% (not inline-block):
+    The button must stretch to fill the full sidebar width for easy clicking,
+    especially on touch devices. display: block is the most reliable cross-browser
+    way to achieve this for a <button> element.
+*/
+#detectBtn {
+  display: block; width: 100%;
+  background: linear-gradient(90deg, #003820, #005530);
+  color: #00d084; border: 1px solid #006640; border-radius: 3px;
+  padding: 9px; font-family: monospace; font-size: 12px; font-weight: 600;
+  letter-spacing: 2px; text-transform: uppercase; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+#detectBtn:hover:not(:disabled) { background: linear-gradient(90deg,#004820,#007740); color: #00ffaa; }
+#detectBtn:disabled { opacity: 0.3; cursor: default; }
+
+/* ── Status box ────────────────────────────────────────────────────────────── */
+.status-box {
+  font-size: 10px; color: #3a5070; padding: 8px 10px;
+  background: #030508; border: 1px solid #0a1525; border-radius: 3px; line-height: 1.6;
+  word-break: break-word;
+}
+.status-box.ok  { color: #00d084; border-color: #003820; background: #010a05; }
+.status-box.err { color: #ff5060; border-color: #300008; background: #0a0101; }
+.status-box.run { color: #5588ff; border-color: #0a1a40; background: #010408; }
+
+/* ── Stats grid ────────────────────────────────────────────────────────────── */
+/*
+  WHY 2×2 GRID:
+    Four metrics (Lines, Blobs, GPU ms, Total ms) fit naturally in two rows of two.
+    A wider single-row layout would require each cell to be too narrow to read the
+    values comfortably at the sidebar's fixed 255px width.
+*/
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.stat-cell {
+  background: #030508; border: 1px solid #0a1525; border-radius: 3px; padding: 6px 8px;
+}
+.stat-cell .sk { font-size: 9px; color: #2a4060; text-transform: uppercase; }
+.stat-cell .sv { font-size: 14px; font-weight: 600; color: #5588ff; }
+.stat-cell.sv-green  .sv { color: #00d084; }
+.stat-cell.sv-purple .sv { color: #aa88ff; }
+
+/* ── Progress bar ──────────────────────────────────────────────────────────── */
+.progress-wrap {
+  height: 2px; background: #0a1525; border-radius: 1px; overflow: hidden; margin-bottom: 10px;
+}
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #00d084, #aa88ff);
+  width: 0%;
+  transition: width 0.3s ease-out;
+}
+
+/* ── Canvas area (right panel) ─────────────────────────────────────────────── */
+/*
+  WHY overflow: auto ON #canvas-area:
+    The canvas area may contain more rows than fit on screen (input + output + 4 debug
+    canvases). overflow: auto adds a scrollbar only when needed, keeping the topbar and
+    sidebar always visible while allowing the canvas rows to scroll independently.
+*/
+#canvas-area {
+  flex: 1; overflow: auto; padding: 16px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+
+.row { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+
+/* ── Canvas cards ──────────────────────────────────────────────────────────── */
+.canvas-card {
+  background: #070a12; border: 1px solid #0d2030; border-radius: 6px;
+  overflow: hidden; flex: 1; min-width: 280px; max-width: 100%;
+}
+.canvas-card.new-card { border-color: #1a0840; } /* Purple border = GPU-rendered output */
+
+.card-header {
+  padding: 8px 14px; background: #060910;
+  border-bottom: 1px solid #0a1828; display: flex;
+}
+.card-header .ctitle { font-size: 10px; font-weight: 600; color: #1e4060; text-transform: uppercase; flex: 1; }
+.card-header .cstep  { font-size: 9px; color: #0d3050; }
+.card-header .cstep.new-step { color: #2a0f66; }
+
+.card-body {
+  padding: 12px; display: flex; flex-direction: column;
+  align-items: center; background: #010104; overflow: auto;
+}
+
+/* ── Canvas and image display ──────────────────────────────────────────────── */
+canvas, img {
+  display: block; border-radius: 4px;
+  max-width: 100%; height: auto;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Legend ────────────────────────────────────────────────────────────────── */
+.legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; justify-content: center; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #3a5070; }
+.legend-dot  { width: 12px; height: 12px; border-radius: 2px; }
+
+/* ── Placeholder text shown before images load ─────────────────────────────── */
+.placeholder { color: #2a3a50; font-size: 11px; text-align: center; padding: 40px; }
+
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────────────── -->
+<div id="topbar">
+  <h1>Text Line Detector</h1>
+  <span class="chip chip-gpu">WebGPU</span>
+  <span class="chip chip-wgsl">WGSL</span>
+  <span class="chip chip-new">∥ ATOMICS</span>
+  <span class="spacer"></span>
+  <!--
+    pipeline-steps: dimmed until gpuInit() resolves; main.js changes its colour to
+    signal that all 11 compute pipelines compiled successfully.
+  -->
+  <span class="pipeline-steps">
+    GRAY → SAT → SAUVOLA → DILATE → ZS
+    <span class="new-stage">→ CCA∥ → STATS∥ → GPU RENDER</span>
+  </span>
+</div>
+
+<!-- ── Main layout ──────────────────────────────────────────────────────────── -->
+<div id="layout">
+
+  <!-- ── LEFT SIDEBAR ──────────────────────────────────────────────────────── -->
+  <div id="sidebar">
+
+    <!-- File upload -->
+    <div class="sb-section">
+      <div class="sb-label">Input</div>
+      <div class="upload-zone" id="uploadZone">
+        <!--
+          WHY display:none ON fileInput:
+            The native <input type="file"> looks different across browsers and cannot be
+            styled to match this UI. Hiding it and forwarding clicks from the styled
+            upload-zone div is the standard cross-browser approach.
+        -->
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <div class="uz-icon">🖼</div>
+        <div class="uz-main">click or drag image</div>
+        <div class="uz-sub">PNG · JPG · BMP · TIFF</div>
+      </div>
+    </div>
+
+    <!-- Sauvola binarization parameters -->
+    <div class="sb-section">
+      <div class="sb-label">Binarization (Sauvola)</div>
+      <div class="param-row">
+        <label>Window radius</label>
+        <input type="range" id="p_radius" min="5" max="60" step="1" value="20">
+        <span class="pval" id="v_radius">20</span>
+      </div>
+      <div class="param-row">
+        <label>k factor</label>
+        <input type="range" id="p_k" min="0.05" max="0.5" step="0.01" value="0.2">
+        <span class="pval" id="v_k">0.20</span>
+      </div>
+    </div>
+
+    <!-- Dilation parameters -->
+    <div class="sb-section">
+      <div class="sb-label">Dilation (connect letters)</div>
+      <div class="param-row">
+        <label>Horiz half-width</label>
+        <input type="range" id="p_dilW" min="3" max="60" step="1" value="28">
+        <span class="pval" id="v_dilW">28</span>
+      </div>
+      <div class="param-row">
+        <label>Vert half-height</label>
+        <input type="range" id="p_dilH" min="1" max="15" step="1" value="4">
+        <span class="pval" id="v_dilH">4</span>
+      </div>
+    </div>
+
+    <!-- Filtering parameters -->
+    <div class="sb-section">
+      <div class="sb-label">Filtering</div>
+      <div class="param-row">
+        <label>Min blob area</label>
+        <input type="range" id="p_minArea" min="100" max="15000" step="100" value="400">
+        <span class="pval" id="v_minArea">400</span>
+      </div>
+      <div class="param-row">
+        <label>Min skeleton length</label>
+        <input type="range" id="p_minLen" min="10" max="400" step="10" value="30">
+        <span class="pval" id="v_minLen">30</span>
+      </div>
+      <div class="param-row">
+        <label>ZS iterations</label>
+        <input type="range" id="p_zsIters" min="10" max="100" step="5" value="35">
+        <span class="pval" id="v_zsIters">35</span>
+      </div>
+    </div>
+
+    <!--
+      GPU CCA section — purple accent distinguishes it from the classic stages above.
+      The ccaIters slider exposes the convergence budget for the parallel union-find.
+      More iterations = more accurate CCA for very large or irregularly shaped blobs,
+      at the cost of more GPU dispatches. 30 is sufficient for typical invoice images.
+    -->
+    <div class="sb-section">
+      <div class="sb-label new-label">⬡ GPU CCA (Parallel Union-Find)</div>
+      <div class="param-row new-param">
+        <label>Merge+Compress cycles</label>
+        <input type="range" id="p_ccaIters" min="5" max="60" step="5" value="30">
+        <span class="pval new-pval" id="v_ccaIters">30</span>
+      </div>
+    </div>
+
+    <!-- Run button + progress bar -->
+    <div class="sb-section">
+      <div class="progress-wrap">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <!--
+        disabled by default: enabled by ui/controls.js → loadFile() → onImageLoaded callback.
+        Prevents accidental clicks before an image is loaded.
+      -->
+      <button id="detectBtn" disabled>▶ RUN PIPELINE</button>
+    </div>
+
+    <!-- Status message box -->
+    <div class="sb-section">
+      <div class="status-box" id="statusBox">Upload an image to begin.</div>
+    </div>
+
+    <!-- Statistics grid -->
+    <div class="sb-section">
+      <div class="sb-label">Statistics</div>
+      <div class="stats-grid">
+        <div class="stat-cell sv-green">
+          <div class="sk">Lines</div>
+          <div class="sv" id="s_lines">—</div>
+        </div>
+        <div class="stat-cell sv-purple">
+          <!--
+            "CCA Blobs" = K (total connected components before filtering).
+            A much larger K than Lines indicates many small noise blobs — raise minArea.
+            K equal to Lines means every blob became a text line — raise dilH or dilW.
+          -->
+          <div class="sk">CCA Blobs</div>
+          <div class="sv" id="s_k">—</div>
+        </div>
+        <div class="stat-cell">
+          <div class="sk">GPU ms</div>
+          <div class="sv" id="s_gpu">—</div>
+        </div>
+        <div class="stat-cell">
+          <div class="sk">Total ms</div>
+          <div class="sv" id="s_total">—</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /#sidebar -->
+
+  <!-- ── CANVAS AREA ────────────────────────────────────────────────────────── -->
+  <div id="canvas-area">
+
+    <!-- Row 1: original input + GPU-rendered output -->
+    <div class="row">
+
+      <div class="canvas-card">
+        <div class="card-header">
+          <span class="ctitle">Input Image (original resolution)</span>
+          <span class="cstep">STEP 0</span>
+        </div>
+        <div class="card-body">
+          <div class="placeholder" id="ph_input">no image loaded</div>
+          <img id="inputImg" style="display:none" alt="Input document image">
+        </div>
+      </div>
+
+      <!--
+        new-card purple border = this canvas is GPU-rendered.
+        The OBB fill + stroke are drawn by SHADER_RENDER (shaders/render.js) running in
+        parallel across all output pixels. The dashed centre-line polylines and line
+        numbers are drawn on top by Canvas 2D in main.js after the GPU pass.
+      -->
+      <div class="canvas-card new-card">
+        <div class="card-header">
+          <span class="ctitle">Detected Text Lines (GPU-rendered OBBs)</span>
+          <span class="cstep new-step">GPU RENDER</span>
+        </div>
+        <div class="card-body">
+          <div class="placeholder" id="ph_output">awaiting detection</div>
+          <img id="outputImg" style="display:none" alt="Detected text line bounding boxes">
+          <div class="legend" id="legend" style="display:none"></div>
+        </div>
+      </div>
+
+    </div><!-- /.row -->
+
+    <!-- Row 2: four debug canvases — one per intermediate pipeline stage -->
+    <div class="row">
+
+      <div class="canvas-card">
+        <div class="card-header">
+          <span class="ctitle">Binary Map</span>
+          <span class="cstep">SAUVOLA</span>
+        </div>
+        <div class="card-body">
+          <!--
+            Showing the binary output helps diagnose binarization issues:
+            • Grainy texture = radius too small → increase radius.
+            • Missing thin strokes = k too high → decrease k.
+          -->
+          <canvas id="binCanvas" style="display:none"></canvas>
+          <div class="placeholder" id="ph_bin">—</div>
+        </div>
+      </div>
+
+      <div class="canvas-card">
+        <div class="card-header">
+          <span class="ctitle">Dilated Regions</span>
+          <span class="cstep">DILATION</span>
+        </div>
+        <div class="card-body">
+          <!--
+            If adjacent text lines merge here, reduce dilH.
+            If characters within a word don't connect, increase dilW.
+          -->
+          <canvas id="dilCanvas" style="display:none"></canvas>
+          <div class="placeholder" id="ph_dil">—</div>
+        </div>
+      </div>
+
+      <div class="canvas-card">
+        <div class="card-header">
+          <span class="ctitle">Skeleton (medial axis)</span>
+          <span class="cstep">ZHANG-SUEN</span>
+        </div>
+        <div class="card-body">
+          <!--
+            The skeleton should be a single 1-px-wide line through the centre of each
+            dilated blob. If it looks fragmented, increase zsIters.
+            If it has dangling branches, they will be filtered by minLen.
+          -->
+          <canvas id="sklCanvas" style="display:none"></canvas>
+          <div class="placeholder" id="ph_skl">—</div>
+        </div>
+      </div>
+
+      <!--
+        GPU Label Map — colour-coded output of the parallel union-find CCA.
+        Each connected component in the dilated image gets a distinct colour.
+        This is the most useful diagnostic for CCA issues:
+          • Two lines same colour = they merged (increase dilH spacing or decrease dilH).
+          • One line two colours = CCA didn't converge (increase ccaIters).
+          • Many tiny distinct blobs = noise not yet filtered by minArea.
+      -->
+      <div class="canvas-card new-card">
+        <div class="card-header">
+          <span class="ctitle">GPU Label Map (CCA∥ result)</span>
+          <span class="cstep new-step">ATOMIC U-F</span>
+        </div>
+        <div class="card-body">
+          <canvas id="lblCanvas" style="display:none"></canvas>
+          <div class="placeholder" id="ph_lbl">—</div>
+        </div>
+      </div>
+
+    </div><!-- /.row -->
+
+  </div><!-- /#canvas-area -->
+
+</div><!-- /#layout -->
+
+<!--
+  WHY type="module":
+    1. Enables import/export syntax — the only way to use separate .js files in the browser
+       without a bundler (no webpack, no Vite required).
+    2. Modules are always deferred (never block HTML parsing).
+    3. Modules run in strict mode automatically.
+    4. Each module's top-level variables are scoped to that module — no accidental globals.
+
+  WHY src="main.js" (not inline code):
+    main.js imports from other modules with relative paths. Inline <script type="module">
+    tags have no concept of a base URL for relative imports on some browsers.
+    An external src attribute always resolves imports relative to the HTML file's location.
+-->
+<script type="module" src="main.js"></script>
+
+</body>
+</html>

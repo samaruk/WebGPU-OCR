@@ -1,0 +1,68 @@
+
+:root{
+  --bg:#080d18;--card:#0f172a;--border:#1e293b;
+  --accent:#6366f1;--cyan:#22d3ee;--green:#10b981;--red:#f43f5e;
+  --text:#e2e8f0;--muted:#64748b;--r:10px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+.header{position:sticky;top:0;z-index:100;background:rgba(8,13,24,.92);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
+  padding:14px 24px;display:flex;flex-direction:column;gap:10px}
+.logo{font-size:1.2rem;font-weight:700}
+.logo span{background:linear-gradient(90deg,var(--accent),var(--cyan));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap}
+.btn{cursor:pointer;padding:7px 16px;border-radius:6px;font-size:.85rem;
+  font-weight:600;border:none;transition:all .2s}
+.file-btn{background:var(--border);color:var(--text);display:inline-flex;align-items:center}
+.file-btn:hover{background:#253148}
+.btn.primary{background:var(--accent);color:#fff}
+.btn.primary:hover{background:#4f46e5}
+.btn.secondary{background:transparent;border:1px solid var(--cyan);color:var(--cyan)}
+.btn.secondary:hover{background:rgba(34,211,238,.1)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.status-row{display:flex;align-items:center;gap:12px;font-size:.8rem;color:var(--muted)}
+.progress-wrap{flex:1;max-width:300px;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--cyan));
+  transition:width .4s ease;border-radius:2px}
+
+/* perf bar */
+#perf-bar{padding:10px 24px;background:rgba(255,255,255,.02);
+  border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.perf-label{font-size:.75rem;color:var(--muted);white-space:nowrap}
+#perf-chips{display:flex;gap:6px;flex-wrap:wrap}
+.perf-chip{font-size:.72rem;padding:2px 8px;border-radius:20px;
+  background:rgba(99,102,241,.15);color:var(--cyan);border:1px solid rgba(99,102,241,.3)}
+.perf-chip.slow{background:rgba(244,63,94,.15);color:var(--red);border-color:rgba(244,63,94,.3)}
+
+/* stage grid */
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:20px;padding:24px}
+.stage-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column}
+.stage-card.skipped{opacity:.4}
+.stage-card-header{display:flex;align-items:center;gap:10px;padding:10px 14px;
+  border-bottom:1px solid var(--border);background:rgba(255,255,255,.02)}
+.stage-num{width:26px;height:26px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent),var(--cyan));
+  display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:800;color:#fff}
+.stage-title{font-size:.85rem;font-weight:600}
+.stage-canvas-wrap{position:relative;background:#000;min-height:180px;
+  display:flex;align-items:center;justify-content:center}
+.stage-canvas-wrap canvas{max-width:100%;max-height:260px;object-fit:contain;display:block}
+.stage-placeholder{color:var(--muted);font-size:.8rem;position:absolute}
+.stage-footer{padding:8px 14px;font-size:.72rem;color:var(--muted);
+  border-top:1px solid var(--border);display:flex;justify-content:space-between}
+.badge{background:rgba(99,102,241,.15);color:var(--accent);
+  border-radius:4px;padding:2px 6px;font-size:.7rem}
+.skipped-label{font-size:.75rem;color:var(--muted);font-style:italic}
+
+/* results panel */
+#results-panel{margin:0 24px 24px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r);overflow:hidden}
+.results-header{padding:10px 14px;border-bottom:1px solid var(--border);
+  background:rgba(255,255,255,.02);display:flex;align-items:center;
+  justify-content:space-between;font-size:.85rem;font-weight:600}
+#results-text{padding:16px;font-family:'Cascadia Code','Fira Code',monospace;
+  font-size:.85rem;line-height:1.7;color:var(--text);white-space:pre-wrap;
+  min-height:80px;max-height:300px;overflow-y:auto}

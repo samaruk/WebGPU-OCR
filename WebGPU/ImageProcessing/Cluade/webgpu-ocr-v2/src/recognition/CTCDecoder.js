@@ -1,0 +1,1 @@
+export class CTCDecoder{decode(l,T,V){return{text:"",confidence:0};}}

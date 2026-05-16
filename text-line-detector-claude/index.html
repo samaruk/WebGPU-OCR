@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!--
+  index.html — Main entry point for the TextLine GPU Detector.
+
+  WHY THIS FILE IS MINIMAL:
+    All logic lives in ES modules. This file is only responsible for:
+      1. HTML structure (layout, controls, stage canvases)
+      2. CSS (visual design)
+      3. Importing ui.js and calling initUI()
+
+    No JavaScript algorithm code belongs here. Keeping HTML lean means
+    the visual structure can be redesigned without touching any pipeline code.
+
+  MODULE LOADING:
+    <script type="module"> enables ES module import/export syntax natively
+    in Chrome/Edge 113+. No bundler (Webpack/Vite) is needed.
+    The browser resolves all imports from the file paths in each module.
+
+  BROWSER REQUIREMENT:
+    WebGPU is required. As of 2024, supported in:
+      Chrome 113+, Edge 113+, Firefox Nightly (behind flag), Safari 18+.
+-->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEXTLINE / GPU DETECTOR</title>
+<!--
+  WHY THREE SEPARATE LINK TAGS FOR THE FONT:
+    preconnect (fonts.googleapis.com) — opens the TCP/TLS connection early so
+      the CSS request doesn't stall waiting for a handshake.
+    preconnect crossorigin (fonts.gstatic.com) — the actual font binary files
+      come from a different origin; crossorigin attribute is required for the
+      browser to reuse the preconnected socket for CORS font requests.
+    stylesheet — the actual @font-face declaration. Placed last so the two
+      preconnect hints have already warmed the connections by the time this
+      request fires, minimising the render-blocking delay.
+  WHY display=swap IN THE URL:
+    Tells Google Fonts to inject `font-display: swap` into the returned CSS.
+    The browser renders with a fallback system font immediately, then swaps
+    to IBM Plex Mono once it loads — no invisible text, no layout stall.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!--
+  WHY media="print" + onload:
+    A normal <link rel="stylesheet"> is render-blocking — the browser pauses
+    rendering until the stylesheet is downloaded and parsed. For a web font
+    declaration hosted on an external CDN this can stall first paint by
+    100-500ms on slow connections.
+    The media="print" trick loads the stylesheet in the background (print
+    media never blocks rendering). The onload handler immediately switches
+    the media to "all", applying the styles without ever blocking the parser.
+    The <noscript> fallback restores normal behaviour if JS is disabled.
+-->
+<link rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap">
+<noscript>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap">
+</noscript>
+<style>
+/*
+  WHY THIS VISUAL STYLE:
+    Industrial/oscilloscope aesthetic with amber-on-dark theme. Dark background
+    reduces eye strain during long annotation sessions. The stage canvases
+    show up clearly on dark backgrounds (binary: amber on black, skeleton: red
+    on black). Monospace font keeps numeric values aligned in the log.
+*/
+:root{
+  --bg:#050709;--s0:#0a0e12;--s1:#0f1620;--s2:#16202c;
+  --border:#1c2b3a;--amber:#f59e0b;--adim:#a36e08;
+  --aglow:rgba(245,158,11,.11);--green:#22c55e;--red:#ef4444;
+  --text:#c8d8e8;--muted:#4a6070;--font:'IBM Plex Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px;overflow:hidden}
+/*
+  WHY visibility:hidden ON BODY:
+    Prevents a Flash of Unstyled Content (FOUC). The page is invisible until
+    all stylesheets and fonts have loaded and initUI() has marked body.ready.
+    visibility:hidden (not display:none) preserves layout so there is no
+    reflow/layout shift when the content becomes visible.
+*/
+body{visibility:hidden}
+body.ready{visibility:visible}
+body::after{
+  /* Subtle scanline overlay — visual texture only, no functional effect */
+  content:'';position:fixed;inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.05)3px,rgba(0,0,0,.05)4px);
+  pointer-events:none;z-index:9998
+}
+
+/* ── Header ── */
+header{display:flex;align-items:center;gap:10px;padding:8px 18px;background:var(--s0);border-bottom:1px solid var(--border);flex-shrink:0}
+.logo{color:var(--amber);font-weight:600;font-size:13px;letter-spacing:.22em}
+.logo em{color:var(--muted);font-style:normal}
+/* Status chips show GPU state and processing state at a glance */
+.chip{padding:2px 8px;border:1px solid;font-size:10px;letter-spacing:.09em;flex-shrink:0}
+.chip.ok{color:var(--green);border-color:var(--green)}
+.chip.err{color:var(--red);border-color:var(--red)}
+.chip.wait{color:var(--muted);border-color:var(--border)}
+.chip.run{color:var(--amber);border-color:var(--amber)}
+.spacer{flex:1}
+
+/* ── Two-column layout: sidebar (controls) + main (stage canvases) ── */
+.app{display:grid;grid-template-columns:260px 1fr;height:calc(100vh - 40px)}
+
+/* ── Sidebar ── */
+aside{background:var(--s0);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.sec{padding:11px 13px;border-bottom:1px solid var(--border)}
+.sec-lbl{color:var(--amber);font-size:10px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:9px}
+
+/* Drop zone for image loading */
+.dz{border:1px dashed var(--adim);padding:16px 8px;text-align:center;color:var(--muted);cursor:pointer;transition:.2s;line-height:1.85}
+.dz:hover,.dz.over{border-color:var(--amber);color:var(--text);background:var(--aglow)}
+.dz .ic{font-size:20px;display:block;color:var(--amber);margin-bottom:2px}
+input[type=file]{display:none}
+
+/* Slider params */
+.param{margin-bottom:9px}
+.prow{display:flex;justify-content:space-between;margin-bottom:3px}
+.pname{color:var(--muted);font-size:11px}.pval{color:var(--amber);font-size:11px;min-width:36px;text-align:right}
+input[type=range]{-webkit-appearance:none;width:100%;height:2px;background:var(--s2);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;background:var(--amber);cursor:pointer;border-radius:0}
+.cblabel{display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--muted);font-size:11px}
+.cblabel input{accent-color:var(--amber)}
+
+/* Run button */
+.runbtn{width:100%;padding:8px;background:transparent;border:1px solid var(--amber);color:var(--amber);font-family:var(--font);font-size:11px;letter-spacing:.18em;text-transform:uppercase;cursor:pointer;transition:.2s}
+.runbtn:hover:not(:disabled){background:var(--aglow);box-shadow:0 0 12px var(--aglow)}
+.runbtn:disabled{color:var(--muted);border-color:var(--border);cursor:default}
+
+/* Processing log */
+.log{flex:1;overflow-y:auto;padding:7px 13px;font-size:11px;line-height:1.8}
+.log div{color:var(--muted)}.log div.ok{color:var(--green)}.log div.err{color:var(--red)}.log div.hi{color:var(--amber)}
+
+/* ── Pipeline stage canvases ── */
+main{overflow-y:auto;padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:9px;align-content:start}
+.stage{background:var(--s0);border:1px solid var(--border)}
+.sh{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:var(--s1);border-bottom:1px solid var(--border)}
+.sn{color:var(--amber);font-size:9px;letter-spacing:.17em;text-transform:uppercase}
+.si{color:var(--muted);font-size:9px}
+.stage canvas{display:block;width:100%;height:150px;background:#000;cursor:zoom-in}
+/* Wide result stage spans all columns */
+.wide{grid-column:1/-1}.wide canvas{height:260px}
+
+/* ── Zoom modal ── */
+#modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:9999;align-items:center;justify-content:center;cursor:zoom-out}
+#modal img{max-width:96vw;max-height:94vh;border:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">TEXTLINE<em>/</em>GPU <em style="color:var(--green);font-size:10px">v2</em></div>
+  <div id="chipGPU"  class="chip wait">LOADING</div>
+  <div id="chipProc" class="chip wait" style="display:none">IDLE</div>
+  <div class="spacer"></div>
+  <span style="color:var(--muted);font-size:10px">Chrome 113+ required</span>
+</header>
+
+<div class="app">
+
+<!-- ── LEFT SIDEBAR: all controls ── -->
+<aside>
+
+  <!-- Image input -->
+  <div class="sec">
+    <div class="sec-lbl">INPUT</div>
+    <div class="dz" id="dz">
+      <span class="ic">&#x25A1;</span>
+      Drop image / invoice<br>or click to browse
+    </div>
+    <input type="file" id="fi" accept="image/*">
+  </div>
+
+  <!-- Binarization parameters -->
+  <div class="sec">
+    <div class="sec-lbl">BINARIZE — SAUVOLA SAT</div>
+    <div class="param">
+      <div class="prow"><span class="pname">WINDOW RADIUS</span><span class="pval" id="vWR">40</span></div>
+      <input type="range" id="sWR" min="10" max="80" value="40">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">K FACTOR</span><span class="pval" id="vKF">0.30</span></div>
+      <input type="range" id="sKF" min="5" max="60" value="30">
+    </div>
+    <div class="param" style="margin-top:4px">
+      <label class="cblabel"><input type="checkbox" id="cbInv"> INVERT (dark bg)</label>
+    </div>
+  </div>
+
+  <!-- Skew correction parameters -->
+  <div class="sec">
+    <div class="sec-lbl">SKEW CORRECTION</div>
+    <div class="param">
+      <div class="prow"><span class="pname">SEARCH RANGE +/- deg</span><span class="pval" id="vSR">45</span></div>
+      <input type="range" id="sSR" min="5" max="45" value="45">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">MIN ANGLE THRESH deg</span><span class="pval" id="vST">0.5</span></div>
+      <input type="range" id="sST" min="2" max="40" value="5">
+    </div>
+  </div>
+
+  <!-- Morphological processing -->
+  <div class="sec">
+    <div class="sec-lbl">MORPHOLOGY</div>
+    <div class="param">
+      <div class="prow"><span class="pname">DILATION H</span><span class="pval" id="vDH">30</span></div>
+      <input type="range" id="sDH" min="5" max="80" value="30">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">DILATION V</span><span class="pval" id="vDV">4</span></div>
+      <input type="range" id="sDV" min="1" max="16" value="4">
+    </div>
+  </div>
+
+  <!-- Zhang-Suen skeleton -->
+  <div class="sec">
+    <div class="sec-lbl">SKELETON — ZHANG-SUEN</div>
+    <div class="param">
+      <div class="prow"><span class="pname">ITERATIONS</span><span class="pval" id="vZI">60</span></div>
+      <input type="range" id="sZI" min="10" max="120" value="60">
+    </div>
+  </div>
+
+  <!-- Graph traversal -->
+  <div class="sec">
+    <div class="sec-lbl">GRAPH — TRAVERSAL</div>
+    <div class="param">
+      <div class="prow"><span class="pname">MIN BRANCH PRUNE px</span><span class="pval" id="vBP">12</span></div>
+      <input type="range" id="sBP" min="3" max="50" value="12">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">RDP EPSILON</span><span class="pval" id="vRE">2.0</span></div>
+      <input type="range" id="sRE" min="2" max="40" value="20">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">CATMULL-ROM SAMPLES</span><span class="pval" id="vCS">5</span></div>
+      <input type="range" id="sCS" min="1" max="12" value="5">
+    </div>
+  </div>
+
+  <!-- Polygon sizing -->
+  <div class="sec">
+    <div class="sec-lbl">POLYGON HEIGHT</div>
+    <div class="param">
+      <div class="prow"><span class="pname">SCALE (1.0 = exact)</span><span class="pval" id="vHP">1.0</span></div>
+      <input type="range" id="sHP" min="5" max="25" value="10">
+    </div>
+    <div class="param">
+      <div class="prow"><span class="pname">MIN LINE WIDTH %</span><span class="pval" id="vML">5</span></div>
+      <input type="range" id="sML" min="1" max="30" value="5">
+    </div>
+  </div>
+
+  <!-- Run -->
+  <div class="sec">
+    <button class="runbtn" id="runBtn" disabled>&#x25BA; PROCESS IMAGE</button>
+  </div>
+
+  <!-- Processing log -->
+  <div class="log" id="logArea"></div>
+</aside>
+
+<!-- ── RIGHT MAIN: pipeline stage visualisation ── -->
+<main id="pipeline">
+
+  <!-- Each stage shows one GPU/CPU output for debugging -->
+
+  <div class="stage">
+    <div class="sh"><span class="sn">ORIGINAL</span><span class="si" id="iOrig">--</span></div>
+    <canvas id="cOrig"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">DENOISED GRAY</span><span class="si" id="iGray">--</span></div>
+    <canvas id="cGray"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">BINARY — SAT SAUVOLA</span><span class="si" id="iBin">--</span></div>
+    <canvas id="cBin"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">SKEW CORRECTED</span><span class="si" id="iRot">--</span></div>
+    <canvas id="cRot"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">DILATED LINES</span><span class="si" id="iDil">--</span></div>
+    <canvas id="cDil"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">SKELETON — ZHANG-SUEN</span><span class="si" id="iSkel">--</span></div>
+    <canvas id="cSkel"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">DIST TRANSFORM — JFA</span><span class="si" id="iDist">--</span></div>
+    <canvas id="cDist"></canvas>
+  </div>
+
+  <div class="stage">
+    <div class="sh"><span class="sn">GRAPH PATHS + OBB</span><span class="si" id="iPoly">--</span></div>
+    <canvas id="cPoly"></canvas>
+  </div>
+
+  <!-- Wide result: full-width final output with OBB overlays -->
+  <div class="stage wide">
+    <div class="sh">
+      <span class="sn">RESULT — TEXT LINE ORIENTED BOUNDING RECTANGLES</span>
+      <span class="si" id="iResult">--</span>
+    </div>
+    <canvas id="cResult"></canvas>
+  </div>
+
+</main>
+</div>
+
+<!-- Click-to-zoom modal -->
+<div id="modal"><img id="modalImg" alt=""></div>
+
+<!--
+  WHY type="module":
+    Enables native ES module import/export without a bundler.
+    All other JS files are loaded as imports from ui.js and pipeline.js.
+    The browser's module system handles caching and deduplication.
+-->
+<script type="module">
+  /*
+    WHY window 'load' INSTEAD OF RUNNING IMMEDIATELY:
+      ES module scripts execute after DOMContentLoaded but potentially before
+      external stylesheets and web fonts have finished loading. Calling initUI()
+      at that point forces the browser to calculate layout using not-yet-applied
+      styles — the "layout was forced before the page was fully loaded" warning.
+
+      window 'load' fires only after ALL resources (stylesheets, fonts, images)
+      are fully fetched and applied. Deferring to this event guarantees:
+        1. No forced layout from pre-paint style reads.
+        2. No FOUC — body becomes visible only after styles are ready.
+        3. document.fonts.ready has already resolved, so IBM Plex Mono is
+           available and no font-swap reflow occurs during first paint.
+
+    WHY THE readyState CHECK:
+      If the module is somehow parsed after 'load' has already fired (e.g. in
+      a cached/fast-load scenario), the event never fires again. The check
+      handles that edge case by calling initUI() synchronously.
+  */
+  import { initUI } from './ui.js';
+
+  function start() {
+    // document.fonts.ready ensures web fonts are parsed and applied,
+    // not just "loading" — eliminates the font-swap layout shift.
+    document.fonts.ready.then(() => {
+      initUI();
+      // Mark body as ready — removes visibility:hidden, shows the UI.
+      document.body.classList.add('ready');
+    });
+  }
+
+  function showBody() {
+    // Safety fallback: if fonts or other resources never resolve,
+    // show the page after 3 s so it is never permanently blank.
+    document.body.classList.add('ready');
+  }
+  const safetyTimer = setTimeout(showBody, 3000);
+
+  function startWithCleanup() {
+    clearTimeout(safetyTimer);   // cancel the safety timer — normal path
+    start();
+  }
+
+  if (document.readyState === 'complete') {
+    startWithCleanup();   // already loaded (cache hit or very fast network)
+  } else {
+    window.addEventListener('load', startWithCleanup);   // normal path
+  }
+</script>
+
+</body>
+</html>

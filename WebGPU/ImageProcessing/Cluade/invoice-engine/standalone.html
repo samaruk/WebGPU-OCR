@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Invoice Engine — WebGPU (Standalone)</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;--accent:#00e5a0;--accent2:#7b5cff;--text:#e8e8f0;--muted:#555570;--danger:#ff4d6d;--warn:#ffd166}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min-height:100vh;display:grid;grid-template-rows:56px 1fr;grid-template-columns:340px 1fr 320px;grid-template-areas:"header header header" "sidebar canvas panel"}
+header{grid-area:header;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.logo{font-family:'Space Mono',monospace;font-size:13px;color:var(--accent);letter-spacing:.12em;text-transform:uppercase}
+.badge{font-family:'Space Mono',monospace;font-size:9px;padding:3px 8px;border-radius:2px;background:#00e5a015;color:var(--accent);border:1px solid #00e5a030;text-transform:uppercase;letter-spacing:.15em}
+.status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--muted);transition:background .3s}
+.dot.ready{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.dot.busy{background:var(--warn);box-shadow:0 0 6px var(--warn);animation:pulse 1s infinite}
+.dot.error{background:var(--danger)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+aside{grid-area:sidebar;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.sidebar-section{padding:16px;border-bottom:1px solid var(--border)}
+.sidebar-section h3{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+.upload-zone{border:1px dashed var(--border);border-radius:4px;padding:24px 16px;text-align:center;cursor:pointer;transition:all .2s;background:#111118}
+.upload-zone:hover,.upload-zone.drag-over{border-color:var(--accent);background:#00e5a008}
+.upload-zone .icon{font-size:28px;margin-bottom:8px;opacity:.5}
+.upload-zone p{font-size:12px;color:var(--muted);line-height:1.5}
+.upload-zone strong{color:var(--accent)}
+#fileInput{display:none}
+.btn{width:100%;padding:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;border-radius:3px;transition:all .2s;margin-top:8px}
+.btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:#00e5a008}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#000}
+.btn.primary:hover:not(:disabled){background:#00ffb3;color:#000}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.stage-list{flex:1;overflow-y:auto;padding:12px}
+.stage-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:3px;font-size:11px;margin-bottom:2px}
+.stage-num{font-family:'Space Mono',monospace;font-size:9px;color:var(--muted);width:20px;text-align:right}
+.stage-icon{width:8px;height:8px;border-radius:50%;border:1px solid var(--muted);flex-shrink:0;transition:all .3s}
+.stage-item.done .stage-icon{background:var(--accent);border-color:var(--accent)}
+.stage-item.running .stage-icon{background:var(--warn);border-color:var(--warn);animation:pulse .8s infinite}
+.stage-item.error .stage-icon{background:var(--danger);border-color:var(--danger)}
+.stage-time{margin-left:auto;font-family:'Space Mono',monospace;font-size:9px;color:var(--muted)}
+.stage-item.done .stage-time{color:var(--accent)}
+#canvasArea{grid-area:canvas;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;position:relative;background:radial-gradient(ellipse at 30% 20%,#7b5cff08 0%,transparent 60%),radial-gradient(ellipse at 70% 80%,#00e5a008 0%,transparent 60%)}
+.canvas-toolbar{position:absolute;top:12px;left:12px;right:12px;display:flex;gap:8px;z-index:10;flex-wrap:wrap}
+.view-btn{padding:5px 12px;border:1px solid var(--border);background:#0a0a0fcc;backdrop-filter:blur(8px);color:var(--muted);font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;border-radius:2px;transition:all .2s}
+.view-btn.active,.view-btn:hover{border-color:var(--accent);color:var(--accent)}
+#mainCanvas{max-width:100%;max-height:calc(100vh - 100px);border-radius:2px;box-shadow:0 0 0 1px var(--border)}
+.canvas-placeholder{display:flex;flex-direction:column;align-items:center;gap:12px;color:var(--muted);font-size:13px}
+.canvas-placeholder .big-icon{font-size:48px;opacity:.3}
+#panel{grid-area:panel;border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.panel-tabs{display:flex;border-bottom:1px solid var(--border)}
+.panel-tab{flex:1;padding:12px 8px;font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;text-align:center;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .2s}
+.panel-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:#00e5a005}
+.panel-content{flex:1;overflow-y:auto;padding:12px}
+.panel-content::-webkit-scrollbar{width:4px}
+.panel-content::-webkit-scrollbar-thumb{background:var(--border)}
+.text-line-item{padding:8px 10px;border-radius:3px;border:1px solid var(--border);margin-bottom:6px;font-size:11px;line-height:1.5;cursor:pointer;transition:all .2s;background:var(--surface)}
+.text-line-item:hover{border-color:var(--accent2);background:#7b5cff08}
+.line-meta{font-family:'Space Mono',monospace;font-size:8px;color:var(--muted);margin-bottom:4px}
+.table-wrapper{overflow-x:auto;margin-top:8px}
+.invoice-table{width:100%;border-collapse:collapse;font-size:10px;font-family:'Space Mono',monospace}
+.invoice-table th{padding:8px 6px;text-align:left;border-bottom:1px solid var(--accent);color:var(--accent);font-size:8px;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.invoice-table td{padding:7px 6px;border-bottom:1px solid var(--border);color:var(--text);white-space:nowrap}
+.invoice-table tr:hover td{background:#ffffff05}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:10px}
+.stat-label{font-family:'Space Mono',monospace;font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin-bottom:4px}
+.stat-value{font-family:'Space Mono',monospace;font-size:18px;color:var(--accent);font-weight:700}
+.progress-bar{height:2px;background:var(--border);border-radius:1px;overflow:hidden;margin:8px 0}
+.progress-fill{height:100%;background:var(--accent);border-radius:1px;width:0%;transition:width .3s}
+.log-area{font-family:'Space Mono',monospace;font-size:9px;color:var(--muted);line-height:1.8;border-top:1px solid var(--border);padding:10px;height:120px;overflow-y:auto;background:#05050a}
+.log-line.ok{color:var(--accent)}.log-line.warn{color:var(--warn)}.log-line.err{color:var(--danger)}
+.canvas-wrapper{position:relative;display:inline-block}
+.circle-legend{font-family:'Space Mono',monospace;font-size:9px;color:var(--muted);padding:8px;border:1px solid var(--border);border-radius:3px;margin-bottom:10px;line-height:1.8}
+.legend-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">Invoice Engine</span>
+  <span class="badge">WebGPU</span>
+  <span class="badge" style="border-color:#7b5cff30;background:#7b5cff10;color:#7b5cff">JFA · Circle Detection</span>
+  <div class="status">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Initializing…</span>
+  </div>
+</header>
+
+<aside>
+  <div class="sidebar-section">
+    <h3>Input</h3>
+    <div class="upload-zone" id="dropZone">
+      <div class="icon">📄</div>
+      <p>Drop invoice image here<br><strong>or click to browse</strong></p>
+    </div>
+    <input type="file" id="fileInput" accept="image/*" />
+    <button class="btn primary" id="runBtn" disabled>▶ Run Pipeline</button>
+    <button class="btn" id="resetBtn" disabled>↺ Reset</button>
+  </div>
+  <div class="sidebar-section">
+    <h3>Pipeline — 14 Stages</h3>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  </div>
+  <div class="stage-list" id="stageList"></div>
+  <div class="log-area" id="logArea"></div>
+</aside>
+
+<div id="canvasArea">
+  <div class="canvas-toolbar" id="toolbar" style="display:none">
+    <button class="view-btn active" data-view="original">Original</button>
+    <button class="view-btn" data-view="gray">Grayscale</button>
+    <button class="view-btn" data-view="threshold">Threshold</button>
+    <button class="view-btn" data-view="distance">Distance</button>
+    <button class="view-btn" data-view="circles">Circles</button>
+    <button class="view-btn" data-view="lines">Lines</button>
+    <button class="view-btn" data-view="table">Table</button>
+  </div>
+  <div class="canvas-placeholder" id="placeholder">
+    <div class="big-icon">🔬</div>
+    <span>Upload an invoice to begin analysis</span>
+  </div>
+  <div class="canvas-wrapper" id="canvasWrapper" style="display:none">
+    <canvas id="mainCanvas"></canvas>
+    <canvas id="overlayCanvas" style="position:absolute;top:0;left:0;pointer-events:none"></canvas>
+  </div>
+</div>
+
+<div id="panel">
+  <div class="panel-tabs">
+    <div class="panel-tab active" data-tab="circles">Circles</div>
+    <div class="panel-tab" data-tab="lines">Text Lines</div>
+    <div class="panel-tab" data-tab="table">Table</div>
+    <div class="panel-tab" data-tab="stats">Stats</div>
+  </div>
+  <div class="panel-content" id="panelContent">
+    <div style="color:var(--muted);font-size:11px;text-align:center;padding:40px 0">Run the pipeline to see results</div>
+  </div>
+</div>
+
+<script type="module">
+// ─── WGSL Shaders ─────────────────────────────────────────────────────────────
+const SHADERS = {
+grayscale: `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> weights: vec4<f32>;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let dims = textureDimensions(src);
+  if(gid.x>=dims.x||gid.y>=dims.y){return;}
+  let c = textureLoad(src,vec2<i32>(gid.xy),0);
+  let g = dot(c.rgb,weights.xyz);
+  textureStore(dst,vec2<i32>(gid.xy),vec4<f32>(g,g,g,1.0));
+}`,
+
+threshold: `
+struct P{width:u32,height:u32,block_half:u32,C:f32}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if(gid.x>=p.width||gid.y>=p.height){return;}
+  let cx=i32(gid.x);let cy=i32(gid.y);let r=i32(p.block_half);
+  var sum:f32=0.0;var cnt:f32=0.0;
+  for(var dy:i32=-r;dy<=r;dy++){for(var dx:i32=-r;dx<=r;dx++){
+    let nx=clamp(cx+dx,0,i32(p.width)-1);let ny=clamp(cy+dy,0,i32(p.height)-1);
+    sum+=textureLoad(src,vec2<i32>(nx,ny),0).r;cnt+=1.0;}}
+  let mean=sum/cnt;
+  let pixel=textureLoad(src,vec2<i32>(cx,cy),0).r;
+  let fg=select(1.0,0.0,pixel<mean-p.C/255.0);
+  textureStore(dst,vec2<i32>(gid.xy),vec4<f32>(fg,fg,fg,1.0));
+}`,
+
+jfa_init: `
+struct P{width:u32,height:u32}
+@group(0) @binding(0) var threshold_tex: texture_2d<f32>;
+@group(0) @binding(1) var seed_out: texture_storage_2d<rgba16uint, write>;
+@group(0) @binding(2) var<uniform> p: P;
+const SENTINEL:u32=0xFFFFu;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if(gid.x>=p.width||gid.y>=p.height){return;}
+  let v=textureLoad(threshold_tex,vec2<i32>(gid.xy),0).r;
+  if(v<0.5){textureStore(seed_out,vec2<i32>(gid.xy),vec4<u32>(gid.x,gid.y,0u,0u));}
+  else{textureStore(seed_out,vec2<i32>(gid.xy),vec4<u32>(SENTINEL,SENTINEL,0u,0u));}
+}`,
+
+jfa_pass: `
+struct P{width:u32,height:u32,step:u32,_pad:u32}
+@group(0) @binding(0) var seed_in: texture_2d<u32>;
+@group(0) @binding(1) var seed_out: texture_storage_2d<rgba16uint, write>;
+@group(0) @binding(2) var<uniform> p: P;
+const SENTINEL:u32=0xFFFFu;
+fn dist2(ax:u32,ay:u32,bx:u32,by:u32)->u32{let dx=i32(ax)-i32(bx);let dy=i32(ay)-i32(by);return u32(dx*dx+dy*dy);}
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let W=p.width;let H=p.height;
+  if(gid.x>=W||gid.y>=H){return;}
+  let cx=i32(gid.x);let cy=i32(gid.y);let step=i32(p.step);
+  var best_seed=textureLoad(seed_in,vec2<i32>(cx,cy),0).xy;
+  var best_dist:u32=0xFFFFFFFFu;
+  if(best_seed.x!=SENTINEL){best_dist=dist2(gid.x,gid.y,best_seed.x,best_seed.y);}
+  for(var dy:i32=-1;dy<=1;dy++){for(var dx:i32=-1;dx<=1;dx++){
+    if(dx==0&&dy==0){continue;}
+    let nx=cx+dx*step;let ny=cy+dy*step;
+    if(nx<0||ny<0||nx>=i32(W)||ny>=i32(H)){continue;}
+    let ns=textureLoad(seed_in,vec2<i32>(nx,ny),0).xy;
+    if(ns.x==SENTINEL){continue;}
+    let d=dist2(gid.x,gid.y,ns.x,ns.y);
+    if(d<best_dist){best_dist=d;best_seed=ns;}}}
+  if(best_seed.x==SENTINEL){textureStore(seed_out,vec2<i32>(gid.xy),vec4<u32>(SENTINEL,SENTINEL,0u,0u));}
+  else{textureStore(seed_out,vec2<i32>(gid.xy),vec4<u32>(best_seed.x,best_seed.y,0u,0u));}
+}`,
+
+localmax: `
+struct P{width:u32,height:u32,window_r:u32,_p:u32,min_r:f32,max_r:f32,thresh:f32,_p2:f32}
+@group(0) @binding(0) var seed_tex: texture_2d<u32>;
+@group(0) @binding(1) var dist_out: texture_storage_2d<r32float, write>;
+@group(0) @binding(2) var<uniform> p: P;
+const SENTINEL:u32=0xFFFFu;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if(gid.x>=p.width||gid.y>=p.height){return;}
+  let seed=textureLoad(seed_tex,vec2<i32>(gid.xy),0).xy;
+  var d:f32=0.0;
+  if(seed.x!=SENTINEL){let dx=f32(i32(gid.x)-i32(seed.x));let dy=f32(i32(gid.y)-i32(seed.y));d=sqrt(dx*dx+dy*dy);}
+  textureStore(dist_out,vec2<i32>(gid.xy),vec4<f32>(d,0.0,0.0,1.0));
+}`,
+
+morph_h: `
+struct P{width:u32,height:u32,kh:u32,_p:u32}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if(gid.x>=p.width||gid.y>=p.height){return;}
+  let cx=i32(gid.x);let cy=i32(gid.y);let kh=i32(p.kh);
+  var maxV:f32=0.0;
+  for(var dx:i32=-kh;dx<=kh;dx++){let nx=clamp(cx+dx,0,i32(p.width)-1);maxV=max(maxV,1.0-textureLoad(src,vec2<i32>(nx,cy),0).r);}
+  let v=1.0-maxV;textureStore(dst,vec2<i32>(gid.xy),vec4<f32>(v,v,v,1.0));
+}`,
+
+morph_v: `
+struct P{width:u32,height:u32,kh:u32,_p:u32}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(16,16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if(gid.x>=p.width||gid.y>=p.height){return;}
+  let cx=i32(gid.x);let cy=i32(gid.y);let kh=i32(p.kh);
+  var maxV:f32=0.0;
+  for(var dy:i32=-kh;dy<=kh;dy++){let ny=clamp(cy+dy,0,i32(p.height)-1);maxV=max(maxV,1.0-textureLoad(src,vec2<i32>(cx,ny),0).r);}
+  let v=1.0-maxV;textureStore(dst,vec2<i32>(gid.xy),vec4<f32>(v,v,v,1.0));
+}`,
+
+proj_row: `
+struct P{width:u32,height:u32}
+@group(0) @binding(0) var morph_tex: texture_2d<f32>;
+@group(0) @binding(1) var<storage,read_write> row_sums: array<u32>;
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let row=gid.x;if(row>=p.height){return;}
+  var count:u32=0u;
+  for(var x:u32=0u;x<p.width;x++){let v=textureLoad(morph_tex,vec2<i32>(i32(x),i32(row)),0).r;if(v<0.5){count++;}}
+  row_sums[row]=count;
+}`,
+
+proj_col: `
+struct P{width:u32,height:u32}
+@group(0) @binding(0) var morph_tex: texture_2d<f32>;
+@group(0) @binding(1) var<storage,read_write> col_sums: array<u32>;
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let col=gid.x;if(col>=p.width){return;}
+  var count:u32=0u;
+  for(var y:u32=0u;y<p.height;y++){let v=textureLoad(morph_tex,vec2<i32>(i32(col),i32(y)),0).r;if(v<0.5){count++;}}
+  col_sums[col]=count;
+}`
+};
+
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+const CFG = {
+  grayscale: { rW: 0.299, gW: 0.587, bW: 0.114 },
+  threshold: { blockHalf: 15, C: 8 },
+  circles: { localWindowRadius: 5, minRadius: 4, maxRadiusRatio: 0.15, scoreThreshold: 0.40, maxCircles: 6000 },
+  morphology: { horizontalKernelHalf: 30, verticalKernelHalf: 2 },
+  textLines: { rowGapTolerance: 6, minLineHeight: 5 },
+  table: { minCols: 2, minRows: 2, colGapTolerance: 10, rowGapTolerance: 8 },
+};
+
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let gpu = null, device = null;
+let currentImageData = null;
+let results = { circles: [], textLines: [], table: null, ocrLines: [], tableData: null };
+let textures = {}, buffers = {};
+let pipelines = {};
+let activeView = 'original', activeTab = 'circles';
+
+// DOM
+const $ = id => document.getElementById(id);
+const statusDot = $('statusDot'), statusText = $('statusText');
+const fileInput = $('fileInput'), dropZone = $('dropZone');
+const runBtn = $('runBtn'), resetBtn = $('resetBtn');
+const stageList = $('stageList'), logArea = $('logArea'), progressFill = $('progressFill');
+const mainCanvas = $('mainCanvas'), overlayCanvas = $('overlayCanvas');
+const placeholder = $('placeholder'), canvasWrapper = $('canvasWrapper'), toolbar = $('toolbar');
+const panelContent = $('panelContent');
+
+const STAGES = [
+  'Upload & Decode Texture','Grayscale Conversion','Adaptive Threshold',
+  'JFA Seed Init','Jump Flood Passes','Distance Field Finalize',
+  'Local Max Circle Detection','Morphology — Horizontal','Morphology — Vertical',
+  'Row Projection','Column Projection','Table Region Detection',
+  'Region Cropper','OCR (Tesseract)'
+];
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+const cdiv = (a,b) => Math.ceil(a/b);
+const nextPow2 = n => { let p=1; while(p<n)p<<=1; return p; };
+
+function setStatus(s) {
+  statusDot.className = 'dot ' + s;
+  statusText.textContent = {init:'Initializing…',ready:'Ready',busy:'Processing…',error:'Error'}[s] ?? s;
+}
+function log(msg, lvl='info') {
+  const el = document.createElement('div');
+  el.className = 'log-line ' + lvl;
+  el.textContent = msg;
+  logArea.appendChild(el);
+  logArea.scrollTop = logArea.scrollHeight;
+}
+function stageState(idx, state, ms) {
+  const el = stageList.children[idx];
+  if (!el) return;
+  el.className = 'stage-item ' + state;
+  if (ms != null) el.querySelector('.stage-time').textContent = ms.toFixed(0) + 'ms';
+  progressFill.style.width = ((idx + 1) / STAGES.length * 100) + '%';
+}
+function renderStageList() {
+  stageList.innerHTML = '';
+  STAGES.forEach((name, i) => {
+    const el = document.createElement('div');
+    el.className = 'stage-item';
+    el.innerHTML = `<span class="stage-num">${String(i+1).padStart(2,'0')}</span><div class="stage-icon"></div><span style="flex:1;font-size:10px">${name}</span><span class="stage-time"></span>`;
+    stageList.appendChild(el);
+  });
+}
+
+async function readTexture(tex, w, h, bpp=4) {
+  const bpr = Math.ceil(w * bpp / 256) * 256;
+  const staging = device.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: tex }, { buffer: staging, bytesPerRow: bpr, rowsPerImage: h }, [w, h, 1]);
+  device.queue.submit([enc.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const raw = new Uint8Array(staging.getMappedRange());
+  const out = new Uint8Array(w * h * bpp);
+  for (let r = 0; r < h; r++) out.set(raw.subarray(r * bpr, r * bpr + w * bpp), r * w * bpp);
+  staging.unmap(); staging.destroy();
+  return out;
+}
+
+async function readBuffer(buf, bytes) {
+  const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(buf, 0, staging, 0, bytes);
+  device.queue.submit([enc.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const res = staging.getMappedRange().slice(0);
+  staging.unmap(); staging.destroy();
+  return res;
+}
+
+function makeTex(name, w, h, fmt, extra=0) {
+  const tex = device.createTexture({ label: name, size: [w, h, 1], format: fmt,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING |
+           GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | extra });
+  textures[name] = tex;
+  return tex;
+}
+
+function makePipeline(name, shader) {
+  if (pipelines[name]) return Promise.resolve(pipelines[name]);
+  const mod = device.createShaderModule({ label: name, code: shader });
+  return device.createComputePipelineAsync({ label: name, layout: 'auto', compute: { module: mod, entryPoint: 'main' } })
+    .then(p => { pipelines[name] = p; return p; });
+}
+
+function dispatch(enc, pipeline, entries, wx, wy=1) {
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+  const pass = enc.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
+  pass.dispatchWorkgroups(wx, wy); pass.end();
+}
+
+function uniformBuf(data) {
+  const buf = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+  new (data.constructor)(buf.getMappedRange()).set(data); buf.unmap(); return buf;
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+async function init() {
+  setStatus('init');
+  renderStageList();
+  if (!navigator.gpu) { setStatus('error'); log('WebGPU not supported','err'); return; }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+  if (!adapter) { setStatus('error'); log('No WebGPU adapter','err'); return; }
+  device = await adapter.requestDevice();
+  gpu = adapter;
+  log('WebGPU ready ✓','ok');
+  setStatus('ready');
+}
+
+// ─── IMAGE UPLOAD ─────────────────────────────────────────────────────────────
+async function handleFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const img = await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=URL.createObjectURL(file)});
+  let w=img.naturalWidth, h=img.naturalHeight;
+  const maxD=2048, s=Math.min(1,maxD/Math.max(w,h));
+  w=Math.round(w*s); h=Math.round(h*s);
+  const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h;
+  tmp.getContext('2d').drawImage(img,0,0,w,h);
+  currentImageData = tmp.getContext('2d').getImageData(0,0,w,h);
+  showImage(); runBtn.disabled=false; resetBtn.disabled=false;
+  log(`Image ${w}×${h}px loaded`,'ok');
+}
+
+function showImage() {
+  const {width:iw,height:ih}=currentImageData;
+  const maxW=mainCanvas.parentElement.clientWidth-40;
+  const maxH=window.innerHeight-120;
+  const scale=Math.min(1,maxW/iw,maxH/ih);
+  const cw=Math.round(iw*scale), ch=Math.round(ih*scale);
+  mainCanvas.width=cw; mainCanvas.height=ch;
+  overlayCanvas.width=cw; overlayCanvas.height=ch;
+  const c2=mainCanvas.getContext('2d');
+  const tmp=new OffscreenCanvas(iw,ih);
+  tmp.getContext('2d').putImageData(currentImageData,0,0);
+  c2.drawImage(tmp,0,0,cw,ch);
+  placeholder.style.display='none'; canvasWrapper.style.display='block'; toolbar.style.display='flex';
+}
+
+// ─── PIPELINE ─────────────────────────────────────────────────────────────────
+async function runPipeline() {
+  if (!currentImageData || !device) return;
+  runBtn.disabled=true; setStatus('busy'); progressFill.style.width='0%'; renderStageList();
+  Object.values(textures).forEach(t=>{ try{t.destroy()}catch{} }); textures={};
+  Object.values(buffers).forEach(b=>{ try{b.destroy()}catch{} }); buffers={};
+
+  const {width:iw,height:ih,data} = currentImageData;
+  let t;
+
+  try {
+    // 1. Upload
+    stageState(0,'running'); t=performance.now();
+    const srcTex = device.createTexture({ label:'source',size:[iw,ih,1],format:'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC|GPUTextureUsage.RENDER_ATTACHMENT });
+    device.queue.writeTexture({texture:srcTex},data,{bytesPerRow:iw*4,rowsPerImage:ih},[iw,ih,1]);
+    textures.source = srcTex;
+    stageState(0,'done',performance.now()-t); log('[01] Texture uploaded','ok');
+
+    // 2. Grayscale
+    stageState(1,'running'); t=performance.now();
+    makeTex('gray',iw,ih,'rgba8unorm');
+    const gPipeline = await makePipeline('grayscale', SHADERS.grayscale);
+    const gBuf = uniformBuf(new Float32Array([CFG.grayscale.rW, CFG.grayscale.gW, CFG.grayscale.bW, 0]));
+    const enc2 = device.createCommandEncoder();
+    dispatch(enc2, gPipeline, [
+      {binding:0,resource:textures.source.createView()},
+      {binding:1,resource:textures.gray.createView()},
+      {binding:2,resource:{buffer:gBuf}}
+    ], cdiv(iw,16), cdiv(ih,16));
+    device.queue.submit([enc2.finish()]); await device.queue.onSubmittedWorkDone();
+    gBuf.destroy();
+    stageState(1,'done',performance.now()-t); log('[02] Grayscale done','ok');
+
+    // 3. Threshold
+    stageState(2,'running'); t=performance.now();
+    makeTex('threshold',iw,ih,'rgba8unorm');
+    const tPipeline = await makePipeline('threshold', SHADERS.threshold);
+    const tBuf = device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(tBuf,0,new Uint32Array([iw,ih,CFG.threshold.blockHalf,0]));
+    device.queue.writeBuffer(tBuf,12,new Float32Array([CFG.threshold.C]));
+    const enc3 = device.createCommandEncoder();
+    dispatch(enc3, tPipeline, [
+      {binding:0,resource:textures.gray.createView()},
+      {binding:1,resource:textures.threshold.createView()},
+      {binding:2,resource:{buffer:tBuf}}
+    ], cdiv(iw,16), cdiv(ih,16));
+    device.queue.submit([enc3.finish()]); await device.queue.onSubmittedWorkDone();
+    tBuf.destroy();
+    stageState(2,'done',performance.now()-t); log('[03] Threshold done','ok');
+
+    // 4. JFA Init
+    stageState(3,'running'); t=performance.now();
+    const ping = device.createTexture({label:'jfa_ping',size:[iw,ih,1],format:'rgba16uint',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC});
+    const pong = device.createTexture({label:'jfa_pong',size:[iw,ih,1],format:'rgba16uint',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC});
+    textures.jfa_ping=ping; textures.jfa_pong=pong;
+    const jiPipeline = await makePipeline('jfa_init', SHADERS.jfa_init);
+    const jiBuf = uniformBuf(new Uint32Array([iw,ih]));
+    const enc4 = device.createCommandEncoder();
+    dispatch(enc4, jiPipeline, [
+      {binding:0,resource:textures.threshold.createView()},
+      {binding:1,resource:ping.createView()},
+      {binding:2,resource:{buffer:jiBuf}}
+    ], cdiv(iw,16), cdiv(ih,16));
+    device.queue.submit([enc4.finish()]); await device.queue.onSubmittedWorkDone();
+    jiBuf.destroy();
+    stageState(3,'done',performance.now()-t); log('[04] JFA seeded','ok');
+
+    // 5. JFA Passes
+    stageState(4,'running'); t=performance.now();
+    const jfaPipeline = await makePipeline('jfa_pass', SHADERS.jfa_pass);
+    const pp = [ping, pong]; let src=0;
+    let step = nextPow2(Math.max(iw,ih)) >> 1;
+    while (step >= 1) {
+      const jBuf = uniformBuf(new Uint32Array([iw,ih,step,0]));
+      const enc5 = device.createCommandEncoder();
+      dispatch(enc5, jfaPipeline, [
+        {binding:0,resource:pp[src].createView()},
+        {binding:1,resource:pp[1-src].createView()},
+        {binding:2,resource:{buffer:jBuf}}
+      ], cdiv(iw,16), cdiv(ih,16));
+      device.queue.submit([enc5.finish()]); await device.queue.onSubmittedWorkDone();
+      jBuf.destroy(); src=1-src; step>>=1;
+    }
+    const finalIdx = src;
+    stageState(4,'done',performance.now()-t); log('[05] JFA done','ok');
+
+    // 6. Distance finalize
+    stageState(5,'running'); t=performance.now();
+    const distTex = device.createTexture({label:'distance',size:[iw,ih,1],format:'r32float',
+      usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC});
+    textures.distance = distTex;
+    const dfPipeline = await makePipeline('distance_finalize', SHADERS.localmax);
+    const dfBuf = device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    device.queue.writeBuffer(dfBuf,0,new Uint32Array([iw,ih,5,0]));
+    device.queue.writeBuffer(dfBuf,16,new Float32Array([4,Math.min(iw,ih)*0.15,0.45,0]));
+    const enc6 = device.createCommandEncoder();
+    dispatch(enc6, dfPipeline, [
+      {binding:0,resource:pp[finalIdx].createView()},
+      {binding:1,resource:distTex.createView()},
+      {binding:2,resource:{buffer:dfBuf}}
+    ], cdiv(iw,16), cdiv(ih,16));
+    device.queue.submit([enc6.finish()]); await device.queue.onSubmittedWorkDone();
+    dfBuf.destroy();
+    stageState(5,'done',performance.now()-t); log('[06] Distance field ready','ok');
+
+    // 7. Local max circles (CPU)
+    stageState(6,'running'); t=performance.now();
+    const rawDist = await readTexture(distTex, iw, ih, 4);
+    const dist = new Float32Array(rawDist.buffer);
+    let globalMax=0; for(let i=0;i<dist.length;i++) globalMax=Math.max(globalMax,dist[i]);
+    const circles=[];
+    const {localWindowRadius:wr,minRadius,maxRadiusRatio,scoreThreshold,maxCircles} = CFG.circles;
+    const maxRadius = Math.min(iw,ih)*maxRadiusRatio;
+    for(let y=0;y<ih;y++) {
+      for(let x=0;x<iw;x++) {
+        const d=dist[y*iw+x];
+        if(d<minRadius||d>maxRadius||d/globalMax<scoreThreshold) continue;
+        let isMax=true;
+        outer: for(let dy=-wr;dy<=wr;dy++) for(let dx=-wr;dx<=wr;dx++){
+          if(dx===0&&dy===0) continue;
+          const nx=x+dx,ny=y+dy;
+          if(nx<0||ny<0||nx>=iw||ny>=ih) continue;
+          if(dist[ny*iw+nx]>d){isMax=false;break outer;}
+        }
+        if(isMax){circles.push({x,y,r:d,score:d/globalMax});if(circles.length>=maxCircles){y=ih;break;}}
+      }
+    }
+    circles.sort((a,b)=>b.score-a.score);
+    results.circles=circles;
+    stageState(6,'done',performance.now()-t); log(`[07] ${circles.length} circles detected`,'ok');
+
+    // 8. Morph H
+    stageState(7,'running'); t=performance.now();
+    makeTex('morph_h',iw,ih,'rgba8unorm');
+    const mhPipeline = await makePipeline('morph_h', SHADERS.morph_h);
+    const mhBuf = uniformBuf(new Uint32Array([iw,ih,CFG.morphology.horizontalKernelHalf,0]));
+    const enc8=device.createCommandEncoder();
+    dispatch(enc8,mhPipeline,[
+      {binding:0,resource:textures.threshold.createView()},
+      {binding:1,resource:textures.morph_h.createView()},
+      {binding:2,resource:{buffer:mhBuf}}
+    ],cdiv(iw,16),cdiv(ih,16));
+    device.queue.submit([enc8.finish()]); await device.queue.onSubmittedWorkDone();
+    mhBuf.destroy();
+    stageState(7,'done',performance.now()-t); log('[08] H-morph done','ok');
+
+    // 9. Morph V
+    stageState(8,'running'); t=performance.now();
+    makeTex('morph_v',iw,ih,'rgba8unorm');
+    const mvPipeline = await makePipeline('morph_v', SHADERS.morph_v);
+    const mvBuf = uniformBuf(new Uint32Array([iw,ih,CFG.morphology.verticalKernelHalf,0]));
+    const enc9=device.createCommandEncoder();
+    dispatch(enc9,mvPipeline,[
+      {binding:0,resource:textures.morph_h.createView()},
+      {binding:1,resource:textures.morph_v.createView()},
+      {binding:2,resource:{buffer:mvBuf}}
+    ],cdiv(iw,16),cdiv(ih,16));
+    device.queue.submit([enc9.finish()]); await device.queue.onSubmittedWorkDone();
+    mvBuf.destroy();
+    stageState(8,'done',performance.now()-t); log('[09] V-morph done','ok');
+
+    // 10. Row projection
+    stageState(9,'running'); t=performance.now();
+    const rowBuf = device.createBuffer({size:ih*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    buffers.row_sums = rowBuf;
+    const rpPipeline = await makePipeline('proj_row', SHADERS.proj_row);
+    const rpBuf = uniformBuf(new Uint32Array([iw,ih]));
+    const enc10=device.createCommandEncoder();
+    dispatch(enc10,rpPipeline,[
+      {binding:0,resource:textures.morph_v.createView()},
+      {binding:1,resource:{buffer:rowBuf}},
+      {binding:2,resource:{buffer:rpBuf}}
+    ],cdiv(ih,256));
+    device.queue.submit([enc10.finish()]); await device.queue.onSubmittedWorkDone();
+    rpBuf.destroy();
+    stageState(9,'done',performance.now()-t); log('[10] Row projection done','ok');
+
+    // 11. Col projection
+    stageState(10,'running'); t=performance.now();
+    const colBuf = device.createBuffer({size:iw*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    buffers.col_sums = colBuf;
+    const cpPipeline = await makePipeline('proj_col', SHADERS.proj_col);
+    const cpBuf = uniformBuf(new Uint32Array([iw,ih]));
+    const enc11=device.createCommandEncoder();
+    dispatch(enc11,cpPipeline,[
+      {binding:0,resource:textures.morph_v.createView()},
+      {binding:1,resource:{buffer:colBuf}},
+      {binding:2,resource:{buffer:cpBuf}}
+    ],cdiv(iw,256));
+    device.queue.submit([enc11.finish()]); await device.queue.onSubmittedWorkDone();
+    cpBuf.destroy();
+    stageState(10,'done',performance.now()-t); log('[11] Col projection done','ok');
+
+    // 12. Table detector
+    stageState(11,'running'); t=performance.now();
+    const rowRaw = await readBuffer(rowBuf, ih*4);
+    const colRaw = await readBuffer(colBuf, iw*4);
+    const rowSums = new Uint32Array(rowRaw);
+    const colSums = new Uint32Array(colRaw);
+
+    function detectBands(proj, gapTol, minSz, minCnt) {
+      const bands=[]; let start=-1,gap=0;
+      for(let i=0;i<proj.length;i++) {
+        const active=proj[i]>=minCnt;
+        if(active){if(start===-1)start=i;gap=0;}
+        else{if(start!==-1){gap++;if(gap>gapTol){const end=i-gap;if(end-start>=minSz)bands.push({start,end});start=-1;gap=0;}}}
+      }
+      if(start!==-1&&proj.length-start>=minSz)bands.push({start,end:proj.length-1});
+      return bands;
+    }
+    const textLines = detectBands(rowSums, CFG.textLines.rowGapTolerance, CFG.textLines.minLineHeight, iw*0.02);
+    const colBands  = detectBands(colSums, CFG.table.colGapTolerance, 5, ih*0.02);
+
+    // Find table
+    let table=null, bestScore=0;
+    if(textLines.length>=CFG.table.minRows && colBands.length>=CFG.table.minCols) {
+      for(let rs=0;rs<textLines.length;rs++) for(let re=rs+CFG.table.minRows-1;re<textLines.length;re++)
+        for(let cs=0;cs<colBands.length;cs++) for(let ce=cs+CFG.table.minCols-1;ce<colBands.length;ce++) {
+          const score=(re-rs+1)*(ce-cs+1);
+          if(score>bestScore){bestScore=score;table={x:colBands[cs].start,y:textLines[rs].start,
+            w:colBands[ce].end-colBands[cs].start,h:textLines[re].end-textLines[rs].start,
+            rows:re-rs+1,cols:ce-cs+1,rowBands:textLines.slice(rs,re+1),colBands:colBands.slice(cs,ce+1)};}
+        }
+    }
+    results.textLines = textLines.map(l=>({y:l.start,h:l.end-l.start,x:0,w:iw}));
+    results.table = table;
+    stageState(11,'done',performance.now()-t); log(`[12] ${textLines.length} lines, table:${table?'yes':'no'}`,'ok');
+
+    // 13. Region cropper
+    stageState(12,'running'); t=performance.now();
+    const srcPixels = await readTexture(textures.source, iw, ih, 4);
+    const regions=[];
+    for(const line of textLines) {
+      const y0=Math.max(0,line.start-2), y1=Math.min(ih-1,line.end+2), rh=y1-y0+1;
+      const c=new OffscreenCanvas(iw,rh);
+      const id=c.getContext('2d').createImageData(iw,rh);
+      id.data.set(srcPixels.subarray(y0*iw*4,(y0+rh)*iw*4));
+      c.getContext('2d').putImageData(id,0,0);
+      regions.push({canvas:c,x:0,y:line.start,w:iw,h:rh,type:'line'});
+    }
+    if(table){
+      const x0=Math.max(0,table.x-4),y0=Math.max(0,table.y-4);
+      const x1=Math.min(iw-1,table.x+table.w+4),y1=Math.min(ih-1,table.y+table.h+4);
+      const rw=x1-x0+1,rh=y1-y0+1;
+      const c=new OffscreenCanvas(rw,rh);
+      const id=c.getContext('2d').createImageData(rw,rh);
+      for(let r=0;r<rh;r++) for(let col=0;col<rw;col++){
+        const si=((y0+r)*iw+(x0+col))*4,di=(r*rw+col)*4;
+        id.data[di]=srcPixels[si];id.data[di+1]=srcPixels[si+1];id.data[di+2]=srcPixels[si+2];id.data[di+3]=255;
+      }
+      c.getContext('2d').putImageData(id,0,0);
+      regions.push({canvas:c,x:x0,y:y0,w:rw,h:rh,type:'table'});
+    }
+    stageState(12,'done',performance.now()-t); log(`[13] ${regions.length} regions cropped`,'ok');
+
+    // 14. OCR
+    stageState(13,'running'); t=performance.now();
+    const ocrLines=[], tableRegions=[];
+    if(typeof Tesseract!=='undefined') {
+      log('[14] Initializing Tesseract…','info');
+      const worker = await Tesseract.createWorker('eng', 1, {
+        logger: m => { if(m.status==='recognizing text') log(`[14] OCR ${(m.progress*100).toFixed(0)}%`,'info'); }
+      });
+      for(const region of regions) {
+        const bm = await createImageBitmap(region.canvas);
+        const cv = document.createElement('canvas'); cv.width=bm.width; cv.height=bm.height;
+        cv.getContext('2d').drawImage(bm,0,0); bm.close();
+        try {
+          const {data} = await worker.recognize(cv);
+          if(region.type==='line'&&data.text.trim()) ocrLines.push({text:data.text.trim(),x:region.x,y:region.y,w:region.w,h:region.h});
+          else if(region.type==='table') {
+            const rows=data.lines.map(l=>l.words.map(w=>w.text)).filter(r=>r.length>0);
+            tableRegions.push({...region,rows});
+          }
+        } catch(e){}
+      }
+      await worker.terminate();
+    } else { log('[14] Tesseract not loaded — skip OCR','warn'); }
+    results.ocrLines=ocrLines;
+    // Parse table data
+    if(tableRegions.length>0){
+      const {rows}=tableRegions[0];
+      const hkw=/^(qty|quantity|desc|description|item|product|unit|price|amount|total|tax|rate|no\.|#)$/i;
+      let hi=0;
+      for(let i=0;i<Math.min(3,rows.length);i++) if(rows[i].some(w=>hkw.test(w))){hi=i;break;}
+      results.tableData={header:rows[hi]||[],rows:rows.slice(hi+1)};
+    }
+    stageState(13,'done',performance.now()-t); log(`[14] OCR: ${ocrLines.length} lines`,'ok');
+
+    progressFill.style.width='100%';
+    setStatus('ready'); runBtn.disabled=false;
+    updateView(); updatePanel(activeTab);
+
+  } catch(e) {
+    log('Error: '+e.message,'err'); console.error(e);
+    setStatus('error'); runBtn.disabled=false;
+  }
+}
+
+// ─── VIEW ─────────────────────────────────────────────────────────────────────
+async function updateView() {
+  if(!currentImageData) return;
+  const {width:iw,height:ih}=currentImageData;
+  const ctx=mainCanvas.getContext('2d');
+  const cw=mainCanvas.width,ch=mainCanvas.height;
+
+  if(activeView==='original'||!textures.gray) {
+    const tmp=new OffscreenCanvas(iw,ih); tmp.getContext('2d').putImageData(currentImageData,0,0);
+    ctx.drawImage(tmp,0,0,cw,ch);
+  } else if(activeView==='gray') {
+    const p=await readTexture(textures.gray,iw,ih,4);
+    const id=new ImageData(new Uint8ClampedArray(p),iw,ih);
+    const t=new OffscreenCanvas(iw,ih);t.getContext('2d').putImageData(id,0,0);ctx.drawImage(t,0,0,cw,ch);
+  } else if(activeView==='threshold') {
+    const p=await readTexture(textures.threshold,iw,ih,4);
+    const id=new ImageData(new Uint8ClampedArray(p),iw,ih);
+    const t=new OffscreenCanvas(iw,ih);t.getContext('2d').putImageData(id,0,0);ctx.drawImage(t,0,0,cw,ch);
+  } else if(activeView==='distance'&&textures.distance) {
+    const raw=await readTexture(textures.distance,iw,ih,4);
+    const dist=new Float32Array(raw.buffer);
+    let mx=0; for(let i=0;i<dist.length;i++) mx=Math.max(mx,dist[i]);
+    const rgba=new Uint8ClampedArray(iw*ih*4);
+    for(let i=0;i<dist.length;i++){const v=Math.round(dist[i]/mx*255);rgba[i*4]=v;rgba[i*4+1]=Math.round(v*0.4);rgba[i*4+2]=255-v;rgba[i*4+3]=255;}
+    const id=new ImageData(rgba,iw,ih);const t=new OffscreenCanvas(iw,ih);t.getContext('2d').putImageData(id,0,0);ctx.drawImage(t,0,0,cw,ch);
+  } else {
+    const tmp=new OffscreenCanvas(iw,ih);tmp.getContext('2d').putImageData(currentImageData,0,0);ctx.drawImage(tmp,0,0,cw,ch);
+  }
+  drawOverlay();
+}
+
+function drawOverlay() {
+  if(!currentImageData) return;
+  const {width:iw,height:ih}=currentImageData;
+  const cw=mainCanvas.width,ch=mainCanvas.height;
+  overlayCanvas.width=cw; overlayCanvas.height=ch;
+  const ctx=overlayCanvas.getContext('2d');
+  ctx.clearRect(0,0,cw,ch);
+  const sx=cw/iw,sy=ch/ih;
+
+  if(activeView==='circles'||activeView==='original') {
+    for(const c of results.circles) {
+      ctx.beginPath(); ctx.arc(c.x*sx,c.y*sy,c.r*Math.min(sx,sy),0,Math.PI*2);
+      ctx.strokeStyle=c.r>20?'rgba(123,92,255,0.45)':'rgba(0,229,160,0.35)';
+      ctx.lineWidth=c.r>20?1.5:0.7; ctx.stroke();
+      if(c.r>15){ctx.beginPath();ctx.arc(c.x*sx,c.y*sy,2,0,Math.PI*2);ctx.fillStyle=c.r>20?'rgba(123,92,255,0.8)':'rgba(0,229,160,0.7)';ctx.fill();}
+    }
+  }
+
+  if(activeView==='lines'||activeView==='original') {
+    ctx.strokeStyle='rgba(255,209,102,0.6)'; ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
+    for(const l of results.textLines){
+      const my=(l.y+l.h/2)*sy;
+      ctx.beginPath();ctx.moveTo(0,my);ctx.lineTo(iw*sx,my);ctx.stroke();
+      ctx.strokeStyle='rgba(255,209,102,0.25)';ctx.lineWidth=0.7;
+      ctx.strokeRect(l.x*sx,l.y*sy,l.w*sx,l.h*sy);
+      ctx.strokeStyle='rgba(255,209,102,0.6)';ctx.lineWidth=1.5;
+    }
+    ctx.setLineDash([]);
+  }
+
+  if((activeView==='table'||activeView==='original')&&results.table) {
+    const tb=results.table;
+    const tx=tb.x*sx,ty=tb.y*sy,tw=tb.w*sx,th=tb.h*sy;
+    ctx.fillStyle='rgba(255,77,109,0.07)';ctx.fillRect(tx,ty,tw,th);
+    ctx.strokeStyle='rgba(255,77,109,0.9)';ctx.lineWidth=2.5;ctx.strokeRect(tx,ty,tw,th);
+    ctx.strokeStyle='rgba(255,77,109,0.25)';ctx.lineWidth=1;
+    for(const rb of (tb.rowBands||[])){const ry=rb.end*sy;ctx.beginPath();ctx.moveTo(tx,ry);ctx.lineTo(tx+tw,ry);ctx.stroke();}
+    for(const cb of (tb.colBands||[])){const cx=cb.end*sx;ctx.beginPath();ctx.moveTo(cx,ty);ctx.lineTo(cx,ty+th);ctx.stroke();}
+    ctx.font='bold 11px "Space Mono",monospace';ctx.fillStyle='rgba(255,77,109,0.95)';
+    ctx.fillText(`TABLE ${tb.cols}×${tb.rows}`,tx+6,Math.max(14,ty-6));
+  }
+}
+
+// ─── PANEL ────────────────────────────────────────────────────────────────────
+function updatePanel(tab) {
+  panelContent.innerHTML='';
+  function sg(a,b){return `<div class="stat-grid"><div class="stat-card"><div class="stat-label">${a[0]}</div><div class="stat-value">${a[1]}</div></div><div class="stat-card"><div class="stat-label">${b[0]}</div><div class="stat-value">${b[1]}</div></div></div>`;}
+
+  if(tab==='circles'){
+    panelContent.innerHTML = sg(['Circles',results.circles.length],['Max Radius',(results.circles[0]?.r.toFixed(0)??'—')+'px']);
+    panelContent.innerHTML += `<div class="circle-legend"><span class="legend-dot" style="background:rgba(0,229,160,0.5)"></span>Small circles (r&lt;20px)<br><span class="legend-dot" style="background:rgba(123,92,255,0.5)"></span>Large circles (r≥20px)</div>`;
+    const tit=document.createElement('div');tit.style.cssText='font-family:Space Mono;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px';tit.textContent='Top circles by radius';panelContent.appendChild(tit);
+    for(const c of results.circles.slice(0,25)){
+      const el=document.createElement('div');el.className='text-line-item';
+      el.innerHTML=`<div class="line-meta">center (${c.x}, ${c.y}) · score ${(c.score*100).toFixed(1)}%</div><div>radius: <strong>${c.r.toFixed(1)}px</strong></div>`;
+      panelContent.appendChild(el);
+    }
+  } else if(tab==='lines'){
+    panelContent.innerHTML=sg(['Detected',results.textLines.length],['With OCR',results.ocrLines.length]);
+    const src=results.ocrLines.length>0?results.ocrLines:results.textLines.map((l,i)=>({text:'[OCR not run]',y:l.y,h:l.h,x:0,w:l.w}));
+    for(const l of src){const el=document.createElement('div');el.className='text-line-item';el.innerHTML=`<div class="line-meta">y=${l.y} · ${l.w}×${l.h}px</div><div>${l.text.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`;panelContent.appendChild(el);}
+  } else if(tab==='table'){
+    if(!results.table){panelContent.innerHTML='<div style="color:var(--muted);font-size:11px;text-align:center;padding:40px 0">No table detected</div>';return;}
+    const tb=results.table;
+    panelContent.innerHTML=sg(['Rows',tb.rows],['Cols',tb.cols]);
+    if(results.tableData){
+      const {header,rows}=results.tableData;
+      const wrap=document.createElement('div');wrap.className='table-wrapper';
+      const tbl=document.createElement('table');tbl.className='invoice-table';
+      if(header.length>0){const thead=tbl.createTHead();const tr=thead.insertRow();for(const h of header){const th=document.createElement('th');th.textContent=h;tr.appendChild(th);}}
+      const tbody=tbl.createTBody();for(const row of rows){const tr=tbody.insertRow();for(const cell of row)tr.insertCell().textContent=cell;}
+      wrap.appendChild(tbl);panelContent.appendChild(wrap);
+    }
+  } else if(tab==='stats'){
+    panelContent.innerHTML=sg(['Image',`${currentImageData?.width??'—'}×${currentImageData?.height??'—'}`],['Circles',results.circles.length])
+      +sg(['Text Lines',results.textLines.length],['Table Rows',results.table?.rows??'—']);
+    const info=document.createElement('div');info.className='circle-legend';
+    info.innerHTML='<strong style="color:var(--accent)">Method:</strong> JFA Euclidean Distance Transform → Local Maxima = Maximal Inscribed Circles<br><br><strong style="color:var(--accent)">Text Lines:</strong> Adaptive Threshold → Morphological Dilation → Row Projection Histogram<br><br><strong style="color:var(--accent)">Table:</strong> Dual Projection (Row + Col) → Band Detection → Grid Clustering';
+    panelContent.appendChild(info);
+  }
+}
+
+// ─── EVENTS ───────────────────────────────────────────────────────────────────
+dropZone.addEventListener('click',()=>fileInput.click());
+fileInput.addEventListener('change',e=>handleFile(e.target.files[0]));
+dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('drag-over')});
+dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('drag-over');handleFile(e.dataTransfer.files[0])});
+runBtn.addEventListener('click',runPipeline);
+resetBtn.addEventListener('click',()=>{
+  results={circles:[],textLines:[],table:null,ocrLines:[],tableData:null};
+  Object.values(textures).forEach(t=>{try{t.destroy()}catch{}});textures={};
+  Object.values(buffers).forEach(b=>{try{b.destroy()}catch{}});buffers={};
+  renderStageList();progressFill.style.width='0%';logArea.innerHTML='';
+  panelContent.innerHTML='<div style="color:var(--muted);font-size:11px;text-align:center;padding:40px 0">Run the pipeline to see results</div>';
+  if(currentImageData){showImage();overlayCanvas.getContext('2d').clearRect(0,0,overlayCanvas.width,overlayCanvas.height);}
+});
+document.querySelectorAll('.view-btn').forEach(btn=>btn.addEventListener('click',()=>{
+  document.querySelectorAll('.view-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active'); activeView=btn.dataset.view; updateView();
+}));
+document.querySelectorAll('.panel-tab').forEach(tab=>tab.addEventListener('click',()=>{
+  document.querySelectorAll('.panel-tab').forEach(t=>t.classList.remove('active'));
+  tab.classList.add('active'); activeTab=tab.dataset.tab; updatePanel(activeTab);
+}));
+
+init();
+</script>
+</body>
+</html>

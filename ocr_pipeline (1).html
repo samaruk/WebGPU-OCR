@@ -1,0 +1,1703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebGPU Advanced OCR Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #04080f;
+  --surface: #080e1a;
+  --surface2: #0c1525;
+  --border: #162035;
+  --border2: #1e304a;
+  --accent: #00c8ff;
+  --accent2: #0070a8;
+  --green: #00ff7f;
+  --green2: #00994d;
+  --text: #a8c8e8;
+  --text2: #6a90b8;
+  --dim: #3a5070;
+  --error: #ff4060;
+  --warn: #ffb800;
+  --mono: 'Space Mono', monospace;
+  --sans: 'Rajdhani', sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  background: linear-gradient(180deg, #060d1c 0%, var(--bg) 100%);
+  border-bottom: 1px solid var(--border2);
+  padding: 18px 24px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.logo {
+  width: 36px; height: 36px;
+  border: 1.5px solid var(--accent);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--sans);
+  font-weight: 700; font-size: 14px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+header h1 {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  color: #e0f0ff;
+}
+header .sub {
+  font-size: 10px;
+  color: var(--text2);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-left: auto;
+}
+.gpu-badge {
+  background: linear-gradient(135deg, #003850, #00608c);
+  border: 1px solid var(--accent2);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+}
+.gpu-badge.error { background: #300818; border-color: var(--error); color: var(--error); }
+
+/* ── Layout ── */
+.container { display: flex; height: calc(100vh - 61px); }
+
+/* ── Sidebar ── */
+aside {
+  width: 280px;
+  min-width: 280px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.upload-zone {
+  margin: 16px;
+  border: 1.5px dashed var(--border2);
+  border-radius: 8px;
+  padding: 20px 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+.upload-zone:hover, .upload-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(0,200,255,0.04);
+}
+.upload-zone .icon {
+  font-size: 28px;
+  margin-bottom: 8px;
+  display: block;
+}
+.upload-zone p { color: var(--text2); font-size: 11px; }
+.upload-zone strong { color: var(--accent); }
+#fileInput { display: none; }
+
+.preview-wrap {
+  margin: 0 16px 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border2);
+  display: none;
+  position: relative;
+}
+#previewCanvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 160px;
+  object-fit: contain;
+  background: #0a0a0a;
+}
+.preview-label {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 3px 8px;
+  background: rgba(0,0,0,0.7);
+  font-size: 10px;
+  color: var(--text2);
+}
+
+/* ── Config sections ── */
+.config-section {
+  border-top: 1px solid var(--border);
+}
+.config-header {
+  padding: 10px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text2);
+  user-select: none;
+}
+.config-header:hover { background: rgba(255,255,255,0.02); }
+.config-header .arrow { margin-left: auto; transition: transform 0.2s; }
+.config-section.open .arrow { transform: rotate(90deg); }
+.config-section.open .config-header { color: var(--accent); }
+.config-body { display: none; padding: 0 16px 12px; }
+.config-section.open .config-body { display: block; }
+
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.param-row label {
+  font-size: 10px;
+  color: var(--text2);
+  flex: 1;
+  min-width: 80px;
+}
+.param-row input[type=range] {
+  flex: 2;
+  -webkit-appearance: none;
+  height: 2px;
+  background: var(--border2);
+  border-radius: 2px;
+  outline: none;
+}
+.param-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.param-row .val {
+  font-size: 10px;
+  color: var(--accent);
+  width: 36px;
+  text-align: right;
+  font-family: var(--mono);
+}
+.param-row select {
+  flex: 2;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 6px;
+}
+
+/* ── Run button ── */
+.run-wrap { padding: 12px 16px; }
+#runBtn {
+  width: 100%;
+  padding: 10px;
+  background: linear-gradient(135deg, var(--accent2), #004570);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 700;
+}
+#runBtn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #005a80, var(--accent2));
+  box-shadow: 0 0 20px rgba(0,200,255,0.2);
+}
+#runBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Progress ── */
+.progress-bar {
+  margin: 0 16px 12px;
+  height: 3px;
+  background: var(--border2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  width: 0%;
+  transition: width 0.3s;
+}
+.status-text {
+  padding: 0 16px 12px;
+  font-size: 10px;
+  color: var(--text2);
+  min-height: 18px;
+}
+
+/* ── Main content ── */
+main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ── Pass grid ── */
+.passes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.pass-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.pass-card.active { border-color: var(--accent); }
+.pass-card.done { border-color: var(--green2); }
+
+.pass-header {
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+.pass-num {
+  width: 24px; height: 24px;
+  background: var(--border2);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.pass-card.done .pass-num { background: var(--green2); color: #000; }
+.pass-card.active .pass-num { background: var(--accent2); color: var(--accent); }
+
+.pass-title {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+.pass-arrow {
+  font-size: 9px;
+  color: var(--dim);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  margin-left: auto;
+}
+
+.pass-canvas-wrap {
+  position: relative;
+  background: #080808;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pass-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 200px;
+  object-fit: contain;
+}
+.pass-placeholder {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-align: center;
+}
+.pass-placeholder .big { font-size: 28px; display: block; margin-bottom: 8px; opacity: 0.3; }
+
+.pass-footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pass-desc { font-size: 10px; color: var(--text2); }
+.pass-time { font-size: 10px; color: var(--green); font-family: var(--mono); }
+
+/* ── Loading spinner ── */
+.spinner {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4,8,15,0.8);
+}
+.pass-card.active .spinner { display: flex; }
+.spinner::after {
+  content: '';
+  width: 28px; height: 28px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Error banner ── */
+#errorBanner {
+  display: none;
+  margin: 0 16px;
+  padding: 10px 14px;
+  background: rgba(255,64,96,0.1);
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--error);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">GPU</div>
+  <h1>Advanced OCR Pipeline</h1>
+  <span class="sub">WebGPU · 11 Pass · Real-time</span>
+  <div class="gpu-badge" id="gpuBadge">INITIALIZING…</div>
+</header>
+
+<div class="container">
+  <aside>
+    <div class="upload-zone" id="uploadZone">
+      <span class="icon">📄</span>
+      <p><strong>Drop image here</strong></p>
+      <p>or click to browse</p>
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+    <div id="errorBanner"></div>
+    <div class="preview-wrap" id="previewWrap">
+      <canvas id="previewCanvas"></canvas>
+      <div class="preview-label" id="previewLabel"></div>
+    </div>
+
+    <!-- Config sections -->
+    <div class="config-section" id="cfg-p2">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P2 · Retinex <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Blur σ</label>
+          <input type="range" min="1" max="40" step="0.5" value="15" id="retinex_sigma" oninput="updateVal(this)">
+          <span class="val" id="val_retinex_sigma">15</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p3">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P3 · Guided Filter <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>σ Spatial</label>
+          <input type="range" min="0.5" max="10" step="0.5" value="3" id="bf_sigma_s" oninput="updateVal(this)">
+          <span class="val" id="val_bf_sigma_s">3</span>
+        </div>
+        <div class="param-row">
+          <label>σ Range</label>
+          <input type="range" min="0.01" max="0.5" step="0.01" value="0.1" id="bf_sigma_r" oninput="updateVal(this)">
+          <span class="val" id="val_bf_sigma_r">0.1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p4">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P4 · CLAHE <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Tile Radius</label>
+          <input type="range" min="8" max="48" step="2" value="20" id="clahe_radius" oninput="updateVal(this)">
+          <span class="val" id="val_clahe_radius">20</span>
+        </div>
+        <div class="param-row">
+          <label>Clip Limit</label>
+          <input type="range" min="0.5" max="8" step="0.1" value="2.5" id="clahe_clip" oninput="updateVal(this)">
+          <span class="val" id="val_clahe_clip">2.5</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p5">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P5 · Deskew <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Max Angle°</label>
+          <input type="range" min="1" max="20" step="1" value="10" id="deskew_max" oninput="updateVal(this)">
+          <span class="val" id="val_deskew_max">10</span>
+        </div>
+        <div class="param-row">
+          <label>Manual °</label>
+          <input type="range" min="-20" max="20" step="0.5" value="0" id="deskew_manual" oninput="updateVal(this)">
+          <span class="val" id="val_deskew_manual">0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p6">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P6 · Gradients <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>w Sobel</label>
+          <input type="range" min="0" max="1" step="0.05" value="0.3" id="w_sobel" oninput="updateVal(this)">
+          <span class="val" id="val_w_sobel">0.3</span>
+        </div>
+        <div class="param-row">
+          <label>w Scharr</label>
+          <input type="range" min="0" max="1" step="0.05" value="0.4" id="w_scharr" oninput="updateVal(this)">
+          <span class="val" id="val_w_scharr">0.4</span>
+        </div>
+        <div class="param-row">
+          <label>w Laplacian</label>
+          <input type="range" min="0" max="1" step="0.05" value="0.2" id="w_laplacian" oninput="updateVal(this)">
+          <span class="val" id="val_w_laplacian">0.2</span>
+        </div>
+        <div class="param-row">
+          <label>w Hessian</label>
+          <input type="range" min="0" max="1" step="0.05" value="0.1" id="w_hessian" oninput="updateVal(this)">
+          <span class="val" id="val_w_hessian">0.1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p8">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P8 · Threshold <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Window r</label>
+          <input type="range" min="4" max="32" step="1" value="12" id="thresh_radius" oninput="updateVal(this)">
+          <span class="val" id="val_thresh_radius">12</span>
+        </div>
+        <div class="param-row">
+          <label>k Sauvola</label>
+          <input type="range" min="0.05" max="0.8" step="0.01" value="0.2" id="k_sauvola" oninput="updateVal(this)">
+          <span class="val" id="val_k_sauvola">0.2</span>
+        </div>
+        <div class="param-row">
+          <label>k Wolf</label>
+          <input type="range" min="0.05" max="0.8" step="0.01" value="0.15" id="k_wolf" oninput="updateVal(this)">
+          <span class="val" id="val_k_wolf">0.15</span>
+        </div>
+        <div class="param-row">
+          <label>Blend S/W</label>
+          <input type="range" min="0" max="1" step="0.05" value="0.6" id="thresh_blend" oninput="updateVal(this)">
+          <span class="val" id="val_thresh_blend">0.6</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p9">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P9 · Morphology <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Kernel r</label>
+          <input type="range" min="1" max="5" step="1" value="1" id="morph_radius" oninput="updateVal(this)">
+          <span class="val" id="val_morph_radius">1</span>
+        </div>
+        <div class="param-row">
+          <label>Mode</label>
+          <select id="morph_mode">
+            <option value="0">Open → Close</option>
+            <option value="1">Close → Open</option>
+            <option value="2">Dilate only</option>
+            <option value="3">Erode only</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p10">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P10 · Distance Xform <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Dist Scale</label>
+          <input type="range" min="1" max="20" step="0.5" value="5" id="dist_scale" oninput="updateVal(this)">
+          <span class="val" id="val_dist_scale">5</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="config-section" id="cfg-p11">
+      <div class="config-header" onclick="toggleConfig(this)">
+        <span>▸</span> P11 · Watershed <span class="arrow">›</span>
+      </div>
+      <div class="config-body">
+        <div class="param-row">
+          <label>Ridge Thr</label>
+          <input type="range" min="0" max="0.02" step="0.001" value="0.002" id="ridge_thr" oninput="updateVal(this)">
+          <span class="val" id="val_ridge_thr">0.002</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="run-wrap">
+      <button id="runBtn" disabled>▶ RUN PIPELINE</button>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="status-text" id="statusText">Upload an image to begin</div>
+  </aside>
+
+  <main>
+    <div class="passes-grid" id="passesGrid"></div>
+  </main>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// SHARED VERTEX SHADER (fullscreen quad)
+// ═══════════════════════════════════════════════════════
+const VS = /* wgsl */`
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  var pos = array<vec2f,6>(
+    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+    vec2f(-1,1),  vec2f(1,-1), vec2f(1,1)
+  );
+  var uv = array<vec2f,6>(
+    vec2f(0,1), vec2f(1,1), vec2f(0,0),
+    vec2f(0,0), vec2f(1,1), vec2f(1,0)
+  );
+  var o: VSOut;
+  o.pos = vec4f(pos[vi], 0, 1);
+  o.uv  = uv[vi];
+  return o;
+}
+`;
+
+// ── Pass 1: RGB → Grayscale ──────────────────────────
+const FS_P1 = /* wgsl */`
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let c = textureSample(tex, samp, uv);
+  let y = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+  return vec4f(y, y, y, 1.0);
+}
+`;
+
+// ── Pass 2a: Horizontal Gaussian blur ────────────────
+const FS_P2a = /* wgsl */`
+struct P { sigma: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let sig = max(p.sigma, 0.1);
+  let r = min(i32(ceil(2.5 * sig)), 40);
+  let dx = 1.0 / p.texW;
+  var s = 0.0; var w = 0.0;
+  for (var i = -r; i <= r; i++) {
+    let wt = exp(-f32(i*i)/(2.0*sig*sig));
+    s += textureSample(tex, samp, uv + vec2f(f32(i)*dx, 0.0)).r * wt;
+    w += wt;
+  }
+  let v = s/w; return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 2b: Vertical Gaussian blur ──────────────────
+const FS_P2b = /* wgsl */`
+struct P { sigma: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let sig = max(p.sigma, 0.1);
+  let r = min(i32(ceil(2.5 * sig)), 40);
+  let dy = 1.0 / p.texH;
+  var s = 0.0; var w = 0.0;
+  for (var i = -r; i <= r; i++) {
+    let wt = exp(-f32(i*i)/(2.0*sig*sig));
+    s += textureSample(tex, samp, uv + vec2f(0.0, f32(i)*dy)).r * wt;
+    w += wt;
+  }
+  let v = s/w; return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 2c: Retinex = log(I) - log(blur) ────────────
+const FS_P2c = /* wgsl */`
+@group(0) @binding(0) var origTex: texture_2d<f32>;
+@group(0) @binding(1) var blurTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let I = textureSample(origTex, samp, uv).r;
+  let B = textureSample(blurTex, samp, uv).r;
+  let R = log(I + 0.001) - log(B + 0.001);
+  let v = clamp((R + 2.5) / 5.0, 0.0, 1.0);
+  return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 3: Bilateral filter (Guided Filter approx) ──
+const FS_P3 = /* wgsl */`
+struct P { sigS: f32, sigR: f32, texW: f32, texH: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let ctr = textureSample(tex, samp, uv).r;
+  let ss = max(p.sigS, 0.1); let sr = max(p.sigR, 0.01);
+  let r = min(i32(ceil(2.5*ss)), 10);
+  var sum = 0.0; var wsum = 0.0;
+  for (var j = -r; j <= r; j++) {
+    for (var i = -r; i <= r; i++) {
+      let off = vec2f(f32(i)/p.texW, f32(j)/p.texH);
+      let s = textureSample(tex, samp, uv + off).r;
+      let ds = f32(i*i+j*j)/(2.0*ss*ss);
+      let dr = (s-ctr)*(s-ctr)/(2.0*sr*sr);
+      let wt = exp(-(ds+dr));
+      sum += s*wt; wsum += wt;
+    }
+  }
+  let v = sum/wsum; return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 4: CLAHE (local histogram in fragment) ───────
+const FS_P4 = /* wgsl */`
+struct P { radius: f32, clip: f32, texW: f32, texH: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let ctr = textureSample(tex, samp, uv).r;
+  let r = i32(clamp(p.radius, 4.0, 40.0));
+  let step = max(1, r/8);
+  var hist: array<f32, 32>;
+  for (var k=0; k<32; k++) { hist[k]=0.0; }
+  var total = 0.0;
+  for (var j = -r; j <= r; j+=step) {
+    for (var i = -r; i <= r; i+=step) {
+      let s = textureSample(tex, samp, uv + vec2f(f32(i)/p.texW, f32(j)/p.texH)).r;
+      let bin = min(i32(s*32.0), 31);
+      hist[bin] += 1.0; total += 1.0;
+    }
+  }
+  // Clip & redistribute
+  let clipV = p.clip * total / 32.0;
+  var excess = 0.0;
+  for (var k=0; k<32; k++) {
+    if (hist[k] > clipV) { excess += hist[k]-clipV; hist[k]=clipV; }
+  }
+  let add = excess/32.0;
+  for (var k=0; k<32; k++) { hist[k]+=add; }
+  // CDF of center bin
+  let cBin = min(i32(ctr*32.0), 31);
+  var cdf = 0.0;
+  for (var k=0; k<=cBin; k++) { cdf += hist[k]; }
+  let v = clamp(cdf/total, 0.0, 1.0);
+  return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 5: Rotate (deskew) ───────────────────────────
+const FS_P5 = /* wgsl */`
+struct P { angle: f32, cx: f32, cy: f32, _p: f32, texW: f32, texH: f32, _p2: f32, _p3: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let px = uv.x * p.texW;
+  let py = uv.y * p.texH;
+  let dx = px - p.cx; let dy = py - p.cy;
+  let ca = cos(-p.angle); let sa = sin(-p.angle);
+  let rx = dx*ca - dy*sa + p.cx;
+  let ry = dx*sa + dy*ca + p.cy;
+  let ruv = vec2f(rx/p.texW, ry/p.texH);
+  if (any(ruv < vec2f(0.0)) || any(ruv > vec2f(1.0))) { return vec4f(1,1,1,1); }
+  let v = textureSample(tex, samp, ruv).r;
+  return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 6: Multi-scale Gradients ────────────────────
+const FS_P6 = /* wgsl */`
+struct P { wSobel: f32, wScharr: f32, wLap: f32, wHess: f32, texW: f32, texH: f32, _p: f32, _p2: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+
+fn s(uv: vec2f, ox: f32, oy: f32) -> f32 {
+  return textureSample(tex, samp, uv + vec2f(ox/p.texW, oy/p.texH)).r;
+}
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let tl=s(uv,-1,-1); let tc=s(uv,0,-1); let tr=s(uv,1,-1);
+  let ml=s(uv,-1, 0); let mc=s(uv,0, 0); let mr=s(uv,1, 0);
+  let bl=s(uv,-1, 1); let bc=s(uv,0, 1); let br=s(uv,1, 1);
+  // Sobel
+  let sbx = -tl - 2*ml - bl + tr + 2*mr + br;
+  let sby = -tl - 2*tc - tr + bl + 2*bc + br;
+  let sob = clamp(length(vec2f(sbx,sby))/4.0, 0.0, 1.0);
+  // Scharr (weights 3,10,3)
+  let scx = (-3*tl - 10*ml - 3*bl + 3*tr + 10*mr + 3*br)/16.0;
+  let scy = (-3*tl - 10*tc - 3*tr + 3*bl + 10*bc + 3*br)/16.0;
+  let sch = clamp(length(vec2f(scx,scy)), 0.0, 1.0);
+  // Laplacian
+  let lap = clamp(abs(tl+tc+tr+ml - 8*mc + mr+bl+bc+br)/4.0, 0.0, 1.0);
+  // Hessian (approximate via second-order)
+  let lxx = ml - 2*mc + mr;
+  let lyy = tc - 2*mc + bc;
+  let lxy = (tr - tl - br + bl)/4.0;
+  let hess = clamp(abs(lxx*lyy - lxy*lxy)*4.0, 0.0, 1.0);
+  // Fusion
+  let v = clamp(p.wSobel*sob + p.wScharr*sch + p.wLap*lap + p.wHess*hess, 0.0, 1.0);
+  return vec4f(v,v,v,1.0);
+}
+`;
+
+// ── Pass 7a: SAT horizontal scan (compute) ────────────
+const CS_P7a = /* wgsl */`
+struct P { width: u32, height: u32, _p: u32, _p2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var inputTex: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> sat:  array<f32>;
+@group(0) @binding(3) var<storage, read_write> sat2: array<f32>;
+@compute @workgroup_size(1)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  let row = gid.x;
+  if (row >= p.height) { return; }
+  var sum = 0.0; var sum2 = 0.0;
+  for (var col = 0u; col < p.width; col++) {
+    let v = textureLoad(inputTex, vec2i(i32(col), i32(row)), 0).r;
+    sum  += v;    sum2 += v*v;
+    sat [row*p.width + col] = sum;
+    sat2[row*p.width + col] = sum2;
+  }
+}
+`;
+
+// ── Pass 7b: SAT vertical scan (compute) ──────────────
+const CS_P7b = /* wgsl */`
+struct P { width: u32, height: u32, _p: u32, _p2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> sat:  array<f32>;
+@group(0) @binding(2) var<storage, read_write> sat2: array<f32>;
+@compute @workgroup_size(1)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  let col = gid.x;
+  if (col >= p.width) { return; }
+  var sum = 0.0; var sum2 = 0.0;
+  for (var row = 0u; row < p.height; row++) {
+    sum  += sat [row*p.width + col];
+    sum2 += sat2[row*p.width + col];
+    sat [row*p.width + col] = sum;
+    sat2[row*p.width + col] = sum2;
+  }
+}
+`;
+
+// ── Pass 7c: Visualize SAT (normalized) ──────────────
+const FS_P7vis = /* wgsl */`
+struct P { width: u32, height: u32, _p: u32, _p2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> sat: array<f32>;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let col = u32(uv.x * f32(p.width-1u));
+  let row = u32(uv.y * f32(p.height-1u));
+  let idx = row * p.width + col;
+  let total = sat[p.width*p.height - 1u];
+  let v = clamp(sat[idx] / max(total, 0.001), 0.0, 1.0);
+  // Colorize SAT as gradient
+  let r = v; let g = 0.5*v; let b = 1.0-v;
+  return vec4f(r, g, b, 1.0);
+}
+`;
+
+// ── Pass 8: Hybrid Sauvola/Wolf threshold ─────────────
+const FS_P8 = /* wgsl */`
+struct P {
+  radius: f32, kSauvola: f32, kWolf: f32, blend: f32,
+  texW: f32, texH: f32, width: f32, height: f32
+}
+@group(0) @binding(0) var inputTex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<storage, read> sat:  array<f32>;
+@group(0) @binding(3) var<storage, read> sat2: array<f32>;
+@group(0) @binding(4) var<uniform> pp: P;
+
+fn satQuery(x1: i32, y1: i32, x2: i32, y2: i32, buf: ptr<storage, array<f32>, read>) -> f32 {
+  let W = i32(pp.width);
+  let H = i32(pp.height);
+  // Clamp all indices to valid range (avoid out-of-bounds)
+  let ax2 = clamp(x2, 0, W-1); let ay2 = clamp(y2, 0, H-1);
+  let ax1 = max(x1, 0);         let ay1 = max(y1, 0);
+  var a = buf[ay2*W + ax2];
+  // Use clamped indices; select 0 when original was out of range
+  var b = select(0.0, buf[ay1*W + ax2], y1 >= 0);
+  var c = select(0.0, buf[ay2*W + ax1], x1 >= 0);
+  var d = select(0.0, buf[ay1*W + ax1], x1 >= 0 && y1 >= 0);
+  return a - b - c + d;
+}
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let val = textureSample(inputTex, samp, uv).r;
+  let px = i32(uv.x * pp.texW); let py = i32(uv.y * pp.texH);
+  let r = i32(pp.radius);
+  let x1 = px-r-1; let y1 = py-r-1;
+  let x2 = min(px+r, i32(pp.width)-1); let y2 = min(py+r, i32(pp.height)-1);
+  let cnt = f32((x2-clamp(x1,-1,i32(pp.width)-1))*(y2-clamp(y1,-1,i32(pp.height)-1)));
+  let s1 = satQuery(x1,y1,x2,y2, &sat);
+  let s2 = satQuery(x1,y1,x2,y2, &sat2);
+  let mean = s1/cnt;
+  let mean2 = s2/cnt;
+  let variance = max(mean2 - mean*mean, 0.0);
+  let stddev = sqrt(variance);
+  let R = 0.5;
+  // Sauvola
+  let Ts = mean * (1.0 + pp.kSauvola*(stddev/R - 1.0));
+  // Wolf
+  let M = 0.0; // global min approximation
+  let Tw = (1.0-pp.kWolf)*mean + pp.kWolf*M + pp.kWolf*(stddev/R)*(mean-M);
+  // Hybrid
+  let T = clamp(pp.blend*Ts + (1.0-pp.blend)*Tw, 0.0, 1.0);
+  let bin = select(0.0, 1.0, val >= T);
+  return vec4f(bin, bin, bin, 1.0);
+}
+`;
+
+// ── Pass 9a: Erosion ───────────────────────────────────
+const FS_P9_ERODE = /* wgsl */`
+struct P { radius: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let r = i32(p.radius); var m = 1.0;
+  let r2 = f32(r*r);
+  for (var j=-r; j<=r; j++) {
+    for (var i=-r; i<=r; i++) {
+      if (f32(i*i+j*j) <= r2+0.5) {
+        let v = textureSample(tex, samp, uv + vec2f(f32(i)/p.texW, f32(j)/p.texH)).r;
+        m = min(m,v);
+      }
+    }
+  }
+  return vec4f(m,m,m,1.0);
+}
+`;
+
+// ── Pass 9b: Dilation ──────────────────────────────────
+const FS_P9_DILATE = /* wgsl */`
+struct P { radius: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let r = i32(p.radius); var m = 0.0;
+  let r2 = f32(r*r);
+  for (var j=-r; j<=r; j++) {
+    for (var i=-r; i<=r; i++) {
+      if (f32(i*i+j*j) <= r2+0.5) {
+        let v = textureSample(tex, samp, uv + vec2f(f32(i)/p.texW, f32(j)/p.texH)).r;
+        m = max(m,v);
+      }
+    }
+  }
+  return vec4f(m,m,m,1.0);
+}
+`;
+
+// ── Pass 10a: JFA Init ────────────────────────────────
+const FS_P10_INIT = /* wgsl */`
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let v = textureSample(tex, samp, uv).r;
+  // Background=white (v>0.5) → seed at itself; Text=black → no seed
+  if (v > 0.5) { return vec4f(uv.x, uv.y, 0.0, 1.0); }
+  return vec4f(-1.0, -1.0, 0.0, 0.0);
+}
+`;
+
+// ── Pass 10b: JFA Step ────────────────────────────────
+const FS_P10_JFA = /* wgsl */`
+struct P { stepK: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  var best = textureSample(tex, samp, uv);
+  var bestDist = 1e9;
+  if (best.a > 0.5) { bestDist = distance(uv, best.rg); }
+  let dx = p.stepK/p.texW; let dy = p.stepK/p.texH;
+  for (var j=-1; j<=1; j++) {
+    for (var i=-1; i<=1; i++) {
+      let nuv = uv + vec2f(f32(i)*dx, f32(j)*dy);
+      if (any(nuv < vec2f(0.0)) || any(nuv > vec2f(1.0))) { continue; }
+      let nb = textureSample(tex, samp, nuv);
+      if (nb.a > 0.5) {
+        let d = distance(uv, nb.rg);
+        if (d < bestDist) { bestDist = d; best = nb; }
+      }
+    }
+  }
+  return best;
+}
+`;
+
+// ── Pass 10c: Distance Colormap ───────────────────────
+const FS_P10_DIST = /* wgsl */`
+struct P { scale: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var seedTex: texture_2d<f32>;
+@group(0) @binding(1) var origTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> p: P;
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let seed = textureSample(seedTex, samp, uv);
+  let orig = textureSample(origTex, samp, uv).r;
+  if (orig > 0.5) { return vec4f(0.92, 0.95, 1.0, 1.0); } // background
+  if (seed.a < 0.5) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+  let d = distance(uv * vec2f(p.texW, p.texH), seed.rg * vec2f(p.texW, p.texH));
+  let t = clamp(d * p.scale / max(p.texW, p.texH) * 20.0, 0.0, 1.0);
+  // Inferno-like colormap
+  let r = clamp(1.5*t - 0.0, 0.0, 1.0);
+  let g = clamp(2.0*t - 0.8, 0.0, 1.0);
+  let b = clamp(0.5 - 2.0*t, 0.0, 1.0) + clamp(4.0*t - 3.5, 0.0, 1.0);
+  return vec4f(r, g, b, 1.0);
+}
+`;
+
+// ── Pass 11: Watershed ────────────────────────────────
+const FS_P11 = /* wgsl */`
+struct P { ridgeThr: f32, texW: f32, texH: f32, _p: f32 }
+@group(0) @binding(0) var seedTex: texture_2d<f32>;
+@group(0) @binding(1) var origTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> p: P;
+fn hash(v: vec2f) -> vec3f {
+  var h = sin(dot(v, vec2f(127.1,311.7))) * 43758.5453;
+  return fract(vec3f(h, h*1.7, h*2.3)) * 0.85 + 0.1;
+}
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let orig = textureSample(origTex, samp, uv).r;
+  if (orig > 0.5) { return vec4f(0.95, 0.97, 1.0, 1.0); }
+  let seed = textureSample(seedTex, samp, uv);
+  if (seed.a < 0.5) { return vec4f(0.05, 0.05, 0.08, 1.0); }
+  // Check local neighbors for ridge (local maximum in distance)
+  let dx = 1.0/p.texW; let dy = 1.0/p.texH;
+  var myDist = distance(uv*vec2f(p.texW,p.texH), seed.rg*vec2f(p.texW,p.texH));
+  var isRidge = true;
+  for (var j=-1; j<=1; j++) {
+    for (var i=-1; i<=1; i++) {
+      if (i==0 && j==0) { continue; }
+      let nuv = uv + vec2f(f32(i)*dx, f32(j)*dy);
+      if (any(nuv < vec2f(0.0)) || any(nuv > vec2f(1.0))) { continue; }
+      let nb = textureSample(seedTex, samp, nuv);
+      if (nb.a > 0.5) {
+        let nd = distance(nuv*vec2f(p.texW,p.texH), nb.rg*vec2f(p.texW,p.texH));
+        if (nd > myDist + p.ridgeThr*max(p.texW,p.texH)) { isRidge = false; break; }
+      }
+    }
+  }
+  // Color by quantized seed position (region ID)
+  let cellId = floor(seed.rg * vec2f(p.texW, p.texH) / 4.0);
+  let col = hash(cellId);
+  if (isRidge) {
+    // Ridge: lighter version
+    return vec4f(col * 1.3, 1.0);
+  }
+  return vec4f(col * 0.75, 1.0);
+}
+`;
+
+// ═══════════════════════════════════════════════════════
+// UI HELPERS
+// ═══════════════════════════════════════════════════════
+const PASSES = [
+  { id:1,  label:'RGB → Float',            desc:'Luminance extraction from input RGB image' },
+  { id:2,  label:'Retinex Illumination',   desc:'Single Scale Retinex: log(I) − log(G*I) · normalizes lighting' },
+  { id:3,  label:'Guided Filter Denoise',  desc:'Bilateral filter · edge-preserving noise removal' },
+  { id:4,  label:'CLAHE Enhancement',      desc:'Contrast Limited AHE · local histogram equalization' },
+  { id:5,  label:'Deskew (Hough)',         desc:'Hough-based dominant angle detection + affine rotation' },
+  { id:6,  label:'Multi-Scale Gradients',  desc:'0.4·Scharr + 0.3·Sobel + 0.2·Hessian + 0.1·Laplacian' },
+  { id:7,  label:'SAT Build',              desc:'Summed Area Table (prefix scan) · enables O(1) local stats' },
+  { id:8,  label:'Sauvola/Wolf Threshold', desc:'Hybrid 0.6·Sauvola + 0.4·Wolf local adaptive binarization' },
+  { id:9,  label:'Morphological Recon.',   desc:'Open → Close reconstruction · repairs broken strokes' },
+  { id:10, label:'Distance Transform',     desc:'Jump Flooding Algorithm · Euclidean distance from background' },
+  { id:11, label:'Watershed Separation',   desc:'Ridge detection on DT · separates touching characters' },
+];
+
+function buildPassCards() {
+  const grid = document.getElementById('passesGrid');
+  PASSES.forEach(p => {
+    const card = document.createElement('div');
+    card.className = 'pass-card';
+    card.id = `card-p${p.id}`;
+    card.innerHTML = `
+      <div class="pass-header">
+        <div class="pass-num">${p.id}</div>
+        <div class="pass-title">${p.label}</div>
+        <div class="pass-arrow">PASS ${p.id}</div>
+      </div>
+      <div class="pass-canvas-wrap" id="wrap-p${p.id}">
+        <div class="pass-placeholder">
+          <span class="big">⬡</span>
+          AWAITING INPUT
+        </div>
+        <div class="spinner"></div>
+      </div>
+      <div class="pass-footer">
+        <div class="pass-desc">${p.desc}</div>
+        <div class="pass-time" id="time-p${p.id}"></div>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+buildPassCards();
+
+function toggleConfig(header) {
+  const section = header.closest('.config-section');
+  section.classList.toggle('open');
+}
+function updateVal(input) {
+  document.getElementById('val_' + input.id).textContent = input.value;
+}
+function getParam(id) { return parseFloat(document.getElementById(id).value); }
+function getParamInt(id) { return parseInt(document.getElementById(id).value); }
+function getParamStr(id) { return document.getElementById(id).value; }
+
+// ═══════════════════════════════════════════════════════
+// WEBGPU PIPELINE CLASS
+// ═══════════════════════════════════════════════════════
+class OCRPipeline {
+  constructor(device, width, height) {
+    this.device = device;
+    this.W = width;
+    this.H = height;
+    this.sampler = device.createSampler({
+      magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge'
+    });
+    this.nearestSampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+    this.vsModule = device.createShaderModule({ code: VS });
+    this.textures = {};
+    this.satBuf  = null;
+    this.sat2Buf = null;
+  }
+
+  makeTex(format = 'rgba8unorm') {
+    return this.device.createTexture({
+      size: [this.W, this.H, 1],
+      format,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+  }
+
+  makeUBO(data) {
+    const buf = this.device.createBuffer({ size: Math.max(data.byteLength, 16), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(buf, 0, data);
+    return buf;
+  }
+
+  async renderPass(fsCode, bindings, outputTex) {
+    const d = this.device;
+    const fsMod = d.createShaderModule({ code: fsCode });
+    const pip = d.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: this.vsModule, entryPoint: 'vs' },
+      fragment: { module: fsMod, entryPoint: 'fs', targets: [{ format: outputTex.format }] },
+      primitive: { topology: 'triangle-list' }
+    });
+    const bg = d.createBindGroup({ layout: pip.getBindGroupLayout(0), entries: bindings });
+    const enc = d.createCommandEncoder();
+    const rp = enc.beginRenderPass({
+      colorAttachments: [{ view: outputTex.createView(), loadOp: 'clear', storeOp: 'store', clearValue: {r:0,g:0,b:0,a:1} }]
+    });
+    rp.setPipeline(pip);
+    rp.setBindGroup(0, bg);
+    rp.draw(6);
+    rp.end();
+    d.queue.submit([enc.finish()]);
+    await d.queue.onSubmittedWorkDone();
+    return outputTex;
+  }
+
+  async computePass(csCode, bindings, dispX, dispY = 1) {
+    const d = this.device;
+    const mod = d.createShaderModule({ code: csCode });
+    const pip = d.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: 'cs' } });
+    const bg = d.createBindGroup({ layout: pip.getBindGroupLayout(0), entries: bindings });
+    const enc = d.createCommandEncoder();
+    const cp = enc.beginComputePass();
+    cp.setPipeline(pip);
+    cp.setBindGroup(0, bg);
+    cp.dispatchWorkgroups(dispX, dispY);
+    cp.end();
+    d.queue.submit([enc.finish()]);
+    await d.queue.onSubmittedWorkDone();
+  }
+
+  async readback(tex) {
+    const d = this.device;
+    const bpr = Math.ceil(this.W * 4 / 256) * 256;
+    const buf = d.createBuffer({ size: bpr * this.H, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = d.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr }, [this.W, this.H]);
+    d.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8ClampedArray(buf.getMappedRange());
+    const out = new Uint8ClampedArray(this.W * this.H * 4);
+    for (let y = 0; y < this.H; y++) out.set(src.subarray(y*bpr, y*bpr + this.W*4), y*this.W*4);
+    buf.unmap(); buf.destroy();
+    return out;
+  }
+
+  // ── Pass 1: Grayscale ──────────────────────────────
+  async runPass1(inputTex) {
+    const out = this.makeTex();
+    await this.renderPass(FS_P1, [
+      { binding: 0, resource: inputTex.createView() },
+      { binding: 1, resource: this.sampler },
+    ], out);
+    this.textures.p1 = out;
+    return out;
+  }
+
+  // ── Pass 2: Retinex ───────────────────────────────
+  async runPass2(p1) {
+    const sigma = getParam('retinex_sigma');
+    const ubo = this.makeUBO(new Float32Array([sigma, this.W, this.H, 0]));
+    // Horizontal blur
+    const hBlur = this.makeTex();
+    await this.renderPass(FS_P2a, [
+      { binding:0, resource: p1.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], hBlur);
+    // Vertical blur
+    const vBlur = this.makeTex();
+    await this.renderPass(FS_P2b, [
+      { binding:0, resource: hBlur.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], vBlur);
+    // Retinex
+    const out = this.makeTex();
+    await this.renderPass(FS_P2c, [
+      { binding:0, resource: p1.createView() },
+      { binding:1, resource: vBlur.createView() },
+      { binding:2, resource: this.sampler },
+    ], out);
+    hBlur.destroy(); vBlur.destroy(); ubo.destroy();
+    this.textures.p2 = out;
+    return out;
+  }
+
+  // ── Pass 3: Bilateral filter ──────────────────────
+  async runPass3(p2) {
+    const ss = getParam('bf_sigma_s'), sr = getParam('bf_sigma_r');
+    const ubo = this.makeUBO(new Float32Array([ss, sr, this.W, this.H]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P3, [
+      { binding:0, resource: p2.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p3 = out;
+    return out;
+  }
+
+  // ── Pass 4: CLAHE ─────────────────────────────────
+  async runPass4(p3) {
+    const r = getParam('clahe_radius'), clip = getParam('clahe_clip');
+    const ubo = this.makeUBO(new Float32Array([r, clip, this.W, this.H]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P4, [
+      { binding:0, resource: p3.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p4 = out;
+    return out;
+  }
+
+  // ── Pass 5: Deskew ────────────────────────────────
+  async runPass5(p4) {
+    // CPU Hough to detect angle
+    const pixels = await this.readback(p4);
+    let angle = detectSkewAngle(pixels, this.W, this.H);
+    const maxAngle = getParam('deskew_max') * Math.PI / 180;
+    const manual = getParam('deskew_manual') * Math.PI / 180;
+    if (Math.abs(manual) > 0.001) angle = manual;
+    angle = Math.max(-maxAngle, Math.min(maxAngle, angle));
+    this.detectedAngle = angle;
+
+    const ubo = this.makeUBO(new Float32Array([angle, this.W/2, this.H/2, 0, this.W, this.H, 0, 0]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P5, [
+      { binding:0, resource: p4.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p5 = out;
+    return out;
+  }
+
+  // ── Pass 6: Gradients ─────────────────────────────
+  async runPass6(p5) {
+    const ws = getParam('w_sobel'), wsc = getParam('w_scharr');
+    const wl = getParam('w_laplacian'), wh = getParam('w_hessian');
+    const ubo = this.makeUBO(new Float32Array([ws, wsc, wl, wh, this.W, this.H, 0, 0]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P6, [
+      { binding:0, resource: p5.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p6 = out;
+    return out;
+  }
+
+  // ── Pass 7: SAT build ─────────────────────────────
+  async runPass7(p4) {
+    const d = this.device;
+    const n = this.W * this.H;
+    const bufSize = n * 4; // float32
+
+    const satBuf  = d.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const sat2Buf = d.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    this.satBuf = satBuf; this.sat2Buf = sat2Buf;
+
+    const ubo = this.makeUBO(new Uint32Array([this.W, this.H, 0, 0]));
+
+    // Horizontal scan (dispatch H threads, one per row)
+    await this.computePass(CS_P7a, [
+      { binding:0, resource: { buffer: ubo } },
+      { binding:1, resource: p4.createView() },
+      { binding:2, resource: { buffer: satBuf } },
+      { binding:3, resource: { buffer: sat2Buf } },
+    ], this.H);
+
+    // Vertical scan (dispatch W threads, one per col)
+    await this.computePass(CS_P7b, [
+      { binding:0, resource: { buffer: ubo } },
+      { binding:1, resource: { buffer: satBuf } },
+      { binding:2, resource: { buffer: sat2Buf } },
+    ], this.W);
+
+    // Visualize
+    const out = this.makeTex();
+    await this.renderPass(FS_P7vis, [
+      { binding:0, resource: { buffer: ubo } },
+      { binding:1, resource: { buffer: satBuf } },
+    ], out);
+    ubo.destroy();
+    this.textures.p7 = out;
+    return out;
+  }
+
+  // ── Pass 8: Sauvola/Wolf threshold ────────────────
+  async runPass8(p4) {
+    if (!this.satBuf) throw new Error('SAT not built — run Pass 7 first');
+    const r = getParam('thresh_radius'), ks = getParam('k_sauvola');
+    const kw = getParam('k_wolf'), bl = getParam('thresh_blend');
+    const ubo = this.makeUBO(new Float32Array([r, ks, kw, bl, this.W, this.H, this.W, this.H]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P8, [
+      { binding:0, resource: p4.createView() },
+      { binding:1, resource: this.sampler },
+      { binding:2, resource: { buffer: this.satBuf } },
+      { binding:3, resource: { buffer: this.sat2Buf } },
+      { binding:4, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p8 = out;
+    return out;
+  }
+
+  // ── Pass 9: Morphology ────────────────────────────
+  async runPass9(p8) {
+    const r = getParam('morph_radius');
+    const mode = parseInt(document.getElementById('morph_mode').value);
+    const ubo = this.makeUBO(new Float32Array([r, this.W, this.H, 0]));
+    let cur = p8;
+    const doErode = async (src) => {
+      const t = this.makeTex();
+      await this.renderPass(FS_P9_ERODE, [
+        { binding:0, resource: src.createView() },
+        { binding:1, resource: this.sampler },
+        { binding:2, resource: { buffer: ubo } }
+      ], t);
+      return t;
+    };
+    const doDilate = async (src) => {
+      const t = this.makeTex();
+      await this.renderPass(FS_P9_DILATE, [
+        { binding:0, resource: src.createView() },
+        { binding:1, resource: this.sampler },
+        { binding:2, resource: { buffer: ubo } }
+      ], t);
+      return t;
+    };
+    let out;
+    if (mode === 0) { const e = await doErode(cur); out = await doDilate(e); e.destroy(); }
+    else if (mode === 1) { const d = await doDilate(cur); out = await doErode(d); d.destroy(); }
+    else if (mode === 2) { out = await doDilate(cur); }
+    else { out = await doErode(cur); }
+    ubo.destroy();
+    this.textures.p9 = out;
+    return out;
+  }
+
+  // ── Pass 10: Distance Transform (JFA) ─────────────
+  async runPass10(p9) {
+    // JFA Init — use rgba8unorm (seed UV coords encoded in 8-bit, acceptable for demo)
+    let jfaTex = this.makeTex();
+    await this.renderPass(FS_P10_INIT, [
+      { binding:0, resource: p9.createView() },
+      { binding:1, resource: this.sampler },
+    ], jfaTex);
+
+    // JFA iterations: step = max_size/2, /4, ..., 1
+    const maxStep = Math.max(this.W, this.H);
+    let step = Math.pow(2, Math.floor(Math.log2(maxStep)));
+    while (step >= 1) {
+      const ubo = this.makeUBO(new Float32Array([step, this.W, this.H, 0]));
+      const next = this.makeTex();
+      await this.renderPass(FS_P10_JFA, [
+        { binding:0, resource: jfaTex.createView() },
+        { binding:1, resource: this.nearestSampler },
+        { binding:2, resource: { buffer: ubo } }
+      ], next);
+      jfaTex.destroy();
+      jfaTex = next;
+      ubo.destroy();
+      step = Math.floor(step / 2);
+    }
+
+    // Distance colormap
+    const scale = getParam('dist_scale');
+    const ubo2 = this.makeUBO(new Float32Array([scale, this.W, this.H, 0]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P10_DIST, [
+      { binding:0, resource: jfaTex.createView() },
+      { binding:1, resource: this.textures.p9.createView() },
+      { binding:2, resource: this.sampler },
+      { binding:3, resource: { buffer: ubo2 } }
+    ], out);
+    this.textures.jfa = jfaTex;
+    ubo2.destroy();
+    this.textures.p10 = out;
+    return { out, jfaTex };
+  }
+
+  // ── Pass 11: Watershed ────────────────────────────
+  async runPass11(jfaTex) {
+    const rt = getParam('ridge_thr');
+    const ubo = this.makeUBO(new Float32Array([rt, this.W, this.H, 0]));
+    const out = this.makeTex();
+    await this.renderPass(FS_P11, [
+      { binding:0, resource: jfaTex.createView() },
+      { binding:1, resource: this.textures.p9.createView() },
+      { binding:2, resource: this.sampler },
+      { binding:3, resource: { buffer: ubo } }
+    ], out);
+    ubo.destroy();
+    this.textures.p11 = out;
+    return out;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// CPU HOUGH SKEW DETECTION
+// ═══════════════════════════════════════════════════════
+function detectSkewAngle(pixels, W, H) {
+  const NUM_ANGLES = 361;
+  const votes = new Float32Array(NUM_ANGLES);
+  const stride = Math.max(1, Math.floor(Math.sqrt(W * H) / 800));
+
+  for (let y = stride; y < H - stride; y += stride) {
+    for (let x = stride; x < W - stride; x += stride) {
+      const idx = (y * W + x) * 4;
+      const gx = (pixels[(y*W+(x+1))*4] || 0) - (pixels[(y*W+(x-1))*4] || 0);
+      const gy = (pixels[((y+1)*W+x)*4] || 0) - (pixels[((y-1)*W+x)*4] || 0);
+      const mag = Math.hypot(gx, gy);
+      if (mag < 20) continue;
+      // gradient direction (perpendicular to edge)
+      let ang = Math.atan2(gy, gx) * 180 / Math.PI; // -180 to 180
+      // Text lines run roughly horizontal; their perpendicular is ~90°
+      // We want deviation from 0°
+      ang = ((ang % 180) + 180) % 180; // 0-180
+      const bin = Math.round(ang * 2) % NUM_ANGLES; // 0.5° resolution
+      votes[bin] += mag / 255;
+    }
+  }
+
+  // Find peak near 90° (horizontal lines have gradient at ~90°)
+  let maxV = 0, bestBin = 180;
+  for (let i = 100; i < 260; i++) { // search ±40° around 90°
+    const b = i % NUM_ANGLES;
+    if (votes[b] > maxV) { maxV = votes[b]; bestBin = i; }
+  }
+  const dominantDeg = (bestBin / 2) - 90; // -45 to +45
+  return dominantDeg * Math.PI / 180;
+}
+
+// ═══════════════════════════════════════════════════════
+// DISPLAY HELPERS
+// ═══════════════════════════════════════════════════════
+function displayOnCard(passId, pixelData, W, H, timeMs) {
+  const wrap = document.getElementById(`wrap-p${passId}`);
+  wrap.innerHTML = '';
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = '100%';
+  canvas.style.height = 'auto';
+  canvas.style.maxHeight = '200px';
+  canvas.style.display = 'block';
+  wrap.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  ctx.putImageData(new ImageData(pixelData, W, H), 0, 0);
+  if (timeMs !== undefined) {
+    document.getElementById(`time-p${passId}`).textContent = `${timeMs.toFixed(0)}ms`;
+  }
+  const card = document.getElementById(`card-p${passId}`);
+  card.classList.remove('active');
+  card.classList.add('done');
+}
+
+function setActive(passId) {
+  PASSES.forEach(p => {
+    const c = document.getElementById(`card-p${p.id}`);
+    c.classList.remove('active');
+  });
+  const card = document.getElementById(`card-p${passId}`);
+  card.classList.add('active');
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function setStatus(msg, progress) {
+  document.getElementById('statusText').textContent = msg;
+  if (progress !== undefined) {
+    document.getElementById('progressFill').style.width = progress + '%';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// WEBGPU INIT
+// ═══════════════════════════════════════════════════════
+let device = null;
+let inputTexture = null;
+let imgW = 0, imgH = 0;
+
+async function initGPU() {
+  const badge = document.getElementById('gpuBadge');
+  try {
+    if (!navigator.gpu) throw new Error('WebGPU not supported');
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('No GPU adapter found');
+    device = await adapter.requestDevice();
+    device.lost.then(info => {
+      badge.textContent = 'DEVICE LOST';
+      badge.className = 'gpu-badge error';
+      setStatus('⚠ GPU device lost: ' + info.reason);
+    });
+    badge.textContent = 'WebGPU ✓';
+    badge.className = 'gpu-badge';
+    setStatus('WebGPU ready · Upload an image to begin');
+  } catch(e) {
+    badge.textContent = 'NO WEBGPU';
+    badge.className = 'gpu-badge error';
+    showError('WebGPU not available: ' + e.message + '. Use Chrome/Edge 113+ with WebGPU enabled.');
+    setStatus('WebGPU unavailable');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// IMAGE UPLOAD
+// ═══════════════════════════════════════════════════════
+const MAX_DIM = 1024;
+
+function handleImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      // Scale down if needed
+      let w = img.width, h = img.height;
+      if (w > MAX_DIM || h > MAX_DIM) {
+        const scale = MAX_DIM / Math.max(w, h);
+        w = Math.floor(w * scale);
+        h = Math.floor(h * scale);
+      }
+      // Draw to offscreen canvas
+      const oc = new OffscreenCanvas(w, h);
+      const ctx = oc.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+
+      // Preview
+      const pc = document.getElementById('previewCanvas');
+      pc.width = w; pc.height = h;
+      pc.getContext('2d').putImageData(imageData, 0, 0);
+      document.getElementById('previewWrap').style.display = 'block';
+      document.getElementById('previewLabel').textContent = `${w}×${h} · ${file.name}`;
+
+      // Upload to GPU
+      if (!device) { showError('WebGPU not initialized'); return; }
+      imgW = w; imgH = h;
+      inputTexture = device.createTexture({
+        size: [w, h, 1],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      device.queue.writeTexture(
+        { texture: inputTexture },
+        imageData.data,
+        { bytesPerRow: w * 4 },
+        [w, h]
+      );
+      document.getElementById('runBtn').disabled = false;
+      setStatus(`Image loaded: ${w}×${h} · Ready to process`);
+      // Reset cards
+      PASSES.forEach(p => {
+        const card = document.getElementById(`card-p${p.id}`);
+        card.classList.remove('active', 'done');
+        const wrap = document.getElementById(`wrap-p${p.id}`);
+        wrap.innerHTML = `<div class="pass-placeholder"><span class="big">⬡</span>AWAITING PIPELINE</div>`;
+        document.getElementById(`time-p${p.id}`).textContent = '';
+      });
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+document.getElementById('uploadZone').onclick = () => document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange = e => handleImageFile(e.target.files[0]);
+const zone = document.getElementById('uploadZone');
+zone.ondragover = e => { e.preventDefault(); zone.classList.add('drag-over'); };
+zone.ondragleave = () => zone.classList.remove('drag-over');
+zone.ondrop = e => { e.preventDefault(); zone.classList.remove('drag-over'); handleImageFile(e.dataTransfer.files[0]); };
+
+// ═══════════════════════════════════════════════════════
+// MAIN PIPELINE RUN
+// ═══════════════════════════════════════════════════════
+function showError(msg) {
+  const b = document.getElementById('errorBanner');
+  b.textContent = '⚠ ' + msg;
+  b.style.display = 'block';
+  setTimeout(() => b.style.display = 'none', 8000);
+}
+
+async function runPipeline() {
+  if (!device || !inputTexture) return;
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  document.getElementById('progressFill').style.width = '0%';
+
+  try {
+    const pipe = new OCRPipeline(device, imgW, imgH);
+    const pct = n => document.getElementById('progressFill').style.width = n + '%';
+
+    async function runPass(id, fn, label) {
+      setActive(id);
+      setStatus(`Running Pass ${id}: ${label}…`, (id-1)/11*100);
+      const t0 = performance.now();
+      const result = await fn();
+      const dt = performance.now() - t0;
+      const pixels = await pipe.readback(Array.isArray(result) ? result[0] : (result.out || result));
+      displayOnCard(id, pixels, imgW, imgH, dt);
+      pct(id/11*100);
+      return result;
+    }
+
+    const p1  = await runPass(1, () => pipe.runPass1(inputTexture), 'RGB → Grayscale');
+    const p2  = await runPass(2, () => pipe.runPass2(p1),           'Retinex');
+    const p3  = await runPass(3, () => pipe.runPass3(p2),           'Guided Filter');
+    const p4  = await runPass(4, () => pipe.runPass4(p3),           'CLAHE');
+    const p5  = await runPass(5, () => pipe.runPass5(p4),           'Deskew');
+    const p6  = await runPass(6, () => pipe.runPass6(p5),           'Gradients');
+    const p7  = await runPass(7, () => pipe.runPass7(p4),           'SAT Build');
+    const p8  = await runPass(8, () => pipe.runPass8(p4),           'Sauvola/Wolf');
+    const p9  = await runPass(9, () => pipe.runPass9(p8),           'Morphology');
+    const p10res = await runPass(10, () => pipe.runPass10(p9),       'Distance Transform');
+    const jfaTex = p10res.jfaTex || pipe.textures.jfa;
+    await runPass(11, () => pipe.runPass11(jfaTex),                  'Watershed');
+
+    if (pipe.detectedAngle !== undefined) {
+      setStatus(`✓ Pipeline complete · Detected skew: ${(pipe.detectedAngle * 180/Math.PI).toFixed(2)}°`, 100);
+    } else {
+      setStatus('✓ Pipeline complete', 100);
+    }
+  } catch(e) {
+    console.error(e);
+    showError('Pipeline error: ' + e.message);
+    setStatus('Pipeline failed: ' + e.message);
+  }
+  btn.disabled = false;
+}
+
+document.getElementById('runBtn').onclick = runPipeline;
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+initGPU();
+</script>
+</body>
+</html>

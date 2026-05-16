@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<!--
+  index.html — Sauvola WebGPU Document Binarisation Tool
+  ───────────────────────────────────────────────────────
+  This file contains only HTML structure and external resource references.
+  All styles live in css/style.css; all logic lives in js/*.js.
+
+  ES Module loading
+  ─────────────────
+  The <script type="module"> tag loads js/main.js which in turn imports
+  the other modules via static import statements.  No bundler is required —
+  modern browsers support ES modules natively.
+
+  Browser requirements
+  ─────────────────────
+  • Chrome 113+ / Edge 113+ with hardware acceleration enabled.
+  • WebGPU API (navigator.gpu must be defined).
+  • If WebGPU is unavailable, an error banner is shown automatically.
+
+  Fonts
+  ─────
+  • Syne 700/800      — Logo and run button (distinctive display face)
+  • DM Mono 400/500   — Code labels, pipeline indicator, stats
+  • DM Sans 300/400/500 — Body text and controls
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sauvola Threshold · WebGPU</title>
+
+  <!-- Google Fonts: three complementary typefaces -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500&display=swap"
+    rel="stylesheet"
+  >
+
+  <!-- Application stylesheet -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ══════════════════════════════════════════════════════════════
+       SIDEBAR — controls, algorithm reference, pipeline indicator
+       ══════════════════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <!-- Logo / branding -->
+    <div class="logo">
+      <div class="logo-title">Sauvola<br>Threshold</div>
+      <div class="logo-sub">Document Binarization</div>
+      <div class="tag-row">
+        <span class="tag tag-amber">WebGPU</span>
+        <span class="tag tag-teal">WGSL</span>
+      </div>
+    </div>
+
+    <!-- Image upload -->
+    <div>
+      <div class="section-label">Upload Image</div>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <div class="drop-icon">📄</div>
+        <div class="drop-title">Drop image here</div>
+        <div class="drop-sub">or click to browse</div>
+      </div>
+    </div>
+
+    <!-- Sauvola formula reference card -->
+    <div class="formula-box">
+      <div class="section-label">Algorithm</div>
+      <div class="formula">T = μ·[1 + k·(σ/R − 1)]</div>
+      <div class="legend-row"><span>μ</span><em>local mean</em></div>
+      <div class="legend-row"><span>σ</span><em>local std dev</em></div>
+      <div class="legend-row"><span>k</span><em>sensitivity [0,1]</em></div>
+      <div class="legend-row"><span>R</span><em>0.5 (normalized)</em></div>
+    </div>
+
+    <!-- Parameter sliders -->
+    <div class="params">
+      <div class="section-label">Parameters</div>
+
+      <div class="param">
+        <div class="param-head">Window Size <em id="winLbl">15</em></div>
+        <input type="range" id="winSlider" min="5" max="63" step="2" value="15">
+      </div>
+
+      <div class="param">
+        <div class="param-head">k (sensitivity) <em id="kLbl">0.30</em></div>
+        <input type="range" id="kSlider" min="0.05" max="0.95" step="0.05" value="0.30">
+      </div>
+
+      <div class="param">
+        <div class="param-head">Min region (px²) <em id="areaLbl">80</em></div>
+        <input type="range" id="areaSlider" min="10" max="2000" step="10" value="80">
+      </div>
+    </div>
+
+    <!-- GPU pipeline step indicator (updated dynamically by setStep()) -->
+    <div>
+      <div class="section-label">GPU Pipeline</div>
+      <div class="pipeline" id="pipelineSteps">
+        <div class="pipe-step" data-step="0"><span class="pipe-num">1</span>RGBA → Grayscale</div>
+        <div class="pipe-step" data-step="1"><span class="pipe-num">2</span>Row Prefix Sum</div>
+        <div class="pipe-step" data-step="2"><span class="pipe-num">3</span>Col Prefix Sum</div>
+        <div class="pipe-step" data-step="3"><span class="pipe-num">4</span>Sauvola Threshold</div>
+        <div class="pipe-step" data-step="4"><span class="pipe-num">5</span>Connected Comp. (CPU)</div>
+        <div class="pipe-step" data-step="5"><span class="pipe-num">6</span>Char Separation</div>
+        <div class="pipe-step" data-step="6"><span class="pipe-num">7</span>Bounding Boxes</div>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="btn-stack">
+      <button class="btn btn-ghost" id="demoBtn">🎲 New Demo Image</button>
+      <button class="btn btn-run"   id="processBtn" disabled>▶ Run Pipeline</button>
+    </div>
+
+  </aside>
+
+  <!-- ══════════════════════════════════════════════════════════════
+       MAIN AREA — five output panels arranged in three rows
+       ══════════════════════════════════════════════════════════════ -->
+  <main class="main">
+
+    <!-- Error banner (hidden by default, shown by showError()) -->
+    <div class="err-banner" id="errBanner"></div>
+
+    <!-- ── Row 1: Original + Greyscale ── -->
+    <div class="panel-row">
+
+      <!-- Panel 01: Original input image -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="dot" style="background:#5a3fb5"></div>
+          01 · ORIGINAL
+          <span class="panel-info" id="origInfo"></span>
+        </div>
+        <div class="canvas-area">
+          <canvas id="cOrig"></canvas>
+          <div class="placeholder" id="phOrig">
+            <div class="placeholder-icon">🖼</div>
+            <span>Upload or generate demo</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel 02: BT.601 greyscale (GPU pass 1 output) -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="dot" style="background:#7680a0"></div>
+          02 · GRAYSCALE
+        </div>
+        <div class="canvas-area">
+          <canvas id="cGray" style="display:none"></canvas>
+          <div class="placeholder" id="phGray"><span>Awaiting GPU pass 1</span></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Row 2: Binary + Feature colours ── -->
+    <div class="panel-row">
+
+      <!-- Panel 03: Sauvola binary mask (GPU pass 4 output) -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="dot" style="background:#d4922b"></div>
+          03 · SAUVOLA BINARY
+          <span class="panel-info" id="binaryInfo"></span>
+        </div>
+        <div class="canvas-area">
+          <canvas id="cBinary" style="display:none"></canvas>
+          <div class="placeholder" id="phBinary"><span>Awaiting GPU pass 4</span></div>
+        </div>
+      </div>
+
+      <!-- Panel 04: Per-region false colour map -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="dot" style="background:#1a8f7c"></div>
+          04 · TEXT FEATURES
+          <span class="panel-info" id="featInfo"></span>
+        </div>
+        <div class="canvas-area">
+          <canvas id="cFeat" style="display:none"></canvas>
+          <div class="placeholder" id="phFeat"><span>Regions colored by label</span></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Row 3: Bounding boxes (wide panel) ── -->
+    <div class="panel-row">
+      <div class="panel wide">
+        <div class="panel-head">
+          <div class="dot" style="background:#c9363a"></div>
+          05 · BOUNDING BOXES — TEXT REGION DETECTION
+          <span class="panel-info" id="boxInfo"></span>
+        </div>
+
+        <!-- Canvas area with loading overlay -->
+        <div class="canvas-area" style="position:relative">
+          <canvas id="cBoxes" style="display:none; max-height:400px"></canvas>
+          <div class="placeholder" id="phBoxes">
+            <span>Awaiting connected components</span>
+          </div>
+          <!-- Loading overlay: shown during GPU + CPU processing -->
+          <div class="loading-overlay" id="loadingOverlay">
+            <div class="spin"></div>
+            <span id="loadingMsg">PROCESSING…</span>
+          </div>
+        </div>
+
+        <!-- Stats bar: four timing / count metrics -->
+        <div class="stats-row">
+          <div class="stat">
+            <div class="stat-val" id="sRegions">—</div>
+            <div class="stat-lbl">Regions</div>
+          </div>
+          <div class="stat">
+            <div class="stat-val" id="sPixels">—</div>
+            <div class="stat-lbl">Text Pixels</div>
+          </div>
+          <div class="stat">
+            <div class="stat-val" id="sGpu">—</div>
+            <div class="stat-lbl">GPU Time</div>
+          </div>
+          <div class="stat">
+            <div class="stat-val" id="sCpu">—</div>
+            <div class="stat-lbl">CC Time</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ES Module entry point — imports all other JS modules transitively -->
+<script type="module" src="js/main.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ULTIMATE WebGPU OCR</title>
+<link rel="stylesheet" href="styles.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=IBM+Plex+Mono:wght@300;400;600&display=swap" rel="stylesheet"/>
+</head>
+<body>
+<div id="scanlines"></div>
+<div id="app">
+  <header id="hdr">
+    <div id="logo-wrap">
+      <div id="logo-glyph">◈</div>
+      <div id="logo-text">
+        <span class="l1">ULTIMATE</span>
+        <span class="l2">WebGPU OCR</span>
+        <span class="l3">Neural Pipeline v1.0</span>
+      </div>
+    </div>
+    <div id="gpu-badge" class="badge">GPU: <span id="gpu-name">–</span></div>
+  </header>
+
+  <section id="upload-zone">
+    <div id="drop-area" class="drop-idle">
+      <div class="drop-icon">⬡</div>
+      <div class="drop-label">DROP IMAGE HERE</div>
+      <div class="drop-sub">or click to browse</div>
+      <input type="file" id="file-input" accept="image/*"/>
+    </div>
+    <div id="ctrl-row">
+      <button id="btn-run" disabled>⚡ EXECUTE PIPELINE</button>
+      <button id="btn-zip" disabled>⬇ DOWNLOAD ALL STAGES</button>
+      <button id="btn-clear">✕ CLEAR</button>
+    </div>
+    <div id="progress-bar-wrap">
+      <div id="progress-bar"></div>
+      <div id="progress-label">IDLE</div>
+    </div>
+  </section>
+
+  <div id="preview-row">
+    <div class="preview-card">
+      <div class="card-label">SOURCE INPUT</div>
+      <canvas id="canvas-source"></canvas>
+    </div>
+  </div>
+
+  <section id="stages-grid">
+  </section>
+
+  <footer id="ft">
+    <span>WebGPU Compute Shaders · WGSL · All processing on GPU</span>
+    <span id="total-time"></span>
+  </footer>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>

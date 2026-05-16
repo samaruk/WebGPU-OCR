@@ -1,0 +1,39 @@
+{
+  "photocopy": {
+    "description": "Typical photocopied document: moderate blur, noise, contrast reduction",
+    "operations": [
+      { "type": "gaussianBlur",     "sigma": 1.2 },
+      { "type": "addNoise",         "sigma": 0.04 },
+      { "type": "reduceBrightness", "factor": 0.88 },
+      { "type": "saltPepper",       "density": 0.002 }
+    ]
+  },
+  "phone_scan": {
+    "description": "Phone camera scan: perspective distortion, uneven illumination, JPEG artifacts",
+    "operations": [
+      { "type": "gaussianBlur",     "sigma": 0.8 },
+      { "type": "addNoise",         "sigma": 0.06 },
+      { "type": "jpegArtifacts",    "quality": 65 },
+      { "type": "reduceBrightness", "factor": 0.75 }
+    ]
+  },
+  "fax": {
+    "description": "Fax transmission: heavy salt-and-pepper noise, strong blur, banding",
+    "operations": [
+      { "type": "gaussianBlur",     "sigma": 2.0 },
+      { "type": "saltPepper",       "density": 0.015 },
+      { "type": "reduceBrightness", "factor": 0.70 },
+      { "type": "addNoise",         "sigma": 0.08 }
+    ]
+  },
+  "aged_doc": {
+    "description": "Aged paper document: yellowing, staining, ink bleed, physical damage",
+    "operations": [
+      { "type": "gaussianBlur",     "sigma": 1.5 },
+      { "type": "addNoise",         "sigma": 0.05 },
+      { "type": "reduceBrightness", "factor": 0.82 },
+      { "type": "saltPepper",       "density": 0.004 },
+      { "type": "jpegArtifacts",    "quality": 80 }
+    ]
+  }
+}

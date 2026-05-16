@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GPU Enterprise OCR Pipeline – Revised</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <header class="header">
+    <div class="logo">🔬 <span>GPU Enterprise OCR – Revised</span></div>
+    <div class="toolbar">
+      <label class="btn file-btn">📁 Load Image<input type="file" id="imgFile" accept="image/*" hidden></label>
+      <button id="runBtn"  class="btn primary"   disabled>▶ Run Pipeline</button>
+      <button id="dlBtn"   class="btn secondary" disabled>⬇ Download ZIP</button>
+    </div>
+    <div class="status-row">
+      <div class="progress-wrap"><div id="pgFill" class="progress-fill"></div></div>
+      <span id="statusMsg">Load an image to begin</span>
+    </div>
+  </header>
+
+  <div id="perf-bar">
+    <span class="perf-label">Stage timings (ms):</span>
+    <div id="perf-chips"></div>
+  </div>
+
+  <div id="grid"></div>
+
+  <div id="results-panel">
+    <div class="results-header">
+      <span>📝 OCR Result</span>
+      <span id="conf-badge" class="badge">–</span>
+    </div>
+    <pre id="results-text">Run the pipeline to see recognition output…</pre>
+  </div>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>

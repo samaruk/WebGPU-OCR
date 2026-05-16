@@ -1,0 +1,1 @@
+export class BeamSearchDecoder{decode(l,T,V,B=5){return{text:"",confidence:0};}}

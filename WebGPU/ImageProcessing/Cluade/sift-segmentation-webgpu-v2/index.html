@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SIFT Segmentation · WebGPU</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Manrope:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="15" stroke="#6c63ff" stroke-width="2"/><path d="M8 16c0-4.4 3.6-8 8-8s8 3.6 8 8-3.6 8-8 8" stroke="#00e5c3" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="16" r="3" fill="#6c63ff"/></svg>
+        <span>SIFT<span class="accent">Seg</span></span>
+      </div>
+      <div class="controls">
+        <label class="btn btn-ghost" for="fileInput">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Load Image
+          <input type="file" id="fileInput" accept="image/*" hidden>
+        </label>
+        <button id="runBtn" class="btn btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run Pipeline
+        </button>
+        <span id="status" class="status">Initialising…</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <h1>GPU Compute Pipeline · <span class="mono">15 stages</span></h1>
+      <p>Each canvas below shows the live output of one compute stage, rendered directly from GPU buffers via CPU readback.</p>
+    </section>
+
+    <div class="stage-grid">
+
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">Upload</span>
+                <span class="stage-name">Upload</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-upload"></canvas>
+            </div>
+            <p class="stage-desc">Original</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">01</span>
+                <span class="stage-name">Upload</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-gray" data-stage="upload"></canvas>
+            </div>
+            <p class="stage-desc">Greyscale luminance</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">02</span>
+                <span class="stage-name">Preprocess</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-preprocess" data-stage="preprocess"></canvas>
+            </div>
+            <p class="stage-desc">Gaussian blur + gamma</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">03</span>
+                <span class="stage-name">Pyramid</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-pyramid" data-stage="pyramid"></canvas>
+            </div>
+            <p class="stage-desc">Scale-space level 2</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">04</span>
+                <span class="stage-name">DoG</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-dog" data-stage="dog"></canvas>
+            </div>
+            <p class="stage-desc">Difference of Gaussians</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">05</span>
+                <span class="stage-name">Extrema</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-extrema" data-stage="extrema"></canvas>
+            </div>
+            <p class="stage-desc">Local 3D minima/maxima</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">06</span>
+                <span class="stage-name">Refine</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-refine" data-stage="refine"></canvas>
+            </div>
+            <p class="stage-desc">Subpixel refined keypoints</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">07</span>
+                <span class="stage-name">Orientation</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-orientation" data-stage="orientation"></canvas>
+            </div>
+            <p class="stage-desc">Dominant orientations</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">08</span>
+                <span class="stage-name">Descriptor</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-descriptor" data-stage="descriptor"></canvas>
+            </div>
+            <p class="stage-desc">128-D SIFT fingerprint</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">09</span>
+                <span class="stage-name">Clustering</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-clustering" data-stage="clustering"></canvas>
+            </div>
+            <p class="stage-desc">Keypoint density heatmap</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">10</span>
+                <span class="stage-name">Stroke Width</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-stroke" data-stage="stroke"></canvas>
+            </div>
+            <p class="stage-desc">Stroke Width Transform</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">11</span>
+                <span class="stage-name">Fusion</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-fusion" data-stage="fusion"></canvas>
+            </div>
+            <p class="stage-desc">Confidence mask</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">12</span>
+                <span class="stage-name">Segmentation</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-segmentation" data-stage="segmentation"></canvas>
+            </div>
+            <p class="stage-desc">Connected component labels</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">13</span>
+                <span class="stage-name">Skeleton</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-skeleton" data-stage="skeleton"></canvas>
+            </div>
+            <p class="stage-desc">Zhang-Suen thinning</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">14</span>
+                <span class="stage-name">Graph</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-graph" data-stage="graph"></canvas>
+            </div>
+            <p class="stage-desc">Post-merge labels</p>
+        </div>
+        <div class="stage-card">
+            <div class="stage-label">
+                <span class="stage-num">15</span>
+                <span class="stage-name">Postprocess</span>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="canvas-postprocess" data-stage="postprocess"></canvas>
+            </div>
+            <p class="stage-desc">Bounding boxes + polygons</p>
+        </div>
+    </div>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

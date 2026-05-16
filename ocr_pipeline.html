@@ -1,0 +1,1682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebGPU OCR Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;600;800;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #06060c;
+  --bg2: #0d0d18;
+  --bg3: #14141f;
+  --bg4: #1a1a28;
+  --acc: #00ffa2;
+  --acc2: #ff4060;
+  --acc3: #3399ff;
+  --acc4: #ffcc00;
+  --acc5: #cc44ff;
+  --dim: #2a2a42;
+  --dim2: #1e1e30;
+  --txt: #c8d0e8;
+  --txt2: #7080a0;
+  --mono: 'Share Tech Mono', monospace;
+  --head: 'Barlow Condensed', sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%;background:var(--bg);color:var(--txt);font-family:var(--mono);overflow-x:hidden}
+
+body::before{
+  content:'';position:fixed;inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.07) 3px,rgba(0,0,0,.07) 4px);
+  pointer-events:none;z-index:9000
+}
+
+/* ── Header ── */
+.hdr{
+  padding:20px 28px 14px;
+  border-bottom:1px solid var(--dim);
+  display:flex;align-items:center;gap:16px;
+  background:linear-gradient(180deg,#0a0a14,transparent)
+}
+.hdr-logo{
+  font-family:var(--head);font-size:1.8rem;font-weight:900;
+  letter-spacing:.12em;text-transform:uppercase;
+  color:var(--acc);text-shadow:0 0 20px rgba(0,255,162,.4)
+}
+.hdr-sub{font-size:.7rem;color:var(--txt2);letter-spacing:.22em;margin-top:2px}
+.gpu-pill{
+  margin-left:auto;font-size:.65rem;padding:4px 12px;
+  border:1px solid var(--acc);color:var(--acc);letter-spacing:.18em;
+  background:rgba(0,255,162,.06)
+}
+
+/* ── Controls ── */
+.ctrl{
+  padding:12px 28px;display:flex;align-items:center;gap:12px;
+  border-bottom:1px solid var(--dim);background:var(--bg2);flex-wrap:wrap
+}
+.btn{
+  padding:7px 18px;border:1px solid;background:transparent;
+  font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;
+  cursor:pointer;text-transform:uppercase;transition:all .15s;
+  border-color:var(--acc);color:var(--acc)
+}
+.btn:hover{background:var(--acc);color:var(--bg)}
+.btn.b2{border-color:var(--acc3);color:var(--acc3)}
+.btn.b2:hover{background:var(--acc3);color:var(--bg)}
+.btn.b3{border-color:var(--acc2);color:var(--acc2)}
+.btn.b3:hover{background:var(--acc2);color:var(--bg)}
+.btn:disabled{opacity:.28;pointer-events:none}
+.status{flex:1;font-size:.7rem;color:var(--txt2);min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.status em{color:var(--acc);font-style:normal}
+.pbar{width:180px;height:3px;background:var(--dim);flex-shrink:0}
+.pfill{height:100%;background:var(--acc);width:0%;transition:width .25s}
+
+/* ── Drop zone ── */
+.dropz{
+  border:1px dashed var(--dim);margin:16px 28px 0;padding:20px;
+  text-align:center;cursor:pointer;transition:border-color .2s;
+  font-size:.75rem;color:var(--txt2)
+}
+.dropz:hover,.dropz.over{border-color:var(--acc);color:var(--acc)}
+.dropz.has-img{padding:8px;border-color:rgba(0,255,162,.4)}
+.dropz img{max-height:100px;max-width:100%;object-fit:contain}
+.dropz .hint{font-size:.6rem;opacity:.5;margin-top:4px}
+
+/* ── Pipeline layout ── */
+.pipe{padding:20px 28px;display:flex;flex-direction:column;gap:24px}
+
+.stage{border:1px solid var(--dim);background:var(--bg2);position:relative;overflow:hidden}
+.stage.running::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(0,255,162,.04),transparent);
+  animation:scan .9s linear infinite;pointer-events:none
+}
+@keyframes scan{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+.shdr{
+  padding:9px 14px;background:var(--bg3);border-bottom:1px solid var(--dim);
+  display:flex;align-items:center;gap:10px
+}
+.stag{
+  font-size:.6rem;padding:2px 8px;border:1px solid;letter-spacing:.14em;flex-shrink:0;
+  font-weight:700
+}
+.stag.s1{border-color:#00cc88;color:#00cc88}
+.stag.s2{border-color:#ff4455;color:#ff4455}
+.stag.s3{border-color:#ffaa00;color:#ffaa00}
+.stag.s4{border-color:#bb44ff;color:#bb44ff}
+.stag.s5{border-color:#33aaff;color:#33aaff}
+.stitle{font-family:var(--head);font-size:1rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase}
+.sdesc{margin-left:auto;font-size:.62rem;color:var(--txt2);letter-spacing:.1em;text-align:right}
+.stime{font-size:.65rem;color:var(--acc);margin-left:10px;min-width:52px;text-align:right}
+
+.crow{padding:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+.cpanel{flex:1;min-width:180px;max-width:380px}
+.clbl{
+  font-size:.58rem;color:var(--txt2);letter-spacing:.2em;margin-bottom:6px;
+  text-transform:uppercase;display:flex;align-items:center;gap:6px
+}
+.clbl::before{content:'›';color:var(--acc);font-size:.8rem}
+canvas{display:block;width:100%;border:1px solid var(--dim2);background:#0a0a12;image-rendering:pixelated}
+canvas.ph{opacity:.2}
+
+.crops{padding:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;min-height:72px}
+.cbox{display:flex;flex-direction:column;align-items:center;gap:3px}
+.cbox canvas{height:40px;width:auto;max-width:260px;image-rendering:auto}
+.cbox .cidx{font-size:.58rem;color:var(--txt2);letter-spacing:.12em}
+
+/* ── Log ── */
+.log{
+  margin:0 28px 20px;border:1px solid var(--dim);background:var(--bg2);
+  padding:10px 14px;max-height:100px;overflow-y:auto;
+  font-size:.65rem;line-height:1.9;color:var(--txt2)
+}
+.log::-webkit-scrollbar{width:4px}
+.log::-webkit-scrollbar-track{background:var(--bg)}
+.log::-webkit-scrollbar-thumb{background:var(--dim)}
+.le{display:block}.le.i .t{color:var(--acc3)}.le .t{color:var(--acc);margin-right:6px}.le.w .t{color:var(--acc2)}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <div class="hdr-logo">WebGPU OCR Pipeline</div>
+    <div class="hdr-sub">// DBNet Architecture · Differentiable Binarization · Perspective Rectification</div>
+  </div>
+  <div class="gpu-pill" id="gpuBadge">⚡ INITIALIZING</div>
+</div>
+
+<div id="fileBanner" style="display:none;padding:8px 28px;background:#332200;color:#ffcc00;font-size:.72rem;letter-spacing:.1em;border-bottom:1px solid #664400">
+  ⚠ Running from <strong>file://</strong> — AI verification (Stage 3b) is disabled due to browser CORS policy.
+  Serve via: <code style="background:#1a1100;padding:2px 6px">python -m http.server 8080</code> then open <code style="background:#1a1100;padding:2px 6px">http://localhost:8080</code>
+</div>
+<div class="ctrl">
+  <button class="btn b2" onclick="document.getElementById('fi').click()">↑ LOAD IMAGE</button>
+  <input type="file" id="fi" accept="image/*" style="display:none">
+  <button class="btn" id="runBtn" disabled>▶ RUN PIPELINE</button>
+  <button class="btn b3" id="resetBtn">✕ RESET</button>
+  <div class="pbar"><div class="pfill" id="pf"></div></div>
+  <div class="status" id="sts">Ready — load an image to begin</div>
+</div>
+
+<div class="dropz" id="dz">
+  <div>Drop image here  ·  or click LOAD IMAGE</div>
+  <div class="hint">JPEG · PNG · BMP · WebP</div>
+</div>
+
+<div class="pipe">
+
+<!-- Stage 1 -->
+<div class="stage" id="sg1">
+  <div class="shdr">
+    <span class="stag s1">01</span>
+    <span class="stitle">Preprocessing</span>
+    <span class="sdesc">Resize (×32) · Normalize · CLAHE · Bilateral Denoise</span>
+    <span class="stime" id="t1">—</span>
+  </div>
+  <div class="crow">
+    <div class="cpanel"><div class="clbl">Input (resized, ×32 aligned)</div><canvas id="c1a" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Grayscale + ImageNet Norm</div><canvas id="c1b" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">CLAHE (clip=2, tile=8)</div><canvas id="c1c" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Bilateral Denoised (σs=3 σr=0.3)</div><canvas id="c1d" class="ph" height="1"></canvas></div>
+  </div>
+</div>
+
+<!-- Stage 2 -->
+<div class="stage" id="sg2">
+  <div class="shdr">
+    <span class="stag s2">02</span>
+    <span class="stitle">Text Detection — DBNet</span>
+    <span class="sdesc">P(x): gradient+variance+LoG · T(x): Sauvola · B = σ(k·(P−T))</span>
+    <span class="stime" id="t2">—</span>
+  </div>
+  <div class="crow">
+    <div class="cpanel"><div class="clbl">Probability Map P(x)</div><canvas id="c2a" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Threshold Map T(x)</div><canvas id="c2b" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Binary Map  B = 1/(1+e^−k(P−T))  k=50</div><canvas id="c2c" class="ph" height="1"></canvas></div>
+  </div>
+</div>
+
+<!-- Stage 3 -->
+<div class="stage" id="sg3">
+  <div class="shdr">
+    <span class="stag s3">03</span>
+    <span class="stitle">Box Refinement & Geometry</span>
+    <span class="sdesc">Connected Components · Score Filter · Unclip · Polygons</span>
+    <span class="stime" id="t3">—</span>
+  </div>
+  <div class="crow">
+    <div class="cpanel"><div class="clbl">Connected Components</div><canvas id="c3a" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Per-Character Boxes</div><canvas id="c3b" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Per-Character Boxes (padded)</div><canvas id="c3c" class="ph" height="1"></canvas></div>
+  </div>
+</div>
+
+<!-- Stage 3b -->
+<div class="stage" id="sg3b">
+  <div class="shdr">
+    <span class="stag s3" style="border-color:#ff8c00;color:#ff8c00">3b</span>
+    <span class="stitle">AI Character Verification</span>
+    <span class="sdesc">Claude Vision · Batch Grid Classification · Keep Letters Only</span>
+    <span class="stime" id="t3b">—</span>
+  </div>
+  <div class="crow">
+    <div class="cpanel" style="max-width:100%"><div class="clbl">Classification Grid (sent to Claude)</div><canvas id="c3bGrid" class="ph" height="1" style="max-width:100%;image-rendering:pixelated"></canvas></div>
+    <div class="cpanel"><div class="clbl">Verified Characters Only</div><canvas id="c3bOut" class="ph" height="1"></canvas></div>
+  </div>
+</div>
+
+<!-- Stage 4 -->
+<div class="stage" id="sg4">
+  <div class="shdr">
+    <span class="stag s4">04</span>
+    <span class="stitle">Orientation Classification</span>
+    <span class="sdesc">Structure Tensor · Dominant Angle · 0° / 90° / 180° / 270°</span>
+    <span class="stime" id="t4">—</span>
+  </div>
+  <div class="crow">
+    <div class="cpanel"><div class="clbl">Orientation Field (HSV)</div><canvas id="c4a" class="ph" height="1"></canvas></div>
+    <div class="cpanel"><div class="clbl">Per-Region Classification</div><canvas id="c4b" class="ph" height="1"></canvas></div>
+  </div>
+</div>
+
+<!-- Stage 5 -->
+<div class="stage" id="sg5">
+  <div class="shdr">
+    <span class="stag s5">05</span>
+    <span class="stitle">Text Line Cropping & Rectification</span>
+    <span class="sdesc">4-Point Perspective Warp · H=40px Normalization</span>
+    <span class="stime" id="t5">—</span>
+  </div>
+  <div class="crops" id="cropsOut">
+    <span style="font-size:.7rem;color:var(--txt2);padding:8px">Text line crops will appear here</span>
+  </div>
+</div>
+
+</div><!-- .pipe -->
+<div class="log" id="logEl"></div>
+
+<script type="module">
+// ═══════════════════════════════════════════════════════════════
+// WGSL COMPUTE SHADERS
+// ═══════════════════════════════════════════════════════════════
+const WGSL = {};
+
+// ── Bilinear resize (RGBA f32) ──
+WGSL.resize = `
+struct P{srcW:u32,srcH:u32,dstW:u32,dstH:u32}
+@group(0)@binding(0)var<storage,read>src:array<f32>;
+@group(0)@binding(1)var<storage,read_write>dst:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  let x=g.x;let y=g.y;
+  if(x>=p.dstW||y>=p.dstH){return;}
+  let sx=(f32(x)+.5)*f32(p.srcW)/f32(p.dstW)-.5;
+  let sy=(f32(y)+.5)*f32(p.srcH)/f32(p.dstH)-.5;
+  let x0=clamp(i32(sx),0,i32(p.srcW)-1);
+  let y0=clamp(i32(sy),0,i32(p.srcH)-1);
+  let x1=clamp(x0+1,0,i32(p.srcW)-1);
+  let y1=clamp(y0+1,0,i32(p.srcH)-1);
+  let fx=fract(max(sx,0.0));let fy=fract(max(sy,0.0));
+  for(var c=0u;c<4u;c++){
+    let v00=src[(u32(y0)*p.srcW+u32(x0))*4u+c];
+    let v10=src[(u32(y0)*p.srcW+u32(x1))*4u+c];
+    let v01=src[(u32(y1)*p.srcW+u32(x0))*4u+c];
+    let v11=src[(u32(y1)*p.srcW+u32(x1))*4u+c];
+    dst[(y*p.dstW+x)*4u+c]=mix(mix(v00,v10,fx),mix(v01,v11,fx),fy);
+  }
+}`;
+
+// ── RGBA → grayscale + ImageNet normalize ──
+WGSL.gray = `
+struct P{w:u32,h:u32}
+@group(0)@binding(0)var<storage,read>rgba:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let i=g.y*p.w+g.x;
+  let r=rgba[i*4u];let gr=rgba[i*4u+1u];let b=rgba[i*4u+2u];
+  out[i]=0.2126*r+0.7152*gr+0.0722*b;
+}`;
+
+// ── CLAHE (64-bin, local contrast enhancement) ──
+WGSL.clahe = `
+struct P{w:u32,h:u32,tile:i32,_pad:u32,clip:f32,_pad2:u32,_pad3:u32,_pad4:u32}
+@group(0)@binding(0)var<storage,read>inp:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  let x=i32(g.x);let y=i32(g.y);
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let h=p.tile/2;
+  var hist:array<u32,64>;
+  for(var b=0u;b<64u;b++){hist[b]=0u;}
+  var total=0u;
+  for(var dy=-h;dy<h;dy++){
+    for(var dx=-h;dx<h;dx++){
+      let nx=clamp(x+dx,0,i32(p.w)-1);
+      let ny=clamp(y+dy,0,i32(p.h)-1);
+      let v=clamp(inp[u32(ny)*p.w+u32(nx)],0.0,1.0);
+      let bin=u32(v*63.0);
+      hist[bin]+=1u;total+=1u;
+    }
+  }
+  let cc=u32(p.clip*f32(total)/64.0);
+  var ex=0u;
+  for(var b=0u;b<64u;b++){if(hist[b]>cc){ex+=hist[b]-cc;hist[b]=cc;}}
+  let re=ex/64u;
+  for(var b=0u;b<64u;b++){hist[b]+=re;}
+  var cdf:array<f32,64>;
+  var cum=0u;
+  for(var b=0u;b<64u;b++){cum+=hist[b];cdf[b]=f32(cum)/f32(total);}
+  let pv=clamp(inp[u32(y)*p.w+u32(x)],0.0,1.0);
+  let bn=min(u32(pv*63.0),63u);
+  out[u32(y)*p.w+u32(x)]=cdf[bn];
+}`;
+
+// ── Bilateral filter (horizontal pass) ──
+WGSL.bilH = `
+struct P{w:u32,h:u32,r:i32,_p:u32,ss:f32,sr:f32}
+@group(0)@binding(0)var<storage,read>inp:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let c=inp[g.y*p.w+g.x];
+  var s=0.0;var w=0.0;
+  for(var dx=-p.r;dx<=p.r;dx++){
+    let nx=clamp(i32(g.x)+dx,0,i32(p.w)-1);
+    let n=inp[g.y*p.w+u32(nx)];
+    let wt=exp(-f32(dx*dx)/(2.0*p.ss*p.ss))*exp(-(n-c)*(n-c)/(2.0*p.sr*p.sr));
+    s+=wt*n;w+=wt;
+  }
+  out[g.y*p.w+g.x]=s/w;
+}`;
+
+// ── Bilateral filter (vertical pass) ──
+WGSL.bilV = `
+struct P{w:u32,h:u32,r:i32,_p:u32,ss:f32,sr:f32}
+@group(0)@binding(0)var<storage,read>inp:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let c=inp[g.y*p.w+g.x];
+  var s=0.0;var w=0.0;
+  for(var dy=-p.r;dy<=p.r;dy++){
+    let ny=clamp(i32(g.y)+dy,0,i32(p.h)-1);
+    let n=inp[u32(ny)*p.w+g.x];
+    let wt=exp(-f32(dy*dy)/(2.0*p.ss*p.ss))*exp(-(n-c)*(n-c)/(2.0*p.sr*p.sr));
+    s+=wt*n;w+=wt;
+  }
+  out[g.y*p.w+g.x]=s/w;
+}`;
+
+// ── Gaussian blur horizontal ──
+WGSL.gblH = `
+struct P{w:u32,h:u32,r:i32,_p:u32,sigma:f32}
+@group(0)@binding(0)var<storage,read>inp:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  var s=0.0;var w=0.0;
+  for(var dx=-p.r;dx<=p.r;dx++){
+    let nx=clamp(i32(g.x)+dx,0,i32(p.w)-1);
+    let wt=exp(-f32(dx*dx)/(2.0*p.sigma*p.sigma));
+    s+=inp[g.y*p.w+u32(nx)]*wt;w+=wt;
+  }
+  out[g.y*p.w+g.x]=s/w;
+}`;
+
+// ── Gaussian blur vertical ──
+WGSL.gblV = `
+struct P{w:u32,h:u32,r:i32,_p:u32,sigma:f32}
+@group(0)@binding(0)var<storage,read>inp:array<f32>;
+@group(0)@binding(1)var<storage,read_write>out:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  var s=0.0;var w=0.0;
+  for(var dy=-p.r;dy<=p.r;dy++){
+    let ny=clamp(i32(g.y)+dy,0,i32(p.h)-1);
+    let wt=exp(-f32(dy*dy)/(2.0*p.sigma*p.sigma));
+    s+=inp[u32(ny)*p.w+g.x]*wt;w+=wt;
+  }
+  out[g.y*p.w+g.x]=s/w;
+}`;
+
+// ── DBNet Probability Map: gradient + local variance + LoG ──
+WGSL.probMap = `
+struct P{w:u32,h:u32,lr:i32}
+@group(0)@binding(0)var<storage,read>gray:array<f32>;
+@group(0)@binding(1)var<storage,read>blur:array<f32>;
+@group(0)@binding(2)var<storage,read_write>prob:array<f32>;
+@group(0)@binding(3)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  let x=i32(g.x);let y=i32(g.y);
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let W=i32(p.w);let H=i32(p.h);
+  let xm=clamp(x-1,0,W-1);let xp=clamp(x+1,0,W-1);
+  let ym=clamp(y-1,0,H-1);let yp=clamp(y+1,0,H-1);
+  let g00=gray[u32(ym)*p.w+u32(xm)];let g10=gray[u32(ym)*p.w+g.x];let g20=gray[u32(ym)*p.w+u32(xp)];
+  let g01=gray[g.y*p.w+u32(xm)];                                     let g21=gray[g.y*p.w+u32(xp)];
+  let g02=gray[u32(yp)*p.w+u32(xm)];let g12=gray[u32(yp)*p.w+g.x];let g22=gray[u32(yp)*p.w+u32(xp)];
+  let gx=-g00+g20-2.0*g01+2.0*g21-g02+g22;
+  let gy=-g00-2.0*g10-g20+g02+2.0*g12+g22;
+  let mag=sqrt(gx*gx+gy*gy);
+  var ls=0.0;var lsq=0.0;var cnt=0.0;
+  for(var dy=-p.lr;dy<=p.lr;dy++){
+    for(var dx=-p.lr;dx<=p.lr;dx++){
+      let nx=clamp(x+dx,0,W-1);let ny=clamp(y+dy,0,H-1);
+      let v=gray[u32(ny)*p.w+u32(nx)];
+      ls+=v;lsq+=v*v;cnt+=1.0;
+    }
+  }
+  let mean=ls/cnt;
+  let vari=max(lsq/cnt-mean*mean,0.0);
+  let logR=abs(gray[g.y*p.w+g.x]-blur[g.y*p.w+g.x]);
+  // Boost vari and logR — wider lr=5 window now fills text interiors
+  let pr=clamp(
+    0.30*tanh(mag*2.8)+
+    0.40*tanh(vari*9.0)+
+    0.30*tanh(logR*5.0),
+    0.0,1.0
+  );
+  prob[g.y*p.w+g.x]=pr;
+}`;
+
+// ── Threshold Map (Sauvola-like adaptive threshold) ──
+WGSL.threshMap = `
+struct P{w:u32,h:u32,r:i32,_p:u32,k:f32}
+@group(0)@binding(0)var<storage,read>gray:array<f32>;
+@group(0)@binding(1)var<storage,read_write>thr:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  var s=0.0;var sq=0.0;var cnt=0.0;
+  for(var dy=-p.r;dy<=p.r;dy++){
+    for(var dx=-p.r;dx<=p.r;dx++){
+      let nx=clamp(i32(g.x)+dx,0,i32(p.w)-1);
+      let ny=clamp(i32(g.y)+dy,0,i32(p.h)-1);
+      let v=clamp(gray[u32(ny)*p.w+u32(nx)],0.0,1.0);
+      s+=v;sq+=v*v;cnt+=1.0;
+    }
+  }
+  let m=s/cnt;
+  let stdev=sqrt(max(sq/cnt-m*m,0.0));
+  // Positive-k Sauvola: dark text pixels have gray < T
+  thr[g.y*p.w+g.x]=clamp(m*(1.0+p.k*(stdev/0.5-1.0)),0.0,1.0);
+}`;
+
+// ── Adaptive Binarization: B = σ(k·(T − gray)) ──
+// Gray in [0,1]: dark text ≈ 0.05-0.3, white background ≈ 0.9-1.0
+// Sauvola T ≈ 0.5-0.8 in text regions, ≈ 0.76 in blank regions
+// → text pixel (gray<T): B→1  |  background pixel (gray>T): B→0
+WGSL.binMap = `
+struct P{w:u32,h:u32,_p:u32,_p2:u32,k:f32}
+@group(0)@binding(0)var<storage,read>gray:array<f32>;
+@group(0)@binding(1)var<storage,read>thr:array<f32>;
+@group(0)@binding(2)var<storage,read_write>bin:array<f32>;
+@group(0)@binding(3)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  let i=g.y*p.w+g.x;
+  bin[i]=1.0/(1.0+exp(-p.k*(thr[i]-gray[i])));
+}`;
+
+// ── Orientation field via Structure Tensor ──
+WGSL.orientField = `
+struct P{w:u32,h:u32,r:i32}
+@group(0)@binding(0)var<storage,read>gray:array<f32>;
+@group(0)@binding(1)var<storage,read_write>orient:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  if(g.x>=p.w||g.y>=p.h){return;}
+  var jxx=0.0;var jxy=0.0;var jyy=0.0;
+  let W=i32(p.w);let H=i32(p.h);
+  for(var dy=-p.r;dy<=p.r;dy++){
+    for(var dx=-p.r;dx<=p.r;dx++){
+      let nx=clamp(i32(g.x)+dx,0,W-1);
+      let ny=clamp(i32(g.y)+dy,0,H-1);
+      let nxm=clamp(nx-1,0,W-1);let nxp=clamp(nx+1,0,W-1);
+      let nym=clamp(ny-1,0,H-1);let nyp=clamp(ny+1,0,H-1);
+      let gxv=gray[u32(ny)*p.w+u32(nxp)]-gray[u32(ny)*p.w+u32(nxm)];
+      let gyv=gray[u32(nyp)*p.w+u32(nx)]-gray[u32(nym)*p.w+u32(nx)];
+      jxx+=gxv*gxv;jxy+=gxv*gyv;jyy+=gyv*gyv;
+    }
+  }
+  let theta=0.5*atan2(2.0*jxy,jxx-jyy);
+  orient[g.y*p.w+g.x]=(theta+1.5708)/3.14159265;
+}`;
+
+// ── Perspective warp (4-point homography) ──
+WGSL.perspWarp = `
+struct P{
+  srcW:u32,srcH:u32,dstW:u32,dstH:u32,
+  h00:f32,h01:f32,h02:f32,
+  h10:f32,h11:f32,h12:f32,
+  h20:f32,h21:f32,h22:f32
+}
+@group(0)@binding(0)var<storage,read>src:array<f32>;
+@group(0)@binding(1)var<storage,read_write>dst:array<f32>;
+@group(0)@binding(2)var<uniform>p:P;
+@compute@workgroup_size(16,16)
+fn main(@builtin(global_invocation_id)g:vec3<u32>){
+  let dx=g.x;let dy=g.y;
+  if(dx>=p.dstW||dy>=p.dstH){return;}
+  let fx=f32(dx);let fy=f32(dy);
+  let denom=p.h20*fx+p.h21*fy+p.h22;
+  let sx=(p.h00*fx+p.h01*fy+p.h02)/denom;
+  let sy=(p.h10*fx+p.h11*fy+p.h12)/denom;
+  let x0=clamp(i32(sx),0,i32(p.srcW)-1);
+  let y0=clamp(i32(sy),0,i32(p.srcH)-1);
+  let x1=clamp(x0+1,0,i32(p.srcW)-1);
+  let y1=clamp(y0+1,0,i32(p.srcH)-1);
+  let qx=fract(max(sx,0.0));let qy=fract(max(sy,0.0));
+  for(var c=0u;c<4u;c++){
+    let v00=src[(u32(y0)*p.srcW+u32(x0))*4u+c];
+    let v10=src[(u32(y0)*p.srcW+u32(x1))*4u+c];
+    let v01=src[(u32(y1)*p.srcW+u32(x0))*4u+c];
+    let v11=src[(u32(y1)*p.srcW+u32(x1))*4u+c];
+    dst[(dy*p.dstW+dx)*4u+c]=mix(mix(v00,v10,qx),mix(v01,v11,qx),qy);
+  }
+}`;
+
+// ═══════════════════════════════════════════════════════════════
+// UNIFORM BUFFER BUILDER
+// ═══════════════════════════════════════════════════════════════
+class UB {
+  constructor(){this.d=[]}
+  u(v){this.d.push({t:'u',v});return this}
+  i(v){this.d.push({t:'i',v});return this}
+  f(v){this.d.push({t:'f',v});return this}
+  build(){
+    const n=Math.max(this.d.length,4);
+    const ab=new ArrayBuffer(n*4);
+    const dv=new DataView(ab);
+    this.d.forEach((x,idx)=>{
+      if(x.t==='u')dv.setUint32(idx*4,x.v>>>0,true);
+      else if(x.t==='i')dv.setInt32(idx*4,x.v|0,true);
+      else dv.setFloat32(idx*4,x.v,true);
+    });
+    return new Uint8Array(ab);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WEBGPU OCR PIPELINE
+// ═══════════════════════════════════════════════════════════════
+class OCRPipeline {
+  constructor(){
+    this.device=null;this.gpuOK=false;this.pl={};
+    this.W=0;this.H=0;
+    // Intermediate float arrays (CPU copies)
+    this.rgbaResized=null;this.grayN=null;this.claheArr=null;
+    this.bilArr=null;this.blurArr=null;this.probArr=null;
+    this.thrArr=null;this.binArr=null;this.orientArr=null;
+    this.boxes=[];
+  }
+
+  async init(){
+    try{
+      if(!navigator.gpu)throw new Error('No WebGPU');
+      const ad=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+      if(!ad)throw new Error('No adapter');
+      this.device=await ad.requestDevice();
+      await this._compile();
+      this.gpuOK=true;
+      return'WebGPU';
+    }catch(e){
+      this.gpuOK=false;
+      return`CPU (${e.message})`;
+    }
+  }
+
+  async _compile(){
+    const d=this.device;
+    const errs=[];
+    for(const[k,src]of Object.entries(WGSL)){
+      const mod=d.createShaderModule({code:src});
+      const info=await mod.getCompilationInfo();
+      const ee=info.messages.filter(m=>m.type==='error');
+      if(ee.length){errs.push(`${k}: ${ee[0].message}`);continue;}
+      this.pl[k]=d.createComputePipeline({layout:'auto',compute:{module:mod,entryPoint:'main'}});
+    }
+    if(errs.length)throw new Error(errs.join('; '));
+  }
+
+  _sbuf(data){
+    const d=this.device;
+    const b=d.createBuffer({size:Math.max(data.byteLength,16),
+      usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+    d.queue.writeBuffer(b,0,data);return b;
+  }
+  _empty(bytes){
+    return this.device.createBuffer({size:Math.max(bytes,16),
+      usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  }
+  _ubuf(ub){
+    const d=this.device;const data=ub.build?ub.build():ub;
+    const b=d.createBuffer({size:Math.max(data.byteLength,16),
+      usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    d.queue.writeBuffer(b,0,data);return b;
+  }
+  async _read(buf,bytes,Ctor){
+    const d=this.device;
+    const rb=d.createBuffer({size:bytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    const enc=d.createCommandEncoder();
+    enc.copyBufferToBuffer(buf,0,rb,0,bytes);
+    d.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const out=new Ctor(rb.getMappedRange().slice(0));
+    rb.unmap();rb.destroy();return out;
+  }
+  _bg(name,bufs){
+    return this.device.createBindGroup({
+      layout:this.pl[name].getBindGroupLayout(0),
+      entries:bufs.map((b,i)=>({binding:i,resource:{buffer:b}}))
+    });
+  }
+  _run(enc,name,bg,W,H){
+    const pass=enc.beginComputePass();
+    pass.setPipeline(this.pl[name]);
+    pass.setBindGroup(0,bg);
+    pass.dispatchWorkgroups(Math.ceil(W/16),Math.ceil(H/16));
+    pass.end();
+  }
+
+  // ─── Stage 1: Preprocessing ────────────────────────────────────
+  async stage1(imageData){
+    const t0=performance.now();
+    // Auto-scale down if image exceeds WebGPU 128 MB buffer limit (RGBA f32 = w*h*16 bytes)
+    const MAX_BYTES=134217728;
+    let imgData=imageData;
+    {
+      const bytes=imageData.width*imageData.height*16;
+      if(bytes>MAX_BYTES){
+        const scale=Math.sqrt(MAX_BYTES/bytes);
+        const nw=Math.max(32,Math.floor(imageData.width*scale));
+        const nh=Math.max(32,Math.floor(imageData.height*scale));
+        log(`Image ${imageData.width}x${imageData.height} (${(bytes/1048576).toFixed(0)} MB) exceeds GPU 128 MB limit — auto-scaling to ${nw}x${nh}`,'w');
+        const sc=document.createElement('canvas'); sc.width=nw; sc.height=nh;
+        const tmp=document.createElement('canvas'); tmp.width=imageData.width; tmp.height=imageData.height;
+        tmp.getContext('2d').putImageData(imageData,0,0);
+        sc.getContext('2d').drawImage(tmp,0,0,imageData.width,imageData.height,0,0,nw,nh);
+        imgData=sc.getContext('2d').getImageData(0,0,nw,nh);
+      }
+    }
+    const W=imgData.width, H=imgData.height;
+    this.W=W; this.H=H;
+
+    // Convert to f32 RGBA [0,1]
+    const raw=new Float32Array(W*H*4);
+    for(let i=0;i<raw.length;i++)raw[i]=imgData.data[i]/255;
+    this.rgbaResized=raw;
+
+    if(!this.gpuOK){
+      this.grayN=this._cpuGray(raw,W,H);
+      this.claheArr=this.grayN.slice();
+      this.bilArr=this._cpuBilateral(this.claheArr,W,H);
+      return performance.now()-t0;
+    }
+
+    const N=W*H;
+
+    const d=this.device;
+    const bRes=this._sbuf(raw);
+    const bGray=this._empty(N*4);
+    const bClahe=this._empty(N*4);
+    const bBilH=this._empty(N*4);
+    const bBil=this._empty(N*4);
+
+    const enc=d.createCommandEncoder();
+
+    // 1a. Grayscale [0,1]
+    const uGray=this._ubuf(new UB().u(W).u(H));
+    this._run(enc,'gray',this._bg('gray',[bRes,bGray,uGray]),W,H);
+
+    // 1b. CLAHE (tile=8, clip=2.0)
+    const uClahe=this._ubuf(new UB().u(W).u(H).i(8).u(0).f(2.0).u(0).u(0).u(0));
+    this._run(enc,'clahe',this._bg('clahe',[bGray,bClahe,uClahe]),W,H);
+
+    // 1c. Bilateral H+V (r=3, ss=3, sr=0.08)
+    const uBil=this._ubuf(new UB().u(W).u(H).i(3).u(0).f(3.0).f(0.08));
+    this._run(enc,'bilH',this._bg('bilH',[bClahe,bBilH,uBil]),W,H);
+    this._run(enc,'bilV',this._bg('bilV',[bBilH,bBil,uBil]),W,H);
+
+    d.queue.submit([enc.finish()]);
+
+    this.grayN=await this._read(bGray,N*4,Float32Array);
+    this.claheArr=await this._read(bClahe,N*4,Float32Array);
+    this.bilArr=await this._read(bBil,N*4,Float32Array);
+
+    for(const b of[bRes,bGray,bClahe,bBilH,bBil,uGray,uClahe,uBil])b.destroy();
+    return performance.now()-t0;
+  }
+
+  // ─── Stage 2: Text Detection (DBNet simulation) ─────────────────
+  async stage2(){
+    const t0=performance.now();const{W,H}=this;const N=W*H;
+
+    if(!this.gpuOK){
+      this.blurArr=this._cpuGaussBlur(this.bilArr,W,H,2.5);
+      this.probArr=this._cpuProbMap(this.bilArr,this.blurArr,W,H);
+      this.thrArr=this._cpuThreshMap(this.bilArr,W,H);
+      this.binArr=this._cpuBinMap(this.bilArr,this.thrArr,N);
+      return performance.now()-t0;
+    }
+
+    const d=this.device;
+    const bBil=this._sbuf(this.bilArr);
+    const bBlurH=this._empty(N*4);const bBlur=this._empty(N*4);
+    const bProb=this._empty(N*4);const bThr=this._empty(N*4);const bBin=this._empty(N*4);
+
+    const enc=d.createCommandEncoder();
+
+    // Gaussian blur for LoG (sigma=2.5, r=5)
+    const uGbl=this._ubuf(new UB().u(W).u(H).i(5).u(0).f(2.5));
+    this._run(enc,'gblH',this._bg('gblH',[bBil,bBlurH,uGbl]),W,H);
+    this._run(enc,'gblV',this._bg('gblV',[bBlurH,bBlur,uGbl]),W,H);
+
+    // Probability map (lr=3)
+    const uProb=this._ubuf(new UB().u(W).u(H).i(5));
+    this._run(enc,'probMap',this._bg('probMap',[bBil,bBlur,bProb,uProb]),W,H);
+
+    // Threshold map (r=6, k=-0.12)
+    const uThr=this._ubuf(new UB().u(W).u(H).i(6).u(0).f(0.2));
+    this._run(enc,'threshMap',this._bg('threshMap',[bBil,bThr,uThr]),W,H);
+
+    // Binary map (k=50)
+    const uBin=this._ubuf(new UB().u(W).u(H).u(0).u(0).f(50.0));
+    this._run(enc,'binMap',this._bg('binMap',[bBil,bThr,bBin,uBin]),W,H);
+
+    d.queue.submit([enc.finish()]);
+
+    this.blurArr=await this._read(bBlur,N*4,Float32Array);
+    this.probArr=await this._read(bProb,N*4,Float32Array);
+    this.thrArr=await this._read(bThr,N*4,Float32Array);
+    this.binArr=await this._read(bBin,N*4,Float32Array);
+
+    for(const b of[bBil,bBlurH,bBlur,bProb,bThr,bBin,uGbl,uProb,uThr,uBin])b.destroy();
+    return performance.now()-t0;
+  }
+
+  // ─── Stage 3: Box Refinement (CPU) ──────────────────────────────
+  stage3(){
+    const t0=performance.now();const{W,H,binArr,rgbaResized}=this;
+
+    // ── 1. Fast connected components with bbox-only tracking ─────────
+    // Store per-label: [x0,y0,x1,y1,inkSum,count] — no pixel arrays
+    const labels=new Int32Array(W*H);
+    const parent=new Int32Array(W*H+1);
+    for(let i=0;i<=W*H;i++)parent[i]=i;
+    const find=id=>{while(parent[id]!==id)id=parent[id]=parent[parent[id]];return id;};
+    const union=(a,b)=>{a=find(a);b=find(b);if(a!==b)parent[Math.max(a,b)]=Math.min(a,b);};
+
+    let nextL=1;
+    const BIN_THR=0.5;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const i=y*W+x;
+        if(binArr[i]<BIN_THR){labels[i]=0;continue;}
+        const left=x>0?labels[i-1]:0;
+        const up=y>0?labels[i-W]:0;
+        if(!left&&!up){labels[i]=nextL++;}
+        else if(left&&!up){labels[i]=left;}
+        else if(!left&&up){labels[i]=up;}
+        else{labels[i]=Math.min(left,up);union(left,up);}
+      }
+    }
+
+    // Pass 2: accumulate bbox + ink stats per resolved label (Float32: x0,y0,x1,y1,inkSum,count)
+    // Use a Map keyed by root label for O(n) accumulation
+    const compMap=new Map(); // label → [x0,y0,x1,y1,inkSum,count]
+    for(let i=0;i<W*H;i++){
+      if(!labels[i])continue;
+      const l=find(labels[i]);
+      labels[i]=l;
+      const x=i%W, y=i/W|0;
+      let e=compMap.get(l);
+      if(!e){e=[x,y,x,y,0,0];compMap.set(l,e);}
+      if(x<e[0])e[0]=x; if(y<e[1])e[1]=y;
+      if(x>e[2])e[2]=x; if(y>e[3])e[3]=y;
+      e[4]+=binArr[i]; e[5]++;
+    }
+    this.labels=labels;
+
+    // ── 2. Estimate median character height (fast — use bbox heights only) ─
+    const heights=[];
+    for(const[,e]of compMap){
+      const bh=e[3]-e[1]+1;
+      if(bh>6&&bh<H*0.12&&e[5]>12)heights.push(bh);
+    }
+    heights.sort((a,b)=>a-b);
+    const medH=heights[heights.length>>1]||20;
+    const minCharH=Math.max(6,Math.round(medH*0.35));
+    const maxCharH=Math.min(H*0.10,Math.round(medH*3.5));
+    const minCharW=Math.max(3,Math.round(minCharH*0.20));
+    const maxCharW=Math.round(maxCharH*3.0);
+
+    // ── 3. Filter: size, aspect, fill ────────────────────────────────
+    // No per-pixel bbox scan — use the CC pixel count as fill proxy
+    const rawBoxes=[];
+    for(const[,e]of compMap){
+      const[x0,y0,x1,y1,inkSum,count]=e;
+      if(count<20)continue;
+      const bw=x1-x0+1, bh=y1-y0+1;
+      if(bh<minCharH||bh>maxCharH)continue;
+      if(bw<minCharW||bw>maxCharW)continue;
+      const ar=bw/bh;
+      if(ar<0.12||ar>3.5)continue;
+      const fill=count/(bw*bh);
+      if(fill<0.08||fill>0.92)continue;
+      const score=inkSum/count;
+      if(score<0.48)continue;
+      // Quick gray check using single sampled pixel at bbox center (no full scan)
+      const cx=(x0+x1)>>1, cy=(y0+y1)>>1;
+      const si=(cy*W+cx)*4;
+      const cg=rgbaResized[si]*0.2126+rgbaResized[si+1]*0.7152+rgbaResized[si+2]*0.0722;
+      if(cg>0.95)continue; // pure white center — skip
+      rawBoxes.push({x0,y0,x1,y1,score,fill,ar});
+    }
+
+    // ── 4. Projection splitting (only for wide blobs, O(bw×bh) each) ──
+    // Build a reusable column-proj buffer; skip blobs passing ar test
+    const splitBoxes=[];
+    const VAL_THR=0.18;
+
+    for(const b of rawBoxes){
+      if(b.ar<=2.0){splitBoxes.push(b);continue;}
+
+      const bw=b.x1-b.x0+1, bh=b.y1-b.y0+1;
+      // Column ink profile — one pass over bbox pixels
+      const proj=new Float32Array(bw);
+      for(let cy=b.y0;cy<=b.y1;cy++){
+        const row=cy*W;
+        for(let cx=b.x0;cx<=b.x1;cx++)
+          if(binArr[row+cx]>0.4)proj[cx-b.x0]+=1;
+      }
+      const invBH=1/bh;
+      for(let c=0;c<bw;c++)proj[c]*=invBH;
+
+      // 5-tap smooth
+      const sm=new Float32Array(bw);
+      for(let c=0;c<bw;c++){
+        let s=0;
+        for(let d=-2;d<=2;d++)s+=proj[Math.max(0,Math.min(bw-1,c+d))];
+        sm[c]=s*0.2;
+      }
+
+      // Find valley midpoints (run ≥ 2px)
+      const cuts=[b.x0-1];
+      let vS=-1;
+      for(let c=0;c<=bw;c++){
+        const val=c<bw&&sm[c]<VAL_THR;
+        if(val&&vS<0)vS=c;
+        else if(!val&&vS>=0){if(c-vS>=2)cuts.push(b.x0+((vS+c)>>1));vS=-1;}
+      }
+      cuts.push(b.x1);
+
+      if(cuts.length<=2){splitBoxes.push(b);continue;}
+
+      for(let s=0;s<cuts.length-1;s++){
+        const sx0=cuts[s]+1,sx1=cuts[s+1];
+        if(sx1-sx0+1<minCharW)continue;
+        // Tight vertical bounds in this column slice
+        let sy0=b.y1,sy1=b.y0;
+        for(let cy=b.y0;cy<=b.y1;cy++){
+          const row=cy*W;
+          for(let cx=sx0;cx<=sx1;cx++)
+            if(binArr[row+cx]>0.4){if(cy<sy0)sy0=cy;if(cy>sy1)sy1=cy;}
+        }
+        if(sy1<sy0||sy1-sy0+1<minCharH)continue;
+        const sar=(sx1-sx0+1)/(sy1-sy0+1);
+        if(sar<0.10||sar>3.5)continue;
+        splitBoxes.push({...b,x0:sx0,y0:sy0,x1:sx1,y1:sy1,ar:sar});
+      }
+    }
+
+    // ── 5. Merge fragments — single O(n log n) sweep ─────────────────
+    // Sort left-to-right. Scan forward only until gap > mergeGapX.
+    // No while(changed) loop — one linear pass suffices because boxes
+    // are already sorted and we only merge rightward neighbours.
+    splitBoxes.sort((a,b)=>a.x0-b.x0);
+    const mergeGapX=Math.round(medH*0.50);
+    const used=new Uint8Array(splitBoxes.length);
+    const merged=[];
+
+    for(let i=0;i<splitBoxes.length;i++){
+      if(used[i])continue;
+      let cx0=splitBoxes[i].x0,cy0=splitBoxes[i].y0;
+      let cx1=splitBoxes[i].x1,cy1=splitBoxes[i].y1;
+      // Linear forward scan — stop as soon as gap exceeds threshold
+      for(let j=i+1;j<splitBoxes.length;j++){
+        if(used[j])continue;
+        const nb=splitBoxes[j];
+        if(nb.x0-(cx1+1)>mergeGapX)break; // sorted: no further box can qualify
+        // Y-overlap ≥ 40% of smaller box
+        const oy=Math.min(cy1,nb.y1)-Math.max(cy0,nb.y0)+1;
+        const sm=Math.min(cy1-cy0+1,nb.y1-nb.y0+1);
+        if(oy<sm*0.40)continue;
+        // Merge
+        if(nb.x0<cx0)cx0=nb.x0; if(nb.y0<cy0)cy0=nb.y0;
+        if(nb.x1>cx1)cx1=nb.x1; if(nb.y1>cy1)cy1=nb.y1;
+        used[j]=1;
+      }
+      // Final aspect check after merge
+      if((cx1-cx0+1)/(cy1-cy0+1)<=3.5)
+        merged.push({x0:cx0,y0:cy0,x1:cx1,y1:cy1});
+    }
+
+    // Reading order + 1px pad
+    merged.sort((a,b)=>a.y0!==b.y0?a.y0-b.y0:a.x0-b.x0);
+    this.boxes=merged.map(b=>({
+      ...b,
+      ux0:Math.max(0,b.x0-1), uy0:Math.max(0,b.y0-1),
+      ux1:Math.min(W-1,b.x1+1), uy1:Math.min(H-1,b.y1+1)
+    }));
+    this.compPixels={};
+    return performance.now()-t0;
+  }
+
+    // ─── Stage 4: Orientation Field (GPU) + per-box (CPU) ───────────
+  async stage4(){
+    const t0=performance.now();const{W,H}=this;const N=W*H;
+
+    if(!this.gpuOK){
+      this.orientArr=new Float32Array(N).fill(0.5);
+      this._cpuOrientation();
+      return performance.now()-t0;
+    }
+
+    const d=this.device;
+    const bGray=this._sbuf(this.bilArr);
+    const bOrient=this._empty(N*4);
+    const enc=d.createCommandEncoder();
+    const uO=this._ubuf(new UB().u(W).u(H).i(4));
+    this._run(enc,'orientField',this._bg('orientField',[bGray,bOrient,uO]),W,H);
+    d.queue.submit([enc.finish()]);
+    this.orientArr=await this._read(bOrient,N*4,Float32Array);
+    for(const b of[bGray,bOrient,uO])b.destroy();
+
+    // Per-box orientation analysis
+    this._cpuOrientation();
+    return performance.now()-t0;
+  }
+
+  _cpuOrientation(){
+    const{W,orientArr,boxes}=this;
+    for(const box of boxes){
+      // Compute histogram of orientations in box region
+      const hist=new Array(4).fill(0);
+      for(let y=box.y0;y<=box.y1;y++){
+        for(let x=box.x0;x<=box.x1;x++){
+          const o=orientArr[y*W+x];
+          // Map 0-1 to 0-3 bins: 0°,90°,180°,270°
+          const bin=Math.floor(o*4)%4;
+          hist[bin]++;
+        }
+      }
+      const maxBin=hist.indexOf(Math.max(...hist));
+      box.orientAngle=[0,90,180,270][maxBin];
+      box.orientBin=maxBin;
+    }
+  }
+
+  // ─── Stage 5: Perspective Warp (GPU per box) ────────────────────
+  async stage5(){
+    const t0=performance.now();const{W,H,boxes}=this;
+    const crops=[];
+
+    for(const box of boxes){
+      const{ux0,uy0,ux1,uy1}=box;
+      const bw=ux1-ux0,bh=uy1-uy0;
+      if(bw<4||bh<4)continue;
+      // Target: normalize height to 40px
+      const dstH=40,dstW=Math.max(8,Math.round(bw*40/Math.max(bh,1)));
+
+      // Source 4 corners (apply slight perspective based on orientation)
+      const angle=((box.orientAngle||0)*Math.PI)/180;
+      const pts=this._getBoxQuad(ux0,uy0,ux1,uy1,angle);
+      const dstPts=[[0,0],[dstW,0],[dstW,dstH],[0,dstH]];
+
+      const H_mat=this._computeHomography(pts,dstPts);
+      if(!H_mat){continue;}
+
+      if(!this.gpuOK){
+        crops.push(this._cpuWarp(this.rgbaResized,W,H,H_mat,dstW,dstH));
+      } else {
+        const crop=await this._gpuWarp(this.rgbaResized,W,H,H_mat,dstW,dstH);
+        crops.push({data:crop,w:dstW,h:dstH,score:box.score});
+      }
+    }
+    this.crops=crops;
+    return performance.now()-t0;
+  }
+
+  _getBoxQuad(x0,y0,x1,y1,angle){
+    // Slightly skew corners based on orientation angle for realistic perspective demo
+    const cx=(x0+x1)/2,cy=(y0+y1)/2;
+    const hw=(x1-x0)/2,hh=(y1-y0)/2;
+    const shear=Math.sin(angle)*0.05;
+    return[
+      [cx-hw+shear*hh,cy-hh],
+      [cx+hw+shear*hh,cy-hh],
+      [cx+hw-shear*hh,cy+hh],
+      [cx-hw-shear*hh,cy+hh]
+    ];
+  }
+
+  _computeHomography(src,dst){
+    // DLT algorithm: solve for 3x3 homography
+    const A=[];
+    for(let i=0;i<4;i++){
+      const[sx,sy]=src[i],[dx,dy]=dst[i];
+      A.push([-sx,-sy,-1,0,0,0,dx*sx,dx*sy,dx]);
+      A.push([0,0,0,-sx,-sy,-1,dy*sx,dy*sy,dy]);
+    }
+    // Gaussian elimination to find null vector
+    const m=8,n=9;
+    // Augment with identity for finding least-squares solution
+    // Use simple direct solution via Cramer's rule on 8x8 system
+    const mat=A.map(r=>r.slice(0,8));
+    const rhs=A.map(r=>-r[8]);
+    // Forward elimination
+    for(let col=0;col<8;col++){
+      let maxRow=col,maxVal=Math.abs(mat[col][col]);
+      for(let row=col+1;row<8;row++){
+        if(Math.abs(mat[row][col])>maxVal){maxVal=Math.abs(mat[row][col]);maxRow=row;}
+      }
+      [mat[col],mat[maxRow]]=[mat[maxRow],mat[col]];
+      [rhs[col],rhs[maxRow]]=[rhs[maxRow],rhs[col]];
+      if(Math.abs(mat[col][col])<1e-10)return null;
+      for(let row=col+1;row<8;row++){
+        const f=mat[row][col]/mat[col][col];
+        for(let c=col;c<8;c++)mat[row][c]-=f*mat[col][c];
+        rhs[row]-=f*rhs[col];
+      }
+    }
+    // Back substitution
+    const h=new Array(8);
+    for(let i=7;i>=0;i--){
+      h[i]=rhs[i];
+      for(let j=i+1;j<8;j++)h[i]-=mat[i][j]*h[j];
+      h[i]/=mat[i][i];
+    }
+    // h[0..7] are h00,h01,h02,h10,h11,h12,h20,h21; h22=1
+    return[...h,1];
+  }
+
+  async _gpuWarp(srcData,srcW,srcH,H_mat,dstW,dstH){
+    const d=this.device;const N=dstW*dstH;
+    const bSrc=this._sbuf(srcData);
+    const bDst=this._empty(N*4*4);
+    const[h00,h01,h02,h10,h11,h12,h20,h21,h22]=H_mat;
+    const uW=this._ubuf(new UB()
+      .u(srcW).u(srcH).u(dstW).u(dstH)
+      .f(h00).f(h01).f(h02).f(h10).f(h11).f(h12).f(h20).f(h21).f(h22));
+    const enc=d.createCommandEncoder();
+    this._run(enc,'perspWarp',this._bg('perspWarp',[bSrc,bDst,uW]),dstW,dstH);
+    d.queue.submit([enc.finish()]);
+    const data=await this._read(bDst,N*4*4,Float32Array);
+    for(const b of[bSrc,bDst,uW])b.destroy();
+    return{data,w:dstW,h:dstH};
+  }
+
+  // ─── CPU fallbacks ───────────────────────────────────────────────
+  _cpuResize(src,sW,sH,dW,dH){
+    const out=new Float32Array(dW*dH*4);
+    for(let y=0;y<dH;y++){
+      for(let x=0;x<dW;x++){
+        const sx=(x+.5)*sW/dW-.5,sy=(y+.5)*sH/dH-.5;
+        const x0=Math.max(0,Math.min(sW-1,Math.floor(sx)));
+        const y0=Math.max(0,Math.min(sH-1,Math.floor(sy)));
+        const x1=Math.min(sW-1,x0+1),y1=Math.min(sH-1,y0+1);
+        const fx=Math.max(0,sx-x0),fy=Math.max(0,sy-y0);
+        for(let c=0;c<4;c++){
+          const v=((1-fx)*(1-fy)*src[(y0*sW+x0)*4+c]+fx*(1-fy)*src[(y0*sW+x1)*4+c]+
+                   (1-fx)*fy*src[(y1*sW+x0)*4+c]+fx*fy*src[(y1*sW+x1)*4+c]);
+          out[(y*dW+x)*4+c]=v;
+        }
+      }
+    }
+    return out;
+  }
+  _cpuGray(rgba,W,H){
+    const out=new Float32Array(W*H);
+    for(let i=0;i<W*H;i++)
+      out[i]=0.2126*rgba[i*4]+0.7152*rgba[i*4+1]+0.0722*rgba[i*4+2];
+    return out;
+  }
+  _cpuBilateral(inp,W,H){
+    const out=new Float32Array(W*H);const r=3,ss=3,sr=0.08;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const c=inp[y*W+x];let s=0,w=0;
+        for(let dy=-r;dy<=r;dy++){
+          for(let dx=-r;dx<=r;dx++){
+            const nx=Math.max(0,Math.min(W-1,x+dx));
+            const ny=Math.max(0,Math.min(H-1,y+dy));
+            const n=inp[ny*W+nx];
+            const wt=Math.exp(-(dx*dx+dy*dy)/(2*ss*ss))*Math.exp(-((n-c)*(n-c))/(2*sr*sr));
+            s+=wt*n;w+=wt;
+          }
+        }
+        out[y*W+x]=s/w;
+      }
+    }
+    return out;
+  }
+  _cpuGaussBlur(inp,W,H,sigma){
+    const r=Math.round(sigma*2);const out=new Float32Array(W*H);const tmp=new Float32Array(W*H);
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        let s=0,w=0;
+        for(let dx=-r;dx<=r;dx++){const nx=Math.max(0,Math.min(W-1,x+dx));const wt=Math.exp(-dx*dx/(2*sigma*sigma));s+=inp[y*W+nx]*wt;w+=wt;}
+        tmp[y*W+x]=s/w;
+      }
+    }
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        let s=0,w=0;
+        for(let dy=-r;dy<=r;dy++){const ny=Math.max(0,Math.min(H-1,y+dy));const wt=Math.exp(-dy*dy/(2*sigma*sigma));s+=tmp[ny*W+x]*wt;w+=wt;}
+        out[y*W+x]=s/w;
+      }
+    }
+    return out;
+  }
+  _cpuProbMap(gray,blur,W,H){
+    const out=new Float32Array(W*H);const lr=5;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const xm=Math.max(0,x-1),xp=Math.min(W-1,x+1);
+        const ym=Math.max(0,y-1),yp=Math.min(H-1,y+1);
+        const g00=gray[ym*W+xm],g10=gray[ym*W+x],g20=gray[ym*W+xp];
+        const g01=gray[y*W+xm],g21=gray[y*W+xp];
+        const g02=gray[yp*W+xm],g12=gray[yp*W+x],g22=gray[yp*W+xp];
+        const gx=-g00+g20-2*g01+2*g21-g02+g22;
+        const gy=-g00-2*g10-g20+g02+2*g12+g22;
+        const mag=Math.sqrt(gx*gx+gy*gy);
+        let ls=0,lsq=0,cnt=0;
+        for(let dy=-lr;dy<=lr;dy++){
+          for(let dx=-lr;dx<=lr;dx++){
+            const nx=Math.max(0,Math.min(W-1,x+dx));
+            const ny=Math.max(0,Math.min(H-1,y+dy));
+            const v=gray[ny*W+nx];ls+=v;lsq+=v*v;cnt++;
+          }
+        }
+        const mean=ls/cnt,vari=Math.max(lsq/cnt-mean*mean,0);
+        const logR=Math.abs(gray[y*W+x]-blur[y*W+x]);
+        out[y*W+x]=Math.min(1,0.30*Math.tanh(mag*4)+0.40*Math.tanh(vari*25)+0.30*Math.tanh(logR*12));
+      }
+    }
+    return out;
+  }
+  _cpuThreshMap(gray,W,H){
+    const out=new Float32Array(W*H);const r=6,k=-0.12;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        let s=0,sq=0,cnt=0;
+        for(let dy=-r;dy<=r;dy++){
+          for(let dx=-r;dx<=r;dx++){
+            const nx=Math.max(0,Math.min(W-1,x+dx));
+            const ny=Math.max(0,Math.min(H-1,y+dy));
+            const v=Math.max(0,Math.min(1,gray[ny*W+nx]));
+            s+=v;sq+=v*v;cnt++;
+          }
+        }
+        const m=s/cnt,std=Math.sqrt(Math.max(sq/cnt-m*m,0));
+        out[y*W+x]=Math.max(0,Math.min(1,m*(1+0.2*(std/0.5-1))));
+      }
+    }
+    return out;
+  }
+  _cpuBinMap(gray,thr,N){
+    const out=new Float32Array(N);
+    for(let i=0;i<N;i++)out[i]=1/(1+Math.exp(-50*(thr[i]-gray[i])));
+    return out;
+  }
+  _cpuWarp(srcData,srcW,srcH,H_mat,dstW,dstH){
+    const[h00,h01,h02,h10,h11,h12,h20,h21,h22]=H_mat;
+    const data=new Float32Array(dstW*dstH*4);
+    for(let dy=0;dy<dstH;dy++){
+      for(let dx=0;dx<dstW;dx++){
+        const denom=h20*dx+h21*dy+h22;
+        const sx=(h00*dx+h01*dy+h02)/denom;
+        const sy=(h10*dx+h11*dy+h12)/denom;
+        const x0=Math.max(0,Math.min(srcW-1,Math.floor(sx)));
+        const y0=Math.max(0,Math.min(srcH-1,Math.floor(sy)));
+        const x1=Math.min(srcW-1,x0+1),y1=Math.min(srcH-1,y0+1);
+        const qx=Math.max(0,sx-x0),qy=Math.max(0,sy-y0);
+        for(let c=0;c<4;c++){
+          data[(dy*dstW+dx)*4+c]=
+            (1-qx)*(1-qy)*srcData[(y0*srcW+x0)*4+c]+
+            qx*(1-qy)*srcData[(y0*srcW+x1)*4+c]+
+            (1-qx)*qy*srcData[(y1*srcW+x0)*4+c]+
+            qx*qy*srcData[(y1*srcW+x1)*4+c];
+        }
+      }
+    }
+    return{data,w:dstW,h:dstH};
+  }
+
+  async classifyCharacters(onGrid){
+    const t0=performance.now();
+    const{W,boxes,rgbaResized}=this;
+    if(!boxes.length)return performance.now()-t0;
+    const IMG_SZ=48,LBL_H=12,CELL_H=IMG_SZ+LBL_H,COLS=Math.min(15,boxes.length),BATCH=150;
+    const renderGrid=(batchBoxes,offset)=>{
+      const rows=Math.ceil(batchBoxes.length/COLS);
+      const gc=document.createElement('canvas');
+      gc.width=COLS*IMG_SZ;gc.height=rows*CELL_H;
+      const gctx=gc.getContext('2d');
+      gctx.fillStyle='#f5f5f5';gctx.fillRect(0,0,gc.width,gc.height);
+      const tmp=document.createElement('canvas');const tctx=tmp.getContext('2d');
+      for(let i=0;i<batchBoxes.length;i++){
+        const b=batchBoxes[i];
+        const bw=b.x1-b.x0+1,bh=b.y1-b.y0+1;
+        tmp.width=bw;tmp.height=bh;
+        const id=tctx.createImageData(bw,bh);
+        let mn=255,mx=0;
+        for(let cy=0;cy<bh;cy++)for(let cx=0;cx<bw;cx++){
+          const si=((b.y0+cy)*W+(b.x0+cx))*4;
+          const v=(rgbaResized[si]*0.2126+rgbaResized[si+1]*0.7152+rgbaResized[si+2]*0.0722)*255;
+          if(v<mn)mn=v;if(v>mx)mx=v;
+        }
+        const rng=Math.max(mx-mn,1);
+        for(let cy=0;cy<bh;cy++)for(let cx=0;cx<bw;cx++){
+          const si=((b.y0+cy)*W+(b.x0+cx))*4;
+          const g=Math.round(255-(((rgbaResized[si]*0.2126+rgbaResized[si+1]*0.7152+rgbaResized[si+2]*0.0722)*255-mn)/rng)*255);
+          const di=(cy*bw+cx)*4;
+          id.data[di]=id.data[di+1]=id.data[di+2]=Math.max(0,Math.min(255,g));id.data[di+3]=255;
+        }
+        tctx.putImageData(id,0,0);
+        const col=i%COLS,row=Math.floor(i/COLS);
+        const cx=col*IMG_SZ,cy=row*CELL_H;
+        gctx.fillStyle='#fff';gctx.fillRect(cx,cy,IMG_SZ,IMG_SZ);
+        const PAD=2,scale=Math.min((IMG_SZ-PAD*2)/bw,(IMG_SZ-PAD*2)/bh);
+        const sw=Math.round(bw*scale),sh=Math.round(bh*scale);
+        gctx.drawImage(tmp,0,0,bw,bh,cx+PAD+Math.round((IMG_SZ-PAD*2-sw)/2),cy+PAD+Math.round((IMG_SZ-PAD*2-sh)/2),sw,sh);
+        gctx.fillStyle='#111';gctx.fillRect(cx,cy+IMG_SZ,IMG_SZ,LBL_H);
+        gctx.fillStyle='#fff';gctx.font=`bold ${LBL_H-2}px monospace`;gctx.textAlign='center';
+        gctx.fillText(offset+i,cx+IMG_SZ/2,cy+IMG_SZ+LBL_H-2);gctx.textAlign='left';
+        gctx.strokeStyle='#bbb';gctx.lineWidth=0.5;gctx.strokeRect(cx+0.25,cy+0.25,IMG_SZ-0.5,IMG_SZ-0.5);
+      }
+      return gc;
+    };
+    const allKeep=new Array(boxes.length).fill(false);
+    const allGrids=[];
+    for(let start=0;start<boxes.length;start+=BATCH){
+      const batch=boxes.slice(start,start+BATCH);
+      const gc=renderGrid(batch,start);allGrids.push(gc);
+      const b64=gc.toDataURL('image/png').split(',')[1];
+      const nC=Math.min(COLS,batch.length),nR=Math.ceil(batch.length/COLS);
+      const prompt=`Grid: ${nC} cols × ${nR} rows. Each 48×48 cell is a crop from a document. Index shown in black strip below each cell (${start} to ${start+batch.length-1}).
+ACCEPT (true): any letter A-Z a-z, digit 0-9, punctuation (.,;:!?-_/@#$%&*+=<>"'()[]{}).
+REJECT (false): lines, rules, borders, empty/white, noise, background, logos, icons, partial fragments with no recognizable shape.
+Be STRICT. Output ONLY a JSON boolean array of exactly ${batch.length} values. No other text.`;
+      try{
+        const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:Math.min(4096,batch.length*8+50),
+            messages:[{role:'user',content:[
+              {type:'image',source:{type:'base64',media_type:'image/png',data:b64}},
+              {type:'text',text:prompt}
+            ]}]})});
+        const data=await resp.json();
+        const txt=(data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('').trim();
+        const match=txt.replace(/```json|```/g,'').match(/\[[\s\S]*\]/);
+        const parsed=match?JSON.parse(match[0]):[];
+        for(let i=0;i<batch.length;i++)allKeep[start+i]=parsed[i]===true;
+        log(`AI batch ${start}–${start+batch.length-1}: ${parsed.filter(Boolean).length}/${batch.length} accepted`,'i');
+      }catch(e){
+        log(`AI batch ${start} error: ${e.message} — keeping batch`,'w');
+        for(let i=0;i<batch.length;i++)allKeep[start+i]=true;
+      }
+    }
+    const combined=document.createElement('canvas');
+    combined.width=allGrids.reduce((s,g)=>s+g.width,0);
+    combined.height=allGrids.reduce((m,g)=>Math.max(m,g.height),0);
+    const cctx=combined.getContext('2d');let ox=0;
+    for(const g of allGrids){cctx.drawImage(g,ox,0);ox+=g.width;}
+    if(onGrid)onGrid(combined);
+    this.boxes=this.boxes.filter((_,i)=>allKeep[i]===true);
+    return performance.now()-t0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VISUALIZATION HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+function jet(t){
+  t=Math.max(0,Math.min(1,t));
+  const r=Math.max(0,Math.min(1,1.5-Math.abs(4*t-3)));
+  const g=Math.max(0,Math.min(1,1.5-Math.abs(4*t-2)));
+  const b=Math.max(0,Math.min(1,1.5-Math.abs(4*t-1)));
+  return[r*255,g*255,b*255];
+}
+
+function hsv2rgb(h,s,v){
+  const i=Math.floor(h*6),f=h*6-i;
+  const p=v*(1-s),q=v*(1-f*s),t2=v*(1-(1-f)*s);
+  const m=[[v,t2,p],[q,v,p],[p,v,t2],[p,q,v],[t2,p,v],[v,p,q]];
+  const[r,g,b]=m[i%6];
+  return[r*255,g*255,b*255];
+}
+
+function labelColor(id){
+  const h=((id*2654435761)%4294967296)/4294967296;
+  return hsv2rgb(h,0.75,0.95);
+}
+
+function setCanvas(id,W,H){
+  const c=document.getElementById(id);
+  c.width=W;c.height=H;c.classList.remove('ph');
+  return c;
+}
+
+function putRGBAf32(canvas,data,W,H){
+  canvas.width=W;canvas.height=H;canvas.classList.remove('ph');
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(W,H);
+  for(let i=0;i<W*H;i++){
+    img.data[i*4]=Math.round(Math.max(0,Math.min(1,data[i*4]))*255);
+    img.data[i*4+1]=Math.round(Math.max(0,Math.min(1,data[i*4+1]))*255);
+    img.data[i*4+2]=Math.round(Math.max(0,Math.min(1,data[i*4+2]))*255);
+    img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function putGrayf32(canvas,data,W,H,denorm=true){
+  canvas.width=W;canvas.height=H;canvas.classList.remove('ph');
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(W,H);
+  // Find min/max for display normalization
+  let mn=Infinity,mx=-Infinity;
+  if(!denorm){for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}}
+  else{mn=0;mx=1;}
+  const range=mx-mn||1;
+  for(let i=0;i<W*H;i++){
+    let v=denorm?Math.max(0,Math.min(1,data[i])):(data[i]-mn)/range;
+    v=Math.round(v*255);
+    img.data[i*4]=img.data[i*4+1]=img.data[i*4+2]=v;img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function putHeatmap(canvas,data,W,H){
+  canvas.width=W;canvas.height=H;canvas.classList.remove('ph');
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(W,H);
+  let mn=Infinity,mx=-Infinity;
+  for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}
+  const range=mx-mn||1;
+  for(let i=0;i<W*H;i++){
+    const t=(data[i]-mn)/range;
+    const[r,g,b]=jet(t);
+    img.data[i*4]=r;img.data[i*4+1]=g;img.data[i*4+2]=b;img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function putOrient(canvas,data,W,H){
+  canvas.width=W;canvas.height=H;canvas.classList.remove('ph');
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(W,H);
+  for(let i=0;i<W*H;i++){
+    const[r,g,b]=hsv2rgb(data[i],0.85,0.9);
+    img.data[i*4]=r;img.data[i*4+1]=g;img.data[i*4+2]=b;img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function putComponents(canvas,labels,W,H){
+  canvas.width=W;canvas.height=H;canvas.classList.remove('ph');
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(W,H);
+  for(let i=0;i<W*H;i++){
+    const l=labels[i];
+    if(!l){img.data[i*4+3]=255;continue;}
+    const[r,g,b]=labelColor(l);
+    img.data[i*4]=r;img.data[i*4+1]=g;img.data[i*4+2]=b;img.data[i*4+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function drawBoxesOnImg(canvas,rgbaData,W,H,boxes,mode){
+  putRGBAf32(canvas,rgbaData,W,H);
+  const ctx=canvas.getContext('2d');
+  // Each character gets a unique hue derived from its label id
+  for(let i=0;i<boxes.length;i++){
+    const b=boxes[i];
+    // Spread hues evenly using golden ratio so adjacent boxes rarely share color
+    const hue=(i*137.508)%360;
+    const[r,g,bl]=hsv2rgb(hue/360,0.85,1.0);
+    const col=`rgb(${r|0},${g|0},${bl|0})`;
+    ctx.strokeStyle=col;
+    ctx.lineWidth=1;
+    if(mode==='polygon'){
+      ctx.beginPath();ctx.rect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);ctx.stroke();
+    } else {
+      ctx.beginPath();ctx.rect(b.ux0,b.uy0,b.ux1-b.ux0+1,b.uy1-b.uy0+1);ctx.stroke();
+    }
+  }
+}
+
+function drawOrientBoxes(canvas,rgbaData,W,H,boxes,orientColors){
+  putRGBAf32(canvas,rgbaData,W,H);
+  const ctx=canvas.getContext('2d');
+  for(const box of boxes){
+    const angle=box.orientAngle||0;
+    const hue=(angle/360);
+    const[r,g,b]=hsv2rgb(hue,0.9,1.0);
+    ctx.strokeStyle=`rgb(${r|0},${g|0},${b|0})`;
+    ctx.lineWidth=2;
+    ctx.beginPath();ctx.rect(box.ux0,box.uy0,box.ux1-box.ux0,box.uy1-box.uy0);ctx.stroke();
+    // Draw orientation arrow
+    const cx=(box.ux0+box.ux1)/2,cy=(box.uy0+box.uy1)/2;
+    const len=Math.min((box.ux1-box.ux0)/3,12);
+    const rad=angle*Math.PI/180;
+    ctx.strokeStyle=`rgb(${r|0},${g|0},${b|0})`;ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx-Math.cos(rad)*len,cy-Math.sin(rad)*len);
+    ctx.lineTo(cx+Math.cos(rad)*len,cy+Math.sin(rad)*len);
+    ctx.stroke();
+    ctx.fillStyle=`rgb(${r|0},${g|0},${b|0})`;ctx.font='9px Share Tech Mono';
+    ctx.fillText(angle+'°',box.ux0+2,box.uy0+10);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LOGGING
+// ═══════════════════════════════════════════════════════════════
+const logEl=document.getElementById('logEl');
+function log(msg,type=''){
+  const now=performance.now().toFixed(1);
+  const el=document.createElement('span');
+  el.className=`le ${type}`;
+  el.innerHTML=`<span class="t">[${now}ms]</span>${msg}`;
+  logEl.appendChild(el);
+  logEl.scrollTop=logEl.scrollHeight;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UI + PIPELINE ORCHESTRATION
+// ═══════════════════════════════════════════════════════════════
+let ocr=new OCRPipeline();
+let sourceImageData=null;
+let isRunning=false;
+
+// Detect file:// origin — fetch() to external APIs is blocked by Chrome CORS
+const IS_FILE_ORIGIN = window.location.protocol === 'file:';
+if(IS_FILE_ORIGIN){
+  document.getElementById('fileBanner').style.display='block';
+}
+
+// Init WebGPU
+(async()=>{
+  const mode=await ocr.init();
+  const badge=document.getElementById('gpuBadge');
+  if(ocr.gpuOK){
+    badge.textContent='⚡ WebGPU ACTIVE';badge.style.borderColor='#00ffa2';badge.style.color='#00ffa2';
+    log(`WebGPU initialized: ${mode}`,'i');
+  } else {
+    badge.textContent='🖥 CPU FALLBACK';badge.style.borderColor='#ffcc00';badge.style.color='#ffcc00';
+    log(`WebGPU unavailable: ${mode} — CPU fallback active`,'w');
+  }
+})();
+
+function setStatus(msg,pct){
+  document.getElementById('sts').innerHTML=msg;
+  document.getElementById('pf').style.width=pct+'%';
+}
+
+function setStageActive(n,on){
+  document.getElementById('sg'+n).classList.toggle('running',on);
+}
+
+function setTime(n,ms){
+  document.getElementById('t'+n).textContent=ms.toFixed(1)+'ms';
+}
+
+async function runPipeline(){
+  if(!sourceImageData||isRunning)return;
+  isRunning=true;
+  document.getElementById('runBtn').disabled=true;
+
+  try{
+    // ── Stage 1 ──
+    setStageActive(1,true);setStatus('<em>Stage 1:</em> Preprocessing…',10);
+    log('Stage 1 — Preprocessing start');
+    const t1=await ocr.stage1(sourceImageData);
+    setTime(1,t1);setStageActive(1,false);
+    log(`Stage 1 done in ${t1.toFixed(1)}ms · ${ocr.W}×${ocr.H}px (full resolution)`,'i');
+
+    putRGBAf32(setCanvas('c1a',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H);
+    putGrayf32(setCanvas('c1b',ocr.W,ocr.H),ocr.grayN,ocr.W,ocr.H,true);
+    putGrayf32(setCanvas('c1c',ocr.W,ocr.H),ocr.claheArr,ocr.W,ocr.H,true);
+    putGrayf32(setCanvas('c1d',ocr.W,ocr.H),ocr.bilArr,ocr.W,ocr.H,true);
+
+    // ── Stage 2 ──
+    setStageActive(2,true);setStatus('<em>Stage 2:</em> DBNet text detection…',30);
+    log('Stage 2 — DBNet detection start');
+    const t2=await ocr.stage2();
+    setTime(2,t2);setStageActive(2,false);
+    log(`Stage 2 done in ${t2.toFixed(1)}ms`,'i');
+
+    putHeatmap(setCanvas('c2a',ocr.W,ocr.H),ocr.probArr,ocr.W,ocr.H);
+    putHeatmap(setCanvas('c2b',ocr.W,ocr.H),ocr.thrArr,ocr.W,ocr.H);
+    putHeatmap(setCanvas('c2c',ocr.W,ocr.H),ocr.binArr,ocr.W,ocr.H);
+
+    // ── Stage 3 ──
+    setStageActive(3,true);setStatus('<em>Stage 3:</em> Box refinement…',55);
+    log('Stage 3 — Connected components + box refinement');
+    const t3=ocr.stage3();
+    setTime(3,t3);setStageActive(3,false);
+    log(`Stage 3 done in ${t3.toFixed(1)}ms · ${ocr.boxes.length} characters detected`,'i');
+
+    putComponents(setCanvas('c3a',ocr.W,ocr.H),ocr.labels,ocr.W,ocr.H);
+    drawBoxesOnImg(setCanvas('c3b',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H,ocr.boxes,'polygon');
+    drawBoxesOnImg(setCanvas('c3c',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H,ocr.boxes,'unclip');
+
+    // ── Stage 3b: AI verification (skipped on file:// due to CORS) ──
+    if(IS_FILE_ORIGIN){
+      document.getElementById('t3b').textContent='skipped';
+      document.getElementById('sg3b').style.opacity='0.4';
+      log('Stage 3b — skipped (file:// origin, CORS blocks API calls)','w');
+      drawBoxesOnImg(setCanvas('c3bOut',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H,ocr.boxes,'polygon');
+    } else {
+      const beforeCount=ocr.boxes.length;
+      document.getElementById('sg3b').classList.add('running');
+      setStatus(`<em>Stage 3b:</em> AI verifying ${beforeCount} candidates…`,63);
+      log(`Stage 3b — sending ${beforeCount} candidates to Claude Vision`);
+      const t3b=await ocr.classifyCharacters(gridCanvas=>{
+        const gc=setCanvas('c3bGrid',gridCanvas.width,gridCanvas.height);
+        gc.getContext('2d').drawImage(gridCanvas,0,0);
+      });
+      document.getElementById('t3b').textContent=t3b.toFixed(1)+'ms';
+      document.getElementById('sg3b').classList.remove('running');
+      log(`Stage 3b done in ${t3b.toFixed(1)}ms · ${ocr.boxes.length}/${beforeCount} verified as characters`,'i');
+      drawBoxesOnImg(setCanvas('c3bOut',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H,ocr.boxes,'polygon');
+    }
+
+    // ── Stage 4 ──
+    setStageActive(4,true);setStatus('<em>Stage 4:</em> Orientation classification…',72);
+    log('Stage 4 — Orientation field + per-box classification');
+    const t4=await ocr.stage4();
+    setTime(4,t4);setStageActive(4,false);
+    log(`Stage 4 done in ${t4.toFixed(1)}ms`,'i');
+
+    putOrient(setCanvas('c4a',ocr.W,ocr.H),ocr.orientArr,ocr.W,ocr.H);
+    drawOrientBoxes(setCanvas('c4b',ocr.W,ocr.H),ocr.rgbaResized,ocr.W,ocr.H,ocr.boxes);
+
+    // ── Stage 5 ──
+    setStageActive(5,true);setStatus('<em>Stage 5:</em> Perspective rectification…',88);
+    log('Stage 5 — Perspective warp + crop normalization');
+    const t5=await ocr.stage5();
+    setTime(5,t5);setStageActive(5,false);
+    log(`Stage 5 done in ${t5.toFixed(1)}ms · ${ocr.crops?.length||0} crops`,'i');
+
+    const cropsOut=document.getElementById('cropsOut');
+    cropsOut.innerHTML='';
+    if(!ocr.crops?.length){
+      cropsOut.innerHTML='<span style="font-size:.7rem;color:#7080a0;padding:8px">No text regions detected — try an image with text</span>';
+    } else {
+      for(let i=0;i<ocr.crops.length;i++){
+        const crop=ocr.crops[i];
+        const wrap=document.createElement('div');wrap.className='cbox';
+        const c=document.createElement('canvas');
+        c.width=crop.w;c.height=crop.h;
+        putRGBAf32(c,crop.data,crop.w,crop.h);
+        const lbl=document.createElement('div');lbl.className='cidx';
+        lbl.textContent=`#${i+1} ${crop.w}×${crop.h}`;
+        wrap.append(c,lbl);cropsOut.append(wrap);
+      }
+    }
+
+    const total=t1+t2+t3+t4+t5;
+    setStatus(`<em>✓ Pipeline complete</em> — ${total.toFixed(1)}ms total · ${ocr.boxes.length} regions · ${ocr.crops?.length||0} crops`,100);
+    log(`Pipeline complete: ${total.toFixed(1)}ms`,'i');
+
+  } catch(e){
+    log(`Pipeline error: ${e.message}`,'w');
+    setStatus(`<em>⚠ Error:</em> ${e.message}`,0);
+    console.error(e);
+  } finally {
+    isRunning=false;
+    document.getElementById('runBtn').disabled=false;
+  }
+}
+
+// ── File handling ──
+function loadImageData(img){
+  const c=document.createElement('canvas');
+  c.width=img.naturalWidth;c.height=img.naturalHeight;
+  c.getContext('2d').drawImage(img,0,0);
+  sourceImageData=c.getContext('2d').getImageData(0,0,c.width,c.height);
+  const dz=document.getElementById('dz');
+  dz.innerHTML='';dz.classList.add('has-img');
+  const preview=document.createElement('img');
+  preview.src=img.src;dz.appendChild(preview);
+  document.getElementById('runBtn').disabled=false;
+  setStatus(`Image loaded: ${img.naturalWidth}×${img.naturalHeight}px (${(img.naturalWidth*img.naturalHeight*16/1024/1024).toFixed(1)} MB GPU) — click ▶ RUN PIPELINE`,0);
+  log(`Image loaded: ${img.naturalWidth}×${img.naturalHeight}`,'i');
+}
+
+document.getElementById('fi').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  const url=URL.createObjectURL(f);
+  const img=new Image();img.onload=()=>{loadImageData(img);URL.revokeObjectURL(url);};img.src=url;
+});
+
+document.getElementById('runBtn').addEventListener('click',runPipeline);
+
+document.getElementById('resetBtn').addEventListener('click',()=>{
+  sourceImageData=null;isRunning=false;ocr=new OCRPipeline();
+  ocr.init().then(mode=>{});
+  document.getElementById('dz').className='dropz';
+  document.getElementById('dz').innerHTML='<div>Drop image here  ·  or click LOAD IMAGE</div><div class="hint">JPEG · PNG · BMP · WebP</div>';
+  document.getElementById('runBtn').disabled=true;
+  document.getElementById('pf').style.width='0%';
+  document.getElementById('sts').textContent='Reset — load a new image';
+  document.getElementById('cropsOut').innerHTML='<span style="font-size:.7rem;color:#7080a0;padding:8px">Text line crops will appear here</span>';
+  ['t1','t2','t3','t4','t5'].forEach(id=>document.getElementById(id).textContent='—');
+  ['c1a','c1b','c1c','c1d','c2a','c2b','c2c','c3a','c3b','c3c','c3bGrid','c3bOut','c4a','c4b'].forEach(id=>{
+    const c=document.getElementById(id);c.classList.add('ph');
+  });
+  logEl.innerHTML='';
+  log('Reset complete');
+});
+
+// ── Drag & drop ──
+const dz=document.getElementById('dz');
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over');});
+dz.addEventListener('dragleave',()=>dz.classList.remove('over'));
+dz.addEventListener('drop',e=>{
+  e.preventDefault();dz.classList.remove('over');
+  const f=e.dataTransfer.files[0];if(!f||!f.type.startsWith('image/'))return;
+  const url=URL.createObjectURL(f);
+  const img=new Image();img.onload=()=>{loadImageData(img);URL.revokeObjectURL(url);};img.src=url;
+});
+dz.addEventListener('click',()=>document.getElementById('fi').click());
+</script>
+</body>
+</html>

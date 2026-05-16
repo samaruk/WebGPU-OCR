@@ -1,0 +1,1 @@
+export class SpellCorrector{correct(t){return t;}}

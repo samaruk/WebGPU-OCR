@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CharacterSegmentationDataset",
+  "description": "Ground truth annotation format for character segmentation benchmarking.",
+  "type": "object",
+  "required": ["version", "images", "annotations"],
+  "properties": {
+    "version": { "type": "string", "description": "Schema version (semver)" },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "url", "width", "height"],
+        "properties": {
+          "id":     { "type": "string" },
+          "url":    { "type": "string" },
+          "width":  { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 },
+          "dpi":    { "type": "number" },
+          "language": { "type": "string" },
+          "degradation": { "type": "string", "enum": ["clean", "photocopy", "phone_scan", "fax", "aged_doc"] }
+        }
+      }
+    },
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "imageId", "bbox"],
+        "properties": {
+          "id":      { "type": "string" },
+          "imageId": { "type": "string" },
+          "label":   { "type": "string", "description": "Unicode character or category" },
+          "bbox":    {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 4, "maxItems": 4,
+            "description": "[x, y, width, height] in pixels — axis-aligned"
+          },
+          "rotatedBbox": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 5, "maxItems": 5,
+            "description": "[cx, cy, w, h, angle_deg] — rotated minimum-area rect"
+          },
+          "difficult": { "type": "boolean", "description": "Mark ambiguous or partially occluded characters" }
+        }
+      }
+    }
+  }
+}

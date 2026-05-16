@@ -1,0 +1,1 @@
+export class KenLM{score(t){return 0;}}

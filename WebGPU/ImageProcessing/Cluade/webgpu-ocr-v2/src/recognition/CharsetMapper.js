@@ -1,0 +1,1 @@
+export const CHARSET=' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';export class CharsetMapper{idx2char(i){return CHARSET[i]??'?';}}

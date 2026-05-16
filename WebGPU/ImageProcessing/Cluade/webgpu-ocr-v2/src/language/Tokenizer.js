@@ -1,0 +1,1 @@
+export class Tokenizer{tokenize(t){return t.split(" ");}}

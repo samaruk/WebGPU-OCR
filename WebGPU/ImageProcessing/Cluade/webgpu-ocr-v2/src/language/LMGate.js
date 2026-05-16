@@ -1,0 +1,1 @@
+export class LMGate{shouldRun(text,conf){return conf<0.85&&text.length>1;}}

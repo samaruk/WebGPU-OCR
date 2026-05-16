@@ -1,0 +1,1 @@
+export class ExecutionProviderSelector{select(){return["webgpu","wasm"];}}

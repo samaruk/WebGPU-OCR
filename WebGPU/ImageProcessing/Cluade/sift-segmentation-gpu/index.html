@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SIFT Segmentation GPU</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">
+          <span class="logo-mark">⬡</span>
+          <span class="logo-text">SIFT<em>gpu</em></span>
+        </div>
+        <nav class="nav">
+          <button class="nav-btn active" data-tab="segmentation">Segmentation</button>
+          <button class="nav-btn" data-tab="keypoints">Keypoints</button>
+          <button class="nav-btn" data-tab="pyramid">Pyramid</button>
+          <button class="nav-btn" data-tab="graph">Graph</button>
+        </nav>
+        <div class="header-status">
+          <span id="gpu-status" class="status-badge">Initializing GPU…</span>
+        </div>
+      </div>
+    </header>
+    <main class="main">
+      <aside class="sidebar">
+        <section class="panel">
+          <h3 class="panel-title">Input</h3>
+          <div class="drop-zone" id="drop-zone">
+            <input type="file" id="file-input" accept="image/*" hidden />
+            <div class="drop-icon">⬆</div>
+            <p>Drop image or <button class="link-btn" id="browse-btn">browse</button></p>
+            <p class="drop-hint">PNG · JPEG · WebP — up to 4096×4096</p>
+          </div>
+          <canvas id="preview-canvas" class="preview-canvas" hidden></canvas>
+        </section>
+        <section class="panel">
+          <h3 class="panel-title">Preprocessing</h3>
+          <label class="field">
+            <span>Gamma</span>
+            <input type="range" id="gamma" min="0.5" max="2.5" step="0.05" value="1.0" />
+            <output id="gamma-out">1.00</output>
+          </label>
+          <label class="field">
+            <span>CLAHE Clip</span>
+            <input type="range" id="clahe-clip" min="1" max="8" step="0.5" value="2" />
+            <output id="clahe-clip-out">2.0</output>
+          </label>
+          <label class="field checkbox">
+            <input type="checkbox" id="bilateral" checked />
+            <span>Bilateral Filter</span>
+          </label>
+        </section>
+        <section class="panel">
+          <h3 class="panel-title">SIFT</h3>
+          <label class="field">
+            <span>Octaves</span>
+            <input type="range" id="octaves" min="2" max="6" step="1" value="4" />
+            <output id="octaves-out">4</output>
+          </label>
+          <label class="field">
+            <span>Scales / Octave</span>
+            <input type="range" id="scales" min="2" max="6" step="1" value="3" />
+            <output id="scales-out">3</output>
+          </label>
+          <label class="field">
+            <span>Contrast Threshold</span>
+            <input type="range" id="contrast-thresh" min="0.01" max="0.1" step="0.005" value="0.04" />
+            <output id="contrast-thresh-out">0.040</output>
+          </label>
+          <label class="field">
+            <span>Edge Threshold</span>
+            <input type="range" id="edge-thresh" min="5" max="20" step="1" value="10" />
+            <output id="edge-thresh-out">10</output>
+          </label>
+        </section>
+        <section class="panel">
+          <h3 class="panel-title">Segmentation</h3>
+          <label class="field">
+            <span>Min Segment Area</span>
+            <input type="range" id="min-area" min="50" max="2000" step="50" value="200" />
+            <output id="min-area-out">200</output>
+          </label>
+          <label class="field">
+            <span>Merge Threshold</span>
+            <input type="range" id="merge-thresh" min="0.1" max="0.9" step="0.05" value="0.45" />
+            <output id="merge-thresh-out">0.45</output>
+          </label>
+          <label class="field checkbox">
+            <input type="checkbox" id="skeleton" checked />
+            <span>Skeletonise</span>
+          </label>
+        </section>
+        <button class="run-btn" id="run-btn" disabled>
+          <span class="run-icon">▶</span> Run Pipeline
+        </button>
+      </aside>
+      <div class="canvas-area">
+        <div class="tabs" id="tab-panels">
+          <div class="tab-panel active" id="panel-segmentation">
+            <canvas id="output-canvas" class="output-canvas"></canvas>
+            <div class="canvas-overlay" id="canvas-overlay"><p>Load an image to begin</p></div>
+          </div>
+          <div class="tab-panel" id="panel-keypoints">
+            <canvas id="keypoints-canvas" class="output-canvas"></canvas>
+          </div>
+          <div class="tab-panel" id="panel-pyramid">
+            <div id="pyramid-grid" class="pyramid-grid"></div>
+          </div>
+          <div class="tab-panel" id="panel-graph">
+            <canvas id="graph-canvas" class="output-canvas"></canvas>
+          </div>
+        </div>
+        <div class="stats-bar" id="stats-bar">
+          <span id="stat-keypoints">—</span>
+          <span id="stat-segments">—</span>
+          <span id="stat-time">—</span>
+          <span id="stat-fps">—</span>
+        </div>
+      </div>
+      <aside class="info-panel">
+        <section class="panel">
+          <h3 class="panel-title">Pipeline Log</h3>
+          <div id="log-output" class="log-output"></div>
+        </section>
+        <section class="panel">
+          <h3 class="panel-title">Segment List</h3>
+          <div id="segment-list" class="segment-list"></div>
+        </section>
+        <section class="panel">
+          <h3 class="panel-title">Export</h3>
+          <button class="export-btn" id="export-png">PNG Overlay</button>
+          <button class="export-btn" id="export-json">JSON Metadata</button>
+          <button class="export-btn" id="export-svg">SVG Polygons</button>
+        </section>
+      </aside>
+    </main>
+    <div id="progress-bar" class="progress-bar" hidden>
+      <div class="progress-fill" id="progress-fill"></div>
+      <span class="progress-label" id="progress-label">Processing…</span>
+    </div>
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

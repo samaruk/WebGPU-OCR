@@ -1,0 +1,23 @@
+{
+  "name": "webgpu-ocr",
+  "version": "2.0.0",
+  "description": "Production WebGPU OCR pipeline with ONNX Runtime, 15 stages, per-stage canvas visualization",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host --port 5173",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "bench": "node scripts/benchmark.js"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.18.0",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "vite": "^5.2.0",
+    "vitest": "^1.6.0"
+  }
+}
