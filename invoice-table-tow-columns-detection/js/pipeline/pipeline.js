@@ -13,7 +13,7 @@ import { traceContour } from '../contour/contour.js';
 import { convexHull } from '../hull/hull.js';
 import { minAreaRect } from '../calipers/calipers.js';
 import { obbToPart, splitMergedBoxes } from '../splitter/splitter.js';
-import { detectSkew, buildDeskew } from '../skew/skew.js';
+import { estimateSkew, buildDeskew } from '../skew/skew.js';
 import { analyzeTable } from '../table/table.js';
 import { buildGallery, showStage } from '../gallery/gallery.js';
 import { fitView } from '../viewport/viewport.js';
@@ -88,9 +88,17 @@ export async function runPipeline(){
   overlay.classList.add('show'); runBtn.disabled=true;
   const t={};
   try{
+    // 1 · pass A — detection on the original, un-rotated image
     let t0=performance.now();
-    oStep.textContent='1 · skew detection'; await raf();
-    S.angle = p.deskew ? detectSkew(S.img,p.skewMax) : 0;
+    oStep.textContent='1 · pass A — before rotate'; await raf();
+    S.passes.A = await runPass(S.origImageData, p.dilA, p);
+    t.passA=performance.now()-t0;
+
+    // 2 · skew — measured directly from pass A's accepted word OBBs,
+    //     which already sit at the page's true rotation
+    t0=performance.now();
+    oStep.textContent='2 · skew detection'; await raf();
+    S.angle = p.deskew ? estimateSkew(S.passes.A, S.img, p.skewMax) : 0;
     buildDeskew(S.angle);
     t.skew=performance.now()-t0;
     $('skewOut').innerHTML = p.deskew
@@ -99,11 +107,7 @@ export async function runPipeline(){
       : `<span class="k">deskew</span> <span class="v">off</span>`;
     $('sAngle').textContent = p.deskew ? fmtDeg(S.angle) : '—';
 
-    t0=performance.now();
-    oStep.textContent='2 · pass A — before rotate'; await raf();
-    S.passes.A = await runPass(S.origImageData, p.dilA, p);
-    t.passA=performance.now()-t0;
-
+    // 3 · pass B — detection on the deskewed image
     t0=performance.now();
     oStep.textContent='3 · pass B — after rotate'; await raf();
     S.passes.B = await runPass(S.deskewImageData, p.dilB, p);

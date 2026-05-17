@@ -137,10 +137,15 @@ export function groupRows(boxes,medH){
   const real=out.filter(r=>r.boxes.some(b=>b.h>=fullH));
   return (real.length && real.length<out.length) ? real : out;
 }
-/* column gutters = vertical bands that stay whitespace through a long
-   unbroken run of consecutive rows.  Using the longest run (not a count)
-   means a header or footer line that happens to cross the gutter on a
-   few rows cannot fill it — the table's own rows still define it.       */
+/* column detection — locate the vertical gutters that separate word
+   columns.  cover[x] counts how many rows have a word over column x; a
+   gutter is a low-occupancy run.  Scoring by the *fraction of rows* that
+   are whitespace — not the longest unbroken whitespace run — is what
+   lets a gutter survive being crossed by a wide word, a spanning header
+   or a wrapped line.  That crossing-intolerance was the main reason
+   adjacent columns merged and columns went missing.  A second soft-split
+   pass then separates any columns whose gutter is crossed often enough
+   to stay above the hard threshold, by cutting at an occupancy valley.  */
 export function detectColumns(rows,medH,sens){
   if(rows.length<2) return [];
   let xLo=1/0,xHi=-1/0;
@@ -148,33 +153,74 @@ export function detectColumns(rows,medH,sens){
   xLo=Math.floor(xLo); xHi=Math.ceil(xHi);
   const W=xHi-xLo+1;
   if(W<8) return [];
-  const cur=new Int32Array(W), best=new Int32Array(W);
+  // cover[x] = number of rows with at least one word covering column x
+  const cover=new Int32Array(W);
   for(const r of rows){
-    const mark=new Uint8Array(W);
+    const diff=new Int32Array(W+1);
     for(const b of r.boxes){
       const a=Math.max(0,Math.floor(b.x0)-xLo), z=Math.min(W-1,Math.ceil(b.x1)-xLo);
-      for(let x=a;x<=z;x++) mark[x]=1;
+      if(a<=z){ diff[a]++; diff[z+1]--; }
     }
-    for(let x=0;x<W;x++){
-      if(mark[x]) cur[x]=0;
-      else { const c=++cur[x]; if(c>best[x]) best[x]=c; }
-    }
+    let run=0;
+    for(let x=0;x<W;x++){ run+=diff[x]; if(run>0) cover[x]++; }
   }
-  const runThr=Math.max(4,Math.round(rows.length*0.30));   // gutter whitespace run length
-  const gMinW=Math.max(3,Math.round(medH*(0.55-0.035*sens)));   // sens 1..10 → ~0.5..0.2 medH
-  const cuts=[]; let run=-1;
+  // robust column occupancy = 75th percentile of the non-empty profile
+  const nz=[]; for(let x=0;x<W;x++) if(cover[x]>0) nz.push(cover[x]);
+  if(nz.length<2) return [];
+  nz.sort((a,b)=>a-b);
+  const peak=nz[Math.floor(nz.length*0.75)]||1;
+  const gMinW=Math.max(3,Math.round(medH*(0.55-0.035*sens)));   // min gutter width
+  const gutThr=Math.max(1,Math.round(peak*(0.18+0.03*sens)));   // sens 1..10 → 21%..48% of peak
+  // hard gutters — low-occupancy runs wide enough to separate columns
+  const gut=[]; let run=-1;
   for(let x=0;x<W;x++){
-    if(best[x]>=runThr){ if(run<0)run=x; }
-    else if(run>=0){ if(x-run>=gMinW) cuts.push([run,x-1]); run=-1; }
+    if(cover[x]<=gutThr){ if(run<0)run=x; }
+    else if(run>=0){ if(x-run>=gMinW) gut.push([run,x-1]); run=-1; }
   }
-  if(run>=0 && W-run>=gMinW) cuts.push([run,W-1]);
-  const cols=[]; let prev=0;
-  for(const [g0,g1] of cuts){
-    if(g0>prev) cols.push({x0:prev+xLo,x1:g0-1+xLo});
-    prev=g1+1;
+  if(run>=0 && W-run>=gMinW) gut.push([run,W-1]);
+  let segs=[]; let prev=0;                       // column segments lie between gutters
+  for(const [g0,g1] of gut){ if(g0>prev) segs.push([prev,g0-1]); prev=g1+1; }
+  if(prev<W) segs.push([prev,W-1]);
+  segs=splitWideColumns(cover,segs,gMinW);        // recover gutters crossed too often
+  const cols=[];
+  for(let [a,b] of segs){
+    while(a<b && cover[a]===0) a++;               // trim empty padding
+    while(b>a && cover[b]===0) b--;
+    if(b-a>=Math.round(medH*0.5)) cols.push({x0:a+xLo,x1:b+xLo});
   }
-  if(prev<W) cols.push({x0:prev+xLo,x1:W-1+xLo});
-  return cols.filter(c=>c.x1-c.x0>=medH*0.5);
+  return cols;
+}
+/* split a column segment that is really two (or more) columns merged —
+   their gutter was crossed too often to drop below the hard threshold.
+   A genuine internal gutter shows as an occupancy valley well below the
+   segment's own typical level; an edge dip (the ragged side of a right-
+   aligned number column) is ignored because it touches a segment end.   */
+function splitWideColumns(cover,segs,gMinW){
+  const out=[], stack=segs.slice();
+  while(stack.length){
+    const [a,b]=stack.pop();
+    if(b-a+1<2*gMinW){ out.push([a,b]); continue; }
+    const vals=[];
+    for(let x=a;x<=b;x++) vals.push(cover[x]);
+    vals.sort((p,q)=>p-q);
+    // reference = the segment's column-level occupancy (75th percentile),
+    // so a real gutter still reads as a valley even when the ragged edge
+    // of a right-aligned number column drags the median down.
+    const ref=vals[Math.floor(vals.length*0.75)]||1;
+    const vThr=ref*0.55;
+    let best=null,run=-1;
+    for(let x=a;x<=b+1;x++){
+      if(x<=b && cover[x]<=vThr){ if(run<0)run=x; }
+      else {
+        if(run>a && x-1<b && (x-run)>=gMinW &&
+           (!best || (x-1-run)>(best[1]-best[0]))) best=[run,x-1];
+        run=-1;
+      }
+    }
+    if(best){ stack.push([a,best[0]-1]); stack.push([best[1]+1,b]); }
+    else out.push([a,b]);
+  }
+  return out.sort((p,q)=>p[0]-q[0]);
 }
 /* fallback column detection — used only when the gutter method above
    fails (too few rows, or every candidate gutter gets crossed).  It is a

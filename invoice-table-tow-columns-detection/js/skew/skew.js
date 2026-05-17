@@ -1,10 +1,12 @@
 /* ======================================================================
    SKEW DETECTION & CORRECTION
    Why: scanned invoices are rarely level. Left uncorrected, every OBB
-   inherits the tilt and the table grid shears. detectSkew scores candidate
-   angles by how sharply the text collapses into rows (envelope-removed
-   projection profile); buildDeskew rotates the raster upright so the
-   after-rotate pass and table analysis run in a level coordinate frame.
+   inherits the tilt and the table grid shears. estimateSkew measures the
+   skew directly from the accepted word OBBs of pass A (each word sits on
+   the text baseline, so the median box angle IS the page tilt); detectSkew
+   is a projection-profile fallback for a near-blank page; buildDeskew
+   rotates the raster upright so the after-rotate pass and table analysis
+   run in a level coordinate frame.
    ====================================================================== */
 import { S } from '../state/state.js';
 
@@ -144,6 +146,36 @@ export function buildDeskew(angleDeg){
   S.deskewImageData=ctx.getImageData(0,0,W,H);
 }
 
-
-/* one full Sauvola → dilate → CCA → contour → hull → calipers → OBB pass.
-   `dil` = {h,v} dilation radii; returns all per-pass intermediates. */
+/* skew measured directly from the accepted word OBBs of pass A.  Every
+   detected word sits along the text baseline, so on a rotated page each
+   box's long axis shares the page's tilt — the median of those angles
+   is a direct geometric measurement of the skew.  This is far more
+   reliable than the projection profile, which can read +0.00 on an
+   invoice that is plainly rotated when its line/gap texture is weak.
+   detectSkew is kept only as a fallback for a near-blank pass A.
+   Returns the same ctx.rotate angle convention as detectSkew (the angle
+   that, applied to the canvas, re-levels the text).                     */
+export function estimateSkew(pass,img,maxDeg){
+  const tilts=[];
+  if(pass && pass.blobs){
+    for(const bl of pass.blobs){
+      if(!bl.accepted || !bl.obb || bl.aspect<2) continue;   // need a clear, elongated word
+      const c=bl.obb.corners;
+      let dx=c[1].x-c[0].x, dy=c[1].y-c[0].y;                // one box edge
+      const dx2=c[2].x-c[1].x, dy2=c[2].y-c[1].y;            // the perpendicular edge
+      if(dx2*dx2+dy2*dy2 > dx*dx+dy*dy){ dx=dx2; dy=dy2; }   // keep the longer = text axis
+      let a=Math.atan2(dy,dx)*180/Math.PI;
+      while(a> 90) a-=180;                                   // fold to (-90,90] — an axis
+      while(a<=-90) a+=180;
+      if(Math.abs(a)<=maxDeg+5) tilts.push(a);               // drop vertical labels / outliers
+    }
+  }
+  if(tilts.length>=8){
+    tilts.sort((p,q)=>p-q);
+    const med=tilts[tilts.length>>1];
+    let s=0,n=0;                                             // trimmed mean of the inliers
+    for(const a of tilts) if(Math.abs(a-med)<=2.5){ s+=a; n++; }
+    return -(n?s/n:med);                                     // ctx.rotate angle that re-levels
+  }
+  return detectSkew(img,maxDeg);                             // fallback: too few clear words
+}
