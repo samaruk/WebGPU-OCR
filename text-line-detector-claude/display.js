@@ -87,19 +87,82 @@ export function showDist(canvas, data, W, H) {
 }
 
 /**
- * Draw OBBs over a faint binary background for the "GRAPH PATHS" debug stage.
- * WHY: Shows the final polygon geometry against the binary image so you can
- *      verify each OBB aligns with actual ink pixels, check for multi-line
- *      OBBs, and see which lines were detected or missed.
+ * Private helper — render a packed-RGBA image onto a canvas context,
+ * optionally applying a deskew correction via Canvas 2D rotation.
  *
- * @param {Array<Array<{x,y}>>} polys - Array of 4-corner polygons
- * @param {Float32Array|null}   bg    - Optional binary background for context
+ * WHY CANVAS 2D ROTATION INSTEAD OF A SECOND GPU PASS:
+ *   The GPU correction was applied only to the grayscale/binary buffers used
+ *   for processing. To show the corrected full-colour photo we'd need an
+ *   extra GPU RGBA buffer (W×H×4 bytes extra VRAM) and an extra readback.
+ *   Canvas 2D rotation achieves the same visual result in one drawImage()
+ *   call with GPU-accelerated compositing — no extra VRAM, no extra readback.
+ *
+ * ROTATION SIGN CONVENTION:
+ *   corrAngleDeg = skewAngle detected by detectSkewFromBlobs (e.g. +30°).
+ *   The GPU shader corrected with rad = −skewAngle (CCW by skewAngle degrees).
+ *   ctx.rotate() uses CW-positive convention, so:
+ *     ctx.rotate(−corrAngleDeg × π/180) = rotate CCW by corrAngleDeg degrees
+ *   This exactly mirrors what the GPU did.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {Uint32Array}             rgba32      Packed RGBA pixels
+ * @param {number}                  W, H        Image dimensions
+ * @param {number}                  corrAngleDeg Skew angle to correct (degrees)
  */
-export function showPolyDebug(canvas, polys, W, H, bg = null) {
+function _drawRGBAOnCanvas(ctx, rgba32, W, H, corrAngleDeg) {
+  const bytes = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const v = rgba32[i];
+    bytes[i*4]   =  v        & 255;
+    bytes[i*4+1] = (v >>  8) & 255;
+    bytes[i*4+2] = (v >> 16) & 255;
+    bytes[i*4+3] = 255;
+  }
+  const id = new ImageData(bytes, W, H);
+
+  if (Math.abs(corrAngleDeg) < 0.01) {
+    // No correction needed — direct draw
+    ctx.putImageData(id, 0, 0);
+    return;
+  }
+
+  // Render the original photo onto an offscreen canvas, then rotate-draw
+  // it onto the destination context. White fills the corners exposed by rotation
+  // (matching the GPU shader's out-of-bounds fill value of 1.0 = white).
+  const src = document.createElement('canvas');
+  src.width = W; src.height = H;
+  src.getContext('2d').putImageData(id, 0, 0);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(-corrAngleDeg * Math.PI / 180);   // CCW by corrAngleDeg — matches GPU correction
+  ctx.drawImage(src, -W / 2, -H / 2);
+  ctx.restore();
+}
+
+/**
+ * Draw OBBs over the corrected (deskewed) image for the "GRAPH PATHS + OBB" stage.
+ *
+ * WHY POLYGONS STAY IN CORRECTED SPACE (not rotated back to original):
+ *   After deskewing, text lines are horizontal and OBBs are axis-aligned.
+ *   Displaying them in corrected space makes it trivial to verify whether each
+ *   rectangle tightly fits its text line. Rotating back to the original skewed
+ *   image would tilt every rectangle and make alignment harder to judge visually.
+ *
+ * @param {Array<Array<{x,y}>>}     polys        OBBs in corrected-image space
+ * @param {Uint32Array}             bg           Packed RGBA image (original photo)
+ * @param {number}                  corrAngleDeg Skew angle in degrees (0 = no correction)
+ */
+export function showPolyDebug(canvas, polys, W, H, bg = null, corrAngleDeg = 0) {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  if (bg) {
+  if (bg instanceof Uint32Array) {
+    _drawRGBAOnCanvas(ctx, bg, W, H, corrAngleDeg);
+  } else if (bg) {
+    // Legacy Float32Array binary background (kept for compatibility)
     const id = ctx.createImageData(W, H);
     for (let i = 0; i < W * H; i++) {
       if (bg[i] > 0.5) { id.data[i*4] = 25; id.data[i*4+1] = 45; id.data[i*4+2] = 30; }
@@ -119,29 +182,18 @@ export function showPolyDebug(canvas, polys, W, H, bg = null) {
 }
 
 /**
- * Draw the original image with OBB overlays as the final result.
- * WHY RGBA32 INSTEAD OF IMAGEBITMAP: The original image is stored as a
- *      Uint32Array (packed RGBA) from the initial load. We unpack it here
- *      to draw on the result canvas rather than keeping a second copy as
- *      an ImageBitmap, saving memory.
+ * Draw OBBs over the corrected (deskewed) image as the final result.
  *
- * @param {Uint32Array}          rgba32 - Packed RGBA image data
- * @param {Array<Array<{x,y}>>} polys  - Final OBB polygons
+ * @param {Uint32Array}             rgba32       Packed RGBA original image
+ * @param {Array<Array<{x,y}>>}    polys        OBBs in corrected-image space
+ * @param {number}                  corrAngleDeg Skew angle in degrees (0 = no correction)
  */
-export function showResult(canvas, rgba32, W, H, polys) {
+export function showResult(canvas, rgba32, W, H, polys, corrAngleDeg = 0) {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  // Unpack Uint32 RGBA to Uint8ClampedArray for ImageData
-  const bytes = new Uint8ClampedArray(W * H * 4);
-  for (let i = 0; i < W * H; i++) {
-    const v = rgba32[i];
-    bytes[i*4] = v & 255; bytes[i*4+1] = (v >> 8) & 255;
-    bytes[i*4+2] = (v >> 16) & 255; bytes[i*4+3] = 255;
-  }
-  ctx.putImageData(new ImageData(bytes, W, H), 0, 0);
+  _drawRGBAOnCanvas(ctx, rgba32, W, H, corrAngleDeg);
 
-  // Draw OBBs as semi-transparent colored rectangles
   ctx.lineWidth = 1.5;
   polys.forEach((poly, idx) => {
     if (poly.length < 3) return;
@@ -151,4 +203,81 @@ export function showResult(canvas, rgba32, W, H, polys) {
     for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
     ctx.closePath(); ctx.fill(); ctx.stroke();
   });
+}
+
+// ── CCA visualisation ─────────────────────────────────────────────────────────
+
+/**
+ * Convert HSL to [R, G, B] (0–255 each).
+ * WHY NEEDED: Generating N visually distinct colors is easiest in HSL space
+ * (hue = color wheel position, constant saturation/lightness = same perceived
+ * brightness). Using the golden-angle step (137.5°) between labels ensures
+ * consecutive components have maximally-different hues with no repetition.
+ */
+function _hslToRgb(h, s, l) {
+  const c = (1 - Math.abs(2*l - 1)) * s;
+  const x = c * (1 - Math.abs(((h * 6) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if      (h < 1/6) { r=c; g=x; }
+  else if (h < 2/6) { r=x; g=c; }
+  else if (h < 3/6) {      g=c; b=x; }
+  else if (h < 4/6) {      g=x; b=c; }
+  else if (h < 5/6) { r=x;      b=c; }
+  else              { r=c;      b=x; }
+  return [(r+m)*255|0, (g+m)*255|0, (b+m)*255|0];
+}
+
+/**
+ * Visualise CCA output — each connected component gets a unique colour.
+ *
+ * WHY THIS IS USEFUL:
+ *   After dilation + CCA, you need to verify:
+ *     - How many blobs were found (count in infoLabel)
+ *     - Whether adjacent text lines were correctly separated or merged
+ *     - Whether small noise blobs passed the elongation filter
+ *   A false-colour map makes all of this immediately obvious: two lines
+ *   that share a colour have been merged into one blob (dilation too large),
+ *   and a single line shown in two colours is fragmented (dilation too small).
+ *
+ * WHY GOLDEN-ANGLE HUE STEP (137.5°):
+ *   Consecutive integers × 137.5° mod 360° produce a sequence where no two
+ *   nearby values share a similar hue. This is the same irrational property
+ *   that makes sunflower seed packing efficient. Result: 50+ components all
+ *   have visually distinct colours without any explicit palette management.
+ *
+ * @param {HTMLCanvasElement}       canvas
+ * @param {Int32Array}              labelMap   - Per-pixel resolved CCA label (-1 = background)
+ * @param {Array<{label,area,...}>} components - CCA component array from cca()
+ * @param {number}                  W, H
+ */
+export function showCCA(canvas, labelMap, components, W, H) {
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const id  = ctx.createImageData(W, H);
+
+  // Map each unique label → RGB colour using golden-angle hue stepping.
+  // Sort by area (largest first) so prominent blobs get the most distinct hues.
+  const sorted = [...components].sort((a, b) => b.area - a.area);
+  const GOLDEN = 137.508;   // golden angle in degrees
+  const labelToRGB = new Map();
+  sorted.forEach((comp, i) => {
+    const hue = (i * GOLDEN) % 360;
+    labelToRGB.set(comp.label, _hslToRgb(hue / 360, 0.75, 0.55));
+  });
+
+  // Paint every foreground pixel with its component colour.
+  // Background pixels (labelMap[i] === −1) stay black (id initialised to 0,0,0,0).
+  for (let i = 0; i < W * H; i++) {
+    const lbl = labelMap[i];
+    if (lbl < 0) { id.data[i*4+3] = 255; continue; }   // black background
+    const rgb = labelToRGB.get(lbl);
+    if (!rgb) { id.data[i*4+3] = 255; continue; }
+    id.data[i*4]   = rgb[0];
+    id.data[i*4+1] = rgb[1];
+    id.data[i*4+2] = rgb[2];
+    id.data[i*4+3] = 255;
+  }
+
+  ctx.putImageData(id, 0, 0);
 }

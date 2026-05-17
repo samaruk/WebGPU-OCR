@@ -55,7 +55,7 @@ import { buildLocalGraph, pruneGraph,
 import { rdp, catmullRom, buildMinRect,
          rotatePolyBack }                            from './geometry.js';
 import { showGray, showBinary, showDist,
-         showPolyDebug, showResult }                 from './display.js';
+         showPolyDebug, showResult, showCCA }          from './display.js';
 
 /**
  * Run the full text-line detection pipeline.
@@ -331,9 +331,20 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
     // Text line blobs are elongated in the direction of the text.
     // After rotation correction, this is the horizontal direction.
     // Square or tall blobs are punctuation marks, noise, or small isolated words.
-    return c.area >= Math.max(80, minLineW) && longer >= minLineW && longer > shorter * 1.5;
+    return c.area >= Math.max(80, minLineW) && longer >= minLineW && longer > shorter * 1.2;
   });
   log(`CCA: ${lineComps.length} line candidates`, 'hi');
+
+  // WHY SHOW allDilComps (all components, not just lineComps):
+  //   Displaying every blob — including small noise, punctuation, table cells
+  //   that didn't pass the elongation filter — lets you see the full CCA output
+  //   and diagnose whether the dilation merged lines that should be separate
+  //   (same colour) or fragmented a line into multiple blobs (one line, two colours).
+  if (canvases.cca) {
+    showCCA(canvases.cca, dilLabelMap, allDilComps, W, H);
+    if (canvases.infoCCA) canvases.infoCCA.textContent =
+      `${allDilComps.length} blobs · ${lineComps.length} lines`;
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  CPU Phase 8: Per-CCA-component local graph + OBB building
@@ -382,19 +393,29 @@ export async function run(imgRGBA, imgW, imgH, gpu, params, canvases, log) {
   log(`OBB CPU: ${(t3 - t2).toFixed(0)} ms → ${polygons.length} text lines`, 'ok');
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  CPU Phase 9: Rotate polygons back to original image coordinates
   // ══════════════════════════════════════════════════════════════════════════
-  const cx = W / 2, cy = H / 2;
-  const finalPolys = needsRotation
-    // WHY −skewAngle: rotatePolyBack applies rotation by −angleDeg.
-    // Polygons live in the corrected (0°) space. Original space is at +skewAngle.
-    // To land back at +skewAngle we need −angleDeg = +skewAngle → angleDeg = −skewAngle.
-    ? polygons.map(p => rotatePolyBack(p, cx, cy, -skewAngle))
-    : polygons;
+  //  Phase 9: Display on the CORRECTED (deskewed) image
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // WHY NO rotatePolyBack:
+  //   OBBs are computed in the corrected image space (text horizontal).
+  //   Showing polygons + background both in corrected space means the
+  //   rectangles are axis-aligned and easy to inspect. Rotating back to
+  //   the original skewed space would tilt every rectangle unnecessarily.
+  //
+  // HOW THE CORRECTED IMAGE IS PRODUCED FOR DISPLAY:
+  //   Canvas 2D rotation of imgRGBA by -skewAngle (same as the GPU shader)
+  //   is applied inside showPolyDebug / showResult via corrAngleDeg.
+  //   No extra GPU buffer or readback needed.
+  //
+  // WHEN NO ROTATION WAS APPLIED:
+  //   corrAngleDeg = 0 → images are rendered without any Canvas rotation.
 
-  // ── Display final results ─────────────────────────────────────────────────
-  showPolyDebug(canvases.poly,   finalPolys, W, H, dataBin0);
-  showResult(canvases.result,    imgRGBA,    W, H, finalPolys);
+  const finalPolys   = polygons;                           // stay in corrected space
+  const corrAngleDeg = needsRotation ? skewAngle : 0;     // angle the GPU corrected
+
+  showPolyDebug(canvases.poly,  finalPolys, W, H, imgRGBA, corrAngleDeg);
+  showResult(canvases.result,   imgRGBA,    W, H, finalPolys, corrAngleDeg);
   if (canvases.infoPoly)   canvases.infoPoly.textContent   = `${finalPolys.length} polygons`;
   if (canvases.infoResult) canvases.infoResult.textContent =
     `${finalPolys.length} lines · ${(performance.now() - t0).toFixed(0)} ms`;

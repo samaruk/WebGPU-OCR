@@ -160,10 +160,12 @@ async function onRun() {
   const canvases = {
     gray: document.getElementById('cGray'), bin:  document.getElementById('cBin'),
     rot:  document.getElementById('cRot'),  dil:  document.getElementById('cDil'),
+    cca:  document.getElementById('cCCA'),
     skel: document.getElementById('cSkel'), dist: document.getElementById('cDist'),
     poly: document.getElementById('cPoly'), result: document.getElementById('cResult'),
     infoGray: document.getElementById('iGray'),   infoBin:  document.getElementById('iBin'),
     infoRot:  document.getElementById('iRot'),    infoDil:  document.getElementById('iDil'),
+    infoCCA:  document.getElementById('iCCA'),
     infoSkel: document.getElementById('iSkel'),   infoDist: document.getElementById('iDist'),
     infoPoly: document.getElementById('iPoly'),   infoResult: document.getElementById('iResult'),
   };
