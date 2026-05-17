@@ -5,10 +5,10 @@
    Run and export buttons to their actions, so the image-processing modules
    never touch the DOM control tree.
    ====================================================================== */
-import { $, stageCap, legendEl, runBtn, savePng, saveJson } from './dom.js';
-import { S } from './state.js';
-import { STAGES } from './config.js';
-import { fmtDeg, runPipeline, readParams } from './pipeline.js';
+import { $, stageCap, legendEl, runBtn, savePng, saveJson } from '../dom/dom.js';
+import { S } from '../state/state.js';
+import { STAGES } from '../config/config.js';
+import { fmtDeg, runPipeline, readParams } from '../pipeline/pipeline.js';
 
 /* =====================================================================
    UI WIRING

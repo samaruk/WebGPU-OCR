@@ -5,8 +5,9 @@
    the viewport blitter and the gallery show identical pixels and every
    export is full size.
    ====================================================================== */
-import { S } from './state.js';
-import { STAGES } from './config.js';
+import { $ } from '../dom/dom.js';
+import { S } from '../state/state.js';
+import { STAGES } from '../config/config.js';
 
 /* =====================================================================
    RENDERING  —  draw the active stage to an offscreen canvas

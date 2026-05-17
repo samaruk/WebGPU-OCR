@@ -5,13 +5,13 @@
    operator inspect any intermediate result, which is what makes the
    parameter sliders tunable in practice.
    ====================================================================== */
-import { $ } from './dom.js';
-import { S } from './state.js';
-import { STAGES } from './config.js';
-import { getStageCanvas, renderStage, renderStageInto } from './render.js';
-import { raf } from './pipeline.js';
-import { drawView } from './viewport.js';
-import { setStageCap } from './ui.js';
+import { $ } from '../dom/dom.js';
+import { S } from '../state/state.js';
+import { STAGES } from '../config/config.js';
+import { getStageCanvas, renderStage, renderStageInto } from '../render/render.js';
+import { raf } from '../pipeline/pipeline.js';
+import { drawView } from '../viewport/viewport.js';
+import { setStageCap } from '../ui/ui.js';
 
 /* =====================================================================
    STAGE GALLERY  —  every output rendered as a clickable thumbnail

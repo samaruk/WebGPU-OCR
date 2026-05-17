@@ -5,7 +5,7 @@
    keeps the modules themselves stateless (pure functions over S) and means
    the entire data model can be inspected from a single console reference.
    ====================================================================== */
-import { STAGES } from './config.js';
+import { STAGES } from '../config/config.js';
 
 /* ---------- global state ---------- */
 export const S={

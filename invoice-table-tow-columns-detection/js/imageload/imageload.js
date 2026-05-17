@@ -5,12 +5,12 @@
    An over-budget image would fail buffer allocation mid-pipeline, so the
    clamp here is what keeps the pipeline from crashing on large scans.
    ====================================================================== */
-import { S } from './state.js';
-import { STAGES } from './config.js';
+import { S } from '../state/state.js';
+import { STAGES } from '../config/config.js';
 import { $, meta, runBtn, vpEmpty, stageCap, savePng, saveJson,
-         showError, drop, fileIn, viewport } from './dom.js';
-import { resizeView, fitView } from './viewport.js';
-import { setStageCap } from './ui.js';
+         showError, drop, fileIn, viewport } from '../dom/dom.js';
+import { resizeView, fitView } from '../viewport/viewport.js';
+import { setStageCap } from '../ui/ui.js';
 
 /* =====================================================================
    IMAGE LOADING  (with 128 MB / GPU-limit downscale)

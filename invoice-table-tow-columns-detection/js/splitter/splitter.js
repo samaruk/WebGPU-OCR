@@ -5,10 +5,10 @@
    over-tall OBB and recursively resolves it — valley cut first, then
    progressively weaker re-dilation — so one physical word yields one box.
    ====================================================================== */
-import { S } from './state.js';
-import { cca } from './cca.js';
-import { convexHull } from './hull.js';
-import { minAreaRect } from './calipers.js';
+import { S } from '../state/state.js';
+import { cca } from '../cca/cca.js';
+import { convexHull } from '../hull/hull.js';
+import { minAreaRect } from '../calipers/calipers.js';
 
 /* =====================================================================
    MERGED-BOX SPLITTER

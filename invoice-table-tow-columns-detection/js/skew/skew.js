@@ -6,7 +6,7 @@
    projection profile); buildDeskew rotates the raster upright so the
    after-rotate pass and table analysis run in a level coordinate frame.
    ====================================================================== */
-import { S } from './state.js';
+import { S } from '../state/state.js';
 
 /* =====================================================================
    SKEW DETECTION + CORRECTION

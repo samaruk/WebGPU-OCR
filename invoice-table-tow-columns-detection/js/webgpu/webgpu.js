@@ -6,8 +6,8 @@
    separable box sums, threshold, separable dilation) put it on the GPU.
    The whole tool is built around instant re-runs, so this is load-bearing.
    ====================================================================== */
-import { S } from './state.js';
-import { gpuDot, gpuTxt, showError } from './dom.js';
+import { S } from '../state/state.js';
+import { gpuDot, gpuTxt, showError } from '../dom/dom.js';
 
 
 /* =====================================================================

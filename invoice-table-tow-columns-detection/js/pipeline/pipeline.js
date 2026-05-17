@@ -5,18 +5,18 @@
    dilate -> CCA -> contour -> hull -> calipers -> filter); runPipeline
    sequences the two passes, skew, splitting, table analysis and rendering.
    ====================================================================== */
-import { $, overlay, runBtn, oStep, savePng, saveJson, showError } from './dom.js';
-import { S } from './state.js';
-import { gpuSauvola, gpuDilate } from './webgpu.js';
-import { cca } from './cca.js';
-import { traceContour } from './contour.js';
-import { convexHull } from './hull.js';
-import { minAreaRect } from './calipers.js';
-import { obbToPart, splitMergedBoxes } from './splitter.js';
-import { detectSkew, buildDeskew } from './skew.js';
-import { analyzeTable } from './table.js';
-import { buildGallery, showStage } from './gallery.js';
-import { fitView } from './viewport.js';
+import { $, overlay, runBtn, oStep, savePng, saveJson, showError } from '../dom/dom.js';
+import { S } from '../state/state.js';
+import { gpuSauvola, gpuDilate } from '../webgpu/webgpu.js';
+import { cca } from '../cca/cca.js';
+import { traceContour } from '../contour/contour.js';
+import { convexHull } from '../hull/hull.js';
+import { minAreaRect } from '../calipers/calipers.js';
+import { obbToPart, splitMergedBoxes } from '../splitter/splitter.js';
+import { detectSkew, buildDeskew } from '../skew/skew.js';
+import { analyzeTable } from '../table/table.js';
+import { buildGallery, showStage } from '../gallery/gallery.js';
+import { fitView } from '../viewport/viewport.js';
 
 /* =====================================================================
    PIPELINE DRIVER

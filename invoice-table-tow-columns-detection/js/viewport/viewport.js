@@ -5,8 +5,8 @@
    independent of *which* stage is shown — it only pans/zooms the current
    offscreen canvas.
    ====================================================================== */
-import { S } from './state.js';
-import { $, viewport, viewCv } from './dom.js';
+import { S } from '../state/state.js';
+import { $, viewport, viewCv } from '../dom/dom.js';
 
 /* =====================================================================
    VIEWPORT  —  pan / zoom blitter
