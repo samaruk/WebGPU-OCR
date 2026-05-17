@@ -14,6 +14,9 @@ import { convexHull } from '../hull/hull.js';
 import { minAreaRect } from '../calipers/calipers.js';
 import { obbToPart, splitMergedBoxes } from '../splitter/splitter.js';
 import { estimateSkew, buildDeskew } from '../skew/skew.js';
+import { rectifyPerspective } from '../rectify/rectify.js';
+import { correctLensDistortion } from '../lens/lens.js';
+import { dewarpCurl } from '../dewarp/dewarp.js';
 import { analyzeTable } from '../table/table.js';
 import { buildGallery, showStage } from '../gallery/gallery.js';
 import { fitView } from '../viewport/viewport.js';
@@ -88,17 +91,41 @@ export async function runPipeline(){
   overlay.classList.add('show'); runBtn.disabled=true;
   const t={};
   try{
-    // 1 · pass A — detection on the original, un-rotated image
+    // 1 · lens distortion — undo radial (barrel/pincushion) edge bowing
+    //     first of all, so the page edges are straight before the
+    //     perspective stage fits a quad to them. Auto-gated: engages
+    //     only when the page edges actually bow.
     let t0=performance.now();
-    oStep.textContent='1 · pass A — before rotate'; await raf();
-    S.passes.A = await runPass(S.origImageData, p.dilA, p);
+    oStep.textContent='1 · lens distortion'; await raf();
+    let lens=null;
+    try{ lens=correctLensDistortion(S.origCanvas); }catch(e){ lens=null; }
+    S.lensCanvas = lens || S.origCanvas;
+    t.lens=performance.now()-t0;
+
+    // 2 · perspective rectification — warp the (now straight-edged) page
+    //     quad back to a rectangle. Conservative: a flat/square-on
+    //     capture passes straight through.
+    t0=performance.now();
+    oStep.textContent='2 · perspective rectification'; await raf();
+    let rect=null;
+    try{ rect=rectifyPerspective(S.lensCanvas); }catch(e){ rect=null; }
+    S.workCanvas = rect || S.lensCanvas;
+    S.workImageData = (S.workCanvas===S.origCanvas)
+      ? S.origImageData
+      : S.workCanvas.getContext('2d').getImageData(0,0,S.W,S.H);
+    t.rect=performance.now()-t0;
+
+    // 3 · pass A — detection on the corrected, un-rotated image
+    t0=performance.now();
+    oStep.textContent='3 · pass A — before rotate'; await raf();
+    S.passes.A = await runPass(S.workImageData, p.dilA, p);
     t.passA=performance.now()-t0;
 
-    // 2 · skew — measured directly from pass A's accepted word OBBs,
+    // 4 · skew — measured directly from pass A's accepted word OBBs,
     //     which already sit at the page's true rotation
     t0=performance.now();
-    oStep.textContent='2 · skew detection'; await raf();
-    S.angle = p.deskew ? estimateSkew(S.passes.A, S.img, p.skewMax) : 0;
+    oStep.textContent='4 · skew detection'; await raf();
+    S.angle = p.deskew ? estimateSkew(S.passes.A, S.workCanvas, p.skewMax) : 0;
     buildDeskew(S.angle);
     t.skew=performance.now()-t0;
     $('skewOut').innerHTML = p.deskew
@@ -107,15 +134,42 @@ export async function runPipeline(){
       : `<span class="k">deskew</span> <span class="v">off</span>`;
     $('sAngle').textContent = p.deskew ? fmtDeg(S.angle) : '—';
 
-    // 3 · pass B — detection on the deskewed image
+    // 5 · curl dewarp — straighten smoothly curved text-line baselines,
+    //     the non-planar page curl a homography cannot remove. Pass A's
+    //     word boxes are rotated onto the deskewed frame to find the
+    //     text rows; conservative — a flat page passes straight through.
     t0=performance.now();
-    oStep.textContent='3 · pass B — after rotate'; await raf();
-    S.passes.B = await runPass(S.deskewImageData, p.dilB, p);
+    oStep.textContent='5 · curl dewarp'; await raf();
+    {
+      const a=S.angle*Math.PI/180, ca=Math.cos(a), sa=Math.sin(a);
+      const mx=S.W/2, my=S.H/2, words=[];
+      for(const bl of S.passes.A.blobs) for(const pt of bl.parts){
+        if(!pt.accepted) continue;
+        const c=pt.corners;
+        let x0=c[0].x,x1=c[0].x,y0=c[0].y,y1=c[0].y;
+        for(let i=1;i<4;i++){ const q=c[i];
+          if(q.x<x0)x0=q.x; if(q.x>x1)x1=q.x; if(q.y<y0)y0=q.y; if(q.y>y1)y1=q.y; }
+        const dx=(x0+x1)/2-mx, dy=(y0+y1)/2-my;
+        words.push({cx:mx+dx*ca-dy*sa, cy:my+dx*sa+dy*ca, h:y1-y0});
+      }
+      let dw=null;
+      try{ dw=dewarpCurl(S.deskewCanvas, words); }catch(e){ dw=null; }
+      S.dewarpCanvas = dw || S.deskewCanvas;
+      S.dewarpImageData = dw
+        ? dw.getContext('2d').getImageData(0,0,S.W,S.H)
+        : S.deskewImageData;
+    }
+    t.dewarp=performance.now()-t0;
+
+    // 6 · pass B — detection on the corrected (deskewed + dewarped) image
+    t0=performance.now();
+    oStep.textContent='6 · pass B — after rotate'; await raf();
+    S.passes.B = await runPass(S.dewarpImageData, p.dilB, p);
     if(p.splitMerged) splitMergedBoxes(S.passes.B,p);
     if(p.detectTable) analyzeTable(S.passes.B,p);
     t.passB=performance.now()-t0;
 
-    oStep.textContent='4 · rendering stage outputs'; await raf();
+    oStep.textContent='7 · rendering stage outputs'; await raf();
     // readout reflects the after-rotate pass (the corrected result)
     const B=S.passes.B;
     let keepB=0, boxesB=0;
@@ -126,7 +180,10 @@ export async function runPipeline(){
     $('sKeep').textContent=keepB.toLocaleString();
     $('sRej').textContent=(boxesB-keepB).toLocaleString();
     $('timing').innerHTML=
+      `<span class="k">lens</span> <span class="v">${t.lens.toFixed(0)}ms</span> · `+
+      `<span class="k">rectify</span> <span class="v">${t.rect.toFixed(0)}ms</span> · `+
       `<span class="k">skew</span> <span class="v">${t.skew.toFixed(0)}ms</span> · `+
+      `<span class="k">dewarp</span> <span class="v">${t.dewarp.toFixed(0)}ms</span> · `+
       `<span class="k">pass A</span> <span class="v">${t.passA.toFixed(0)}ms</span> · `+
       `<span class="k">pass B</span> <span class="v">${t.passB.toFixed(0)}ms</span>`+
       (splitN?` · <span class="k">split</span> <span class="v">${splitN}</span>`:'');

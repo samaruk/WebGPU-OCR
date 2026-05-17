@@ -43,7 +43,10 @@ export function renderStageInto(st,ctx,W,H){
   ctx.fillStyle='#0a0e0f'; ctx.fillRect(0,0,W,H);
 
   if(st.kind==='source'){   if(S.origCanvas)   ctx.drawImage(S.origCanvas,0,0);   return; }
+  if(st.kind==='lens'){ if(S.lensCanvas) ctx.drawImage(S.lensCanvas,0,0); else if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
+  if(st.kind==='rectified'){ if(S.workCanvas) ctx.drawImage(S.workCanvas,0,0); else if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
   if(st.kind==='deskewed'){ if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
+  if(st.kind==='dewarped'){ if(S.dewarpCanvas) ctx.drawImage(S.dewarpCanvas,0,0); else if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
 
   const pass = st.pass==='A' ? S.passes.A : S.passes.B;
   if(!pass) return;

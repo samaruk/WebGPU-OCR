@@ -54,7 +54,9 @@ export function loadImage(file){
 
     runBtn.disabled=!S.device;
     S.passes={A:null,B:null}; S.stageCv=null; S.thumbs=[];
+    S.lensCanvas=null; S.workCanvas=null; S.workImageData=null;
     S.deskewCanvas=null; S.deskewImageData=null; S.angle=0;
+    S.dewarpCanvas=null; S.dewarpImageData=null;
     S.stage=STAGES.length-1;
     $('skewOut').innerHTML='detected angle — run the pipeline';
     $('sAngle').textContent='—';

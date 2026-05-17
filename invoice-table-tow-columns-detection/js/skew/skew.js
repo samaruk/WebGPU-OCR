@@ -133,15 +133,16 @@ export function buildDeskew(angleDeg){
   ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
   ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   const correction = angleDeg;                   // detectSkew returns the ctx.rotate angle that re-levels the text
+  const base = S.workCanvas || S.origCanvas;     // the post-rectification raster (already W x H)
   if(Math.abs(correction)>1e-3){
     ctx.save();
     ctx.translate(W/2,H/2);
     ctx.rotate(correction*Math.PI/180);
     ctx.translate(-W/2,-H/2);
-    ctx.drawImage(S.img,0,0,W,H);
+    ctx.drawImage(base,0,0,W,H);
     ctx.restore();
   }else{
-    ctx.drawImage(S.img,0,0,W,H);
+    ctx.drawImage(base,0,0,W,H);
   }
   S.deskewImageData=ctx.getImageData(0,0,W,H);
 }

@@ -20,11 +20,17 @@ export const PASS_KINDS=[
   ['obb',     'Min-Area Rect (OBB)','Final oriented word boxes. Non-character filter applied; boxes spanning two lines are split at the gap.']
 ];
 export const STAGES=[{id:'source',kind:'source',pass:null,group:'SOURCE',
-  name:'Source',desc:'Original image as loaded, before any correction.'}];
+  name:'Source',desc:'Original image as loaded, before any correction.'},
+  {id:'lens',kind:'lens',pass:null,group:'SOURCE',name:'Lens-corrected',
+  desc:'Radial lens distortion removed — barrel/pincushion edge bowing straightened. Identical to the source when no edge bowing is detected.'},
+  {id:'rectified',kind:'rectified',pass:null,group:'SOURCE',name:'Rectified',
+  desc:'Perspective-corrected image — the page quad warped back to a rectangle. Identical to the source when no confident page perspective is detected.'}];
 for(const [k,n,d] of PASS_KINDS) STAGES.push({id:'A_'+k,kind:k,pass:'A',group:'BEFORE ROTATE · pass A',
   name:'A · '+n,desc:'Before-rotate pass (original image). '+d});
 STAGES.push({id:'deskew',kind:'deskewed',pass:null,group:'DESKEW',
-  name:'Deskewed',desc:'Rotation-corrected image. The after-rotate pass runs on this.'});
+  name:'Deskewed',desc:'Rotation-corrected image. Curl dewarping runs on this.'});
+STAGES.push({id:'dewarp',kind:'dewarped',pass:null,group:'DESKEW',
+  name:'Dewarped',desc:'Curl-corrected image - smoothly curved text-line baselines straightened by a non-rigid warp. Identical to Deskewed when the page is flat. The after-rotate pass runs on this.'});
 for(const [k,n,d] of PASS_KINDS) STAGES.push({id:'B_'+k,kind:k,pass:'B',group:'AFTER ROTATE · pass B',
   name:'B · '+n,desc:'After-rotate pass (deskewed image). '+d});
 for(const [k,n,d] of [
