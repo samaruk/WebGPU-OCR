@@ -5,14 +5,19 @@
    rows, recovers column gutters from persistent vertical whitespace, and
    separates the line-item table from the header/footer — turning raw
    geometry into a row x column grid.
+
+   This file additionally:
+     - detects the column-header row instead of assuming the first row;
+     - falls back to word-centre clustering when gutter detection fails;
+     - folds wrapped description lines into logical rows;
+     - attaches confidence scores to every row, column and the table.
+   All of that is purely additive — the layout object keeps every field
+   its consumers (render, JSON export) already rely on.
    ====================================================================== */
-/* =====================================================================
-   TABLE LAYOUT  —  group the after-rotate word boxes into text rows,
-   find the column gutters (persistent vertical whitespace), and isolate
-   the line-item table from the invoice header and footer.  Border rules
-   are already dropped by the non-character filter, so the same gutter
-   logic serves bordered and borderless tables alike.
-   ===================================================================== */
+
+/* collapse each accepted OBB to an axis-aligned box.  Table analysis runs
+   on the *deskewed* pass, where an OBB is already near axis-aligned, so
+   the AABB carries essentially the same information at lower cost.       */
 export function wordAABBs(pass){
   const out=[];
   for(const bl of pass.blobs) for(const pt of bl.parts){
@@ -171,6 +176,47 @@ export function detectColumns(rows,medH,sens){
   if(prev<W) cols.push({x0:prev+xLo,x1:W-1+xLo});
   return cols.filter(c=>c.x1-c.x0>=medH*0.5);
 }
+/* fallback column detection — used only when the gutter method above
+   fails (too few rows, or every candidate gutter gets crossed).  It is a
+   different signal entirely: it ignores whitespace and instead clusters
+   the word centres themselves.  Words of one column share a centre band;
+   a gap wider than ~2x the text height between sorted centres marks a
+   real column break.  Robust on sparse invoices where gutters collapse. */
+export function columnsByCenters(rows,medH){
+  const cx=[];
+  for(const r of rows) for(const b of r.boxes) cx.push(b.cx);
+  if(cx.length<4) return [];
+  cx.sort((a,b)=>a-b);
+  const gapThr=medH*2;
+  const clusters=[]; let cur=[cx[0]];
+  for(let i=1;i<cx.length;i++){
+    if(cx[i]-cx[i-1]>gapThr){ clusters.push(cur); cur=[]; }
+    cur.push(cx[i]);
+  }
+  clusters.push(cur);
+  const cols=clusters.map(cl=>{
+    const lo=cl[0], hi=cl[cl.length-1], mid=(lo+hi)/2;
+    const half=Math.max((hi-lo)/2, medH*0.5);
+    return {x0:mid-half, x1:mid+half};
+  });
+  for(let i=1;i<cols.length;i++){            // clip overlaps so columns tile
+    if(cols[i].x0<cols[i-1].x1){
+      const m=(cols[i-1].x1+cols[i].x0)/2;
+      cols[i-1].x1=m; cols[i].x0=m;
+    }
+  }
+  return cols.length>=2 ? cols : [];
+}
+/* the set of column indices a row has at least one word inside */
+export function rowColumns(row,cols){
+  const set=new Set();
+  for(let c=0;c<cols.length;c++){
+    for(const b of row.boxes){
+      if(b.x1>=cols[c].x0 && b.x0<=cols[c].x1){ set.add(c); break; }
+    }
+  }
+  return set;
+}
 /* per-row table metrics — columns it fills, and gutters a word spans
    across.  A wide header banner / title spans several gutters; a clean
    table row spans none.                                                */
@@ -198,10 +244,40 @@ export function rowValue(row,cols,gutters){
   if(filled>=3) return 0.7;                  // table row with one spanning word
   return -0.45;                              // sparse row — bridged only inside the table
 }
+/* choose the column-header row instead of assuming it is the first one.
+   Geometric heuristic (there is no OCR here): the header labels every
+   column, so among the first few table rows it is the one occupying the
+   most columns; ties go to the earliest row.  Real header detection
+   would also read the text (no numbers, keyword match) — the natural
+   next step once an OCR stage exists.                                   */
+export function detectHeaderRow(occ){
+  const lim=Math.min(3,occ.length);
+  let best=0,bestFill=-1;
+  for(let i=0;i<lim;i++){
+    const f=occ[i].size;
+    if(f>bestFill){ bestFill=f; best=i; }
+  }
+  return bestFill>=2 ? best : 0;
+}
+/* fold wrapped description lines into logical rows.  A continuation line
+   carries only the description column (column 0) and sits directly under
+   a fuller row, so it is that row's first cell wrapping onto a new line.
+   Text-line rows are kept untouched; this only records which lines form
+   one logical table row, so the caller can keep both views.             */
+export function buildLogicalRows(occ){
+  const logical=[];
+  occ.forEach((set,i)=>{
+    const descOnly = set.size===1 && set.has(0);
+    const prev=logical[logical.length-1];
+    if(descOnly && prev && prev.full) prev.rows.push(i);
+    else logical.push({rows:[i], full:set.size>=2});
+  });
+  return logical;
+}
 export function analyzeTable(pass,p){
   pass.layout=null;
   const empty={medH:1,allRows:[],tRange:[-1,-1],table:null,rows:[],cols:[],
-               header:null,footer:null,colHeader:-1};
+               header:null,footer:null,colHeader:-1,logicalRows:[],tableScore:0};
   const boxes=wordAABBs(pass);
   if(boxes.length<8){ pass.layout=empty; return; }
   const hs=boxes.map(b=>b.h).sort((a,b)=>a-b);
@@ -209,7 +285,12 @@ export function analyzeTable(pass,p){
   const rows=groupRows(boxes,medH);
   if(rows.length<3){ pass.layout={...empty,medH,allRows:rows}; return; }
 
+  // columns: gutter persistence first, word-centre clustering as fallback
   let cols=detectColumns(rows,medH,p.tableSens);
+  if(cols.length<2){
+    const byC=columnsByCenters(rows,medH);
+    if(byC.length>=2) cols=byC;
+  }
   // table band = maximum-sum run (Kadane) of graded row values: clean
   // multi-column rows pull the band, a wide header/footer line pushes it
   // away hard, and a sparse row (blank / wrapped description) is bridged
@@ -229,31 +310,70 @@ export function analyzeTable(pass,p){
   };
   let [bT,bB]=bandOf();
   if(bT>=0 && bB-bT+1>=3){                           // sharpen columns from the band, retry
-    const refined=detectColumns(rows.slice(bT,bB+1),medH,p.tableSens);
+    const band=rows.slice(bT,bB+1);
+    let refined=detectColumns(band,medH,p.tableSens);
+    if(refined.length<2){
+      const c=columnsByCenters(band,medH);
+      if(c.length>=2) refined=c;
+    }
     if(refined.length>=2){ cols=refined; [bT,bB]=bandOf(); }
   }
   if(bT<0 || bB-bT+1<3){ pass.layout={...empty,medH,allRows:rows}; return; }
 
   const tableRows=rows.slice(bT,bB+1);
   const table=unionBox(tableRows);
-  // row cells tile the table top-to-bottom — no empty gaps between rows
+  const nC=cols.length;
+  // per-row column occupancy — drives scores, the header pick and merging
+  const occ=tableRows.map(r=>rowColumns(r,cols));
+  const colHits=new Array(nC).fill(0);
+  occ.forEach(set=>set.forEach(c=>colHits[c]++));
+
+  // row cells tile the table top-to-bottom — no empty gaps between rows.
+  // score = fraction of columns the row occupies (0..1).
   const rowCells=tableRows.map((r,i)=>({
     x0:table.x0,
     y0:i===0 ? table.y0 : (tableRows[i-1].y1+r.y0)/2,
     x1:table.x1,
     y1:i===tableRows.length-1 ? table.y1 : (r.y1+tableRows[i+1].y0)/2,
-    cy:r.cy, tx0:r.x0, tx1:r.x1
+    cy:r.cy, tx0:r.x0, tx1:r.x1,
+    score:+(occ[i].size/nC).toFixed(3),
+    continuation:false, logical:-1
   }));
-  // column cells tile the table left-to-right
+  // logical rows — wrapped description lines folded onto the row above.
+  // The text-line rowCells above are kept as-is; each is tagged with the
+  // logical row it belongs to and whether it is a continuation line.
+  const logical=buildLogicalRows(occ);
+  logical.forEach((lg,li)=>lg.rows.forEach((ri,k)=>{
+    rowCells[ri].logical=li;
+    rowCells[ri].continuation = k>0;
+  }));
+  const logicalRows=logical.map(lg=>{
+    const cs=lg.rows.map(ri=>rowCells[ri]);
+    return {rows:lg.rows.slice(), head:lg.rows[0], lineCount:lg.rows.length,
+            x0:Math.min(...cs.map(c=>c.x0)), y0:Math.min(...cs.map(c=>c.y0)),
+            x1:Math.max(...cs.map(c=>c.x1)), y1:Math.max(...cs.map(c=>c.y1))};
+  });
+  // column cells tile the table left-to-right.
+  // score = fraction of table rows that have a word in this column.
   const colCells=cols.map((c,i)=>({
     x0:i===0 ? table.x0 : (cols[i-1].x1+c.x0)/2,
     y0:table.y0,
     x1:i===cols.length-1 ? table.x1 : (c.x1+cols[i+1].x0)/2,
-    y1:table.y1
+    y1:table.y1,
+    score:+(colHits[i]/tableRows.length).toFixed(3)
   }));
+  const colHeader=detectHeaderRow(occ);
+  // overall table confidence — how full the rows are, how well the
+  // columns are supported, discounted for a very small table.
+  const meanRow=rowCells.reduce((s,r)=>s+r.score,0)/rowCells.length;
+  const meanCol=colCells.reduce((s,c)=>s+c.score,0)/colCells.length;
+  const sizeOk=Math.min(1,tableRows.length/4)*Math.min(1,nC/2);
+  const tableScore=+((meanRow*0.45+meanCol*0.40+0.15)*sizeOk).toFixed(3);
+
   pass.layout={
     medH, allRows:rows, tRange:[bT,bB], table,
-    rows:rowCells, cols:colCells, colHeader:0,
+    rows:rowCells, cols:colCells, colHeader,
+    logicalRows, tableScore,
     header: bT>0 ? unionBox(rows.slice(0,bT)) : null,
     footer: bB<rows.length-1 ? unionBox(rows.slice(bB+1)) : null
   };
