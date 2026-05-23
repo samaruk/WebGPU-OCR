@@ -156,6 +156,43 @@ export function renderStageInto(st,ctx,W,H){
     return;
   }
 
+  if(k==='borders'){                                // ---- detected rules ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.fillStyle='rgba(8,11,12,.45)'; ctx.fillRect(0,0,W,H);
+    const b=pass.borders;
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90));
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    if(!b){
+      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
+      ctx.fillText('borders not computed',W/2,H/2); ctx.textAlign='left';
+      return;
+    }
+    // horizontal rules in cyan, vertical rules in lime — same colours
+    // used elsewhere for row/column visualisations so the meaning carries
+    const lw=Math.max(2,sw*1.6);
+    ctx.lineWidth=lw; ctx.lineCap='round';
+    ctx.strokeStyle='rgba(110,200,255,.95)';
+    for(const h of b.hLines){
+      ctx.beginPath();
+      ctx.moveTo(h.x0,h.y+0.5); ctx.lineTo(h.x1,h.y+0.5);
+      ctx.stroke();
+    }
+    ctx.strokeStyle='rgba(166,255,63,.95)';
+    for(const v of b.vLines){
+      ctx.beginPath();
+      ctx.moveTo(v.x+0.5,v.y0); ctx.lineTo(v.x+0.5,v.y1);
+      ctx.stroke();
+    }
+    // count badge in the top-left
+    const txt='H: '+b.hLines.length+'   V: '+b.vLines.length;
+    const pad=fs*0.5, tw=ctx.measureText(txt).width;
+    ctx.fillStyle='rgba(8,11,12,.85)';
+    ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+    ctx.fillStyle='rgba(220,235,240,.97)';
+    ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
+    return;
+  }
+
   if(k==='rows'||k==='cols'||k==='table'){          // ---- table layout ----
     if(base) ctx.drawImage(base,0,0);
     ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
@@ -165,7 +202,26 @@ export function renderStageInto(st,ctx,W,H){
     ctx.textBaseline='middle'; ctx.lineJoin='round';
     const msg=t=>{ ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
       ctx.fillText(t,W/2,H/2); ctx.textAlign='left'; };
-    if(!L || !L.allRows.length){ msg('table detection produced no layout'); return; }
+    // multi-line diagnostic when detection failed
+    const msgDiag=(headline,diag)=>{
+      ctx.textAlign='center';
+      const lines=[headline];
+      if(diag){
+        lines.push('');
+        lines.push(`boxes:${diag.boxes}   rows:${diag.rows}   medH:${diag.medH}`);
+        lines.push(`rlsa cols:${diag.rlsaCols}   detect cols:${diag.detectCols}   by-centers:${diag.byCenters}`);
+        lines.push(`band tries: ${diag.band1}   ${diag.band2}   ${diag.band3}`);
+        lines.push(`source: ${diag.source}`);
+      }
+      const lh=fs*1.6, top=H/2-((lines.length-1)*lh)/2;
+      ctx.fillStyle='rgba(230,240,235,.88)';
+      lines.forEach((t,i)=>{
+        if(i===0){ ctx.fillStyle='rgba(255,205,120,.95)'; ctx.fillText(t,W/2,top+i*lh); }
+        else     { ctx.fillStyle='rgba(220,230,235,.78)'; ctx.fillText(t,W/2,top+i*lh); }
+      });
+      ctx.textAlign='left';
+    };
+    if(!L || !L.allRows.length){ msgDiag('table detection produced no layout', L&&L.diag); return; }
     const tag=(x,y,t,col)=>{
       const pad=fs*0.34, tw=ctx.measureText(t).width;
       y=Math.max(fs,y);
@@ -190,7 +246,7 @@ export function renderStageInto(st,ctx,W,H){
       return;
     }
     const tb=L.table;
-    if(!tb){ msg('no multi-column table found'); return; }
+    if(!tb){ msgDiag('no multi-column table found', L.diag); return; }
 
     if(k==='cols'){
       L.cols.forEach((c,i)=>{                       // tiled column cells

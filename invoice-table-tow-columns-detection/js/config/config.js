@@ -33,6 +33,8 @@ STAGES.push({id:'dewarp',kind:'dewarped',pass:null,group:'DESKEW',
   name:'Dewarped',desc:'Curl-corrected image - smoothly curved text-line baselines straightened by a non-rigid warp. Identical to Deskewed when the page is flat. The after-rotate pass runs on this.'});
 for(const [k,n,d] of PASS_KINDS) STAGES.push({id:'B_'+k,kind:k,pass:'B',group:'AFTER ROTATE · pass B',
   name:'B · '+n,desc:'After-rotate pass (deskewed image). '+d});
+STAGES.push({id:'borders',kind:'borders',pass:'B',group:'BORDERS',
+  name:'Detected Borders',desc:'Horizontal and vertical rules detected on the Pass B binary mask via run-length analysis. Phase 1: detection + display only. Phase 2 will use these to drive table rows / columns and to subtract line pixels from border-touching text.'});
 for(const [k,n,d] of [
   ['rows', 'Table Rows',    'After-rotate word boxes grouped into text-line rows; the dominant multi-column band is the line-item table.'],
   ['cols', 'Table Columns', 'Persistent vertical whitespace gutters between word columns split the table into columns.'],

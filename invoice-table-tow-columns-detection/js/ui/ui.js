@@ -45,8 +45,12 @@ bind('len','vLen',v=>(+v).toFixed(2));
 bind('amax','vArea',v=>(+v).toFixed(2));
 bind('splitRatio','vSplit',v=>(+v).toFixed(2)+'×');
 bind('tableSens','vTab',v=>v);
+bind('rowDilH','vRowDil',v=>v+' px');
+bind('colDilV','vColDil',v=>v+' px');
 $('detectTable').addEventListener('change',e=>{$('tableOpts').style.opacity=e.target.checked?1:.4;
   $('tableSens').disabled=!e.target.checked;});
+$('rlsa').addEventListener('change',e=>{$('rlsaOpts').style.opacity=e.target.checked?1:.4;
+  $('rowDilH').disabled=!e.target.checked; $('colDilV').disabled=!e.target.checked;});
 $('splitMerged').addEventListener('change',e=>{$('splitOpts').style.opacity=e.target.checked?1:.4;
   $('splitOpts').style.pointerEvents=e.target.checked?'auto':'none';});
 $('conn').querySelectorAll('button').forEach(b=>b.onclick=()=>{

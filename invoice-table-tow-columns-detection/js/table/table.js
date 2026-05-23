@@ -320,21 +320,104 @@ export function buildLogicalRows(occ){
   });
   return logical;
 }
+/* ----- RLSA directional-dilation row / column detection ------------------
+   An opt-in alternative to the projection-based groupRows/detectColumns:
+   the Run-Length Smoothing Algorithm. Word boxes are union-found into row
+   blobs by horizontal proximity (a gap within dilH, with vertical overlap)
+   and into column blobs by vertical proximity (a gap within dilV, with
+   horizontal overlap) — a pure directional smear. The dilation reach is
+   user-tunable: rows need a wide horizontal reach to bridge the column
+   gutters, columns a small vertical one to bridge line spacing. RLSA is
+   tolerant of gutter-crossing words but fragments on empty cells, so it is
+   an opt-in mode, not the default — the tuning knobs are the user's. */
+function ufRoots(n){
+  const par=Array.from({length:n},(_,i)=>i);
+  const find=i=>{ while(par[i]!==i){ par[i]=par[par[i]]; i=par[i]; } return i; };
+  return {find, join:(a,b)=>{ a=find(a); b=find(b); if(a!==b) par[a]=b; }};
+}
+function ufGroups(items,find){
+  const g=new Map();
+  for(let i=0;i<items.length;i++){
+    const r=find(i); if(!g.has(r)) g.set(r,[]); g.get(r).push(items[i]);
+  }
+  return [...g.values()];
+}
+export function rlsaRows(boxes,dilH){
+  const n=boxes.length; if(!n) return [];
+  const bs=boxes.slice().sort((a,b)=>a.y0-b.y0);   // sorted for an early break
+  const uf=ufRoots(n);
+  for(let i=0;i<n;i++){
+    const A=bs[i];
+    for(let j=i+1;j<n;j++){
+      const B=bs[j];
+      if(B.y0>=A.y1) break;                        // sorted by y0 → no more vertical overlap
+      if(Math.max(A.x0,B.x0)-Math.min(A.x1,B.x1) <= dilH) uf.join(i,j);
+    }
+  }
+  const out=ufGroups(bs,uf.find).map(g=>{
+    let x0=1/0,y0=1/0,x1=-1/0,y1=-1/0;
+    for(const b of g){ if(b.x0<x0)x0=b.x0; if(b.y0<y0)y0=b.y0; if(b.x1>x1)x1=b.x1; if(b.y1>y1)y1=b.y1; }
+    g.sort((a,b)=>a.x0-b.x0);
+    return {boxes:g,x0,y0,x1,y1,cy:(y0+y1)/2};
+  });
+  return out.sort((a,b)=>a.cy-b.cy);
+}
+export function rlsaColumns(rows,dilV){
+  const boxes=[];
+  for(const r of rows) for(const b of r.boxes) boxes.push(b);
+  if(!boxes.length) return [];
+  // Exclude page-width spanners (titles, "BILL TO" lines, totals rules)
+  // before union-finding. A box whose width is far above the median
+  // word width is almost certainly a header that horizontally overlaps
+  // every column — keeping it would union all columns into one group
+  // and we would return a single "column" (the "no multi-column found"
+  // failure when RLSA is on).
+  const ws=boxes.map(b=>b.x1-b.x0).sort((a,b)=>a-b);
+  const medW=ws[ws.length>>1]||10;
+  const bs=boxes.filter(b => (b.x1-b.x0) <= 4*medW)
+                .sort((a,b)=>a.x0-b.x0);
+  const n=bs.length; if(!n) return [];
+  const uf=ufRoots(n);
+  for(let i=0;i<n;i++){
+    const A=bs[i];
+    for(let j=i+1;j<n;j++){
+      const B=bs[j];
+      if(B.x0>=A.x1) break;                        // sorted by x0 → no more horizontal overlap
+      if(Math.max(A.y0,B.y0)-Math.min(A.y1,B.y1) <= dilV) uf.join(i,j);
+    }
+  }
+  const out=ufGroups(bs,uf.find).map(g=>{
+    let x0=1/0,x1=-1/0;
+    for(const b of g){ if(b.x0<x0)x0=b.x0; if(b.x1>x1)x1=b.x1; }
+    return {x0,x1};
+  });
+  return out.sort((a,b)=>a.x0-b.x0);
+}
+
 export function analyzeTable(pass,p){
   pass.layout=null;
   const empty={medH:1,allRows:[],tRange:[-1,-1],table:null,rows:[],cols:[],
                header:null,footer:null,colHeader:-1,logicalRows:[],tableScore:0};
   const boxes=wordAABBs(pass);
-  if(boxes.length<8){ pass.layout=empty; return; }
+  // diagnostics — visible on the 'Table Columns' stage if detection fails,
+  // and attached to the success layout so we can see which method won.
+  const diag={boxes:boxes.length,rows:0,medH:0,
+              rlsaCols:-1,detectCols:-1,byCenters:-1,
+              band1:'-',band2:'-',band3:'-',source:'-'};
+  if(boxes.length<8){ pass.layout={...empty,diag}; return; }
   const hs=boxes.map(b=>b.h).sort((a,b)=>a-b);
   const medH=hs[hs.length>>1]||1;
-  const rows=groupRows(boxes,medH);
-  if(rows.length<3){ pass.layout={...empty,medH,allRows:rows}; return; }
+  diag.medH=+medH.toFixed(1);
+  let rows = p.rlsa ? rlsaRows(boxes,p.rowDilH) : groupRows(boxes,medH);
+  diag.rows=rows.length;
+  if(rows.length<3){ pass.layout={...empty,medH,allRows:rows,diag}; return; }
 
-  // columns: gutter persistence first, word-centre clustering as fallback
-  let cols=detectColumns(rows,medH,p.tableSens);
+  // columns: primary detector (RLSA or projection) + word-centre fallback
+  let cols;
+  if(p.rlsa){ cols=rlsaColumns(rows,p.colDilV); diag.rlsaCols=cols.length; }
+  else      { cols=detectColumns(rows,medH,p.tableSens); diag.detectCols=cols.length; }
   if(cols.length<2){
-    const byC=columnsByCenters(rows,medH);
+    const byC=columnsByCenters(rows,medH); diag.byCenters=byC.length;
     if(byC.length>=2) cols=byC;
   }
   // table band = maximum-sum run (Kadane) of graded row values: clean
@@ -355,16 +438,54 @@ export function analyzeTable(pass,p){
     return [bT,bB];
   };
   let [bT,bB]=bandOf();
+  diag.band1=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
+  diag.source=p.rlsa?'rlsa':'projection';
+
   if(bT>=0 && bB-bT+1>=3){                           // sharpen columns from the band, retry
     const band=rows.slice(bT,bB+1);
-    let refined=detectColumns(band,medH,p.tableSens);
+    let refined = p.rlsa ? rlsaColumns(band,p.colDilV) : detectColumns(band,medH,p.tableSens);
     if(refined.length<2){
       const c=columnsByCenters(band,medH);
       if(c.length>=2) refined=c;
     }
     if(refined.length>=2){ cols=refined; [bT,bB]=bandOf(); }
   }
-  if(bT<0 || bB-bT+1<3){ pass.layout={...empty,medH,allRows:rows}; return; }
+
+  // -- fallback A (RLSA mode only): rlsa-rows are fine but rlsaColumns
+  // didn't yield a usable band — try the projection detector on the same
+  // rows. Covers the case where columns have unusual vertical spacing.
+  if(p.rlsa && (bT<0 || bB-bT+1<3)){
+    const alt = detectColumns(rows, medH, p.tableSens);
+    diag.detectCols=alt.length;
+    if(alt.length>=2){
+      cols = alt;
+      [bT,bB] = bandOf();
+      diag.band2=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
+      if(bT>=0 && bB-bT+1>=3) diag.source='rlsa→projection';
+    }
+  }
+  // -- fallback B (RLSA mode only): rlsa-rows themselves may have merged
+  // adjacent text lines (vertical-overlap union-find chained them), which
+  // collapses the per-row column profile so detectColumns also fails. Rebuild
+  // rows with groupRows (medH spacing-based) and rerun. Last-ditch attempt.
+  if(p.rlsa && (bT<0 || bB-bT+1<3)){
+    const gRows = groupRows(boxes, medH);
+    if(gRows.length >= 3){
+      rows = gRows;                                  // rebind — bandOf reads `rows` from closure
+      let altCols = detectColumns(rows, medH, p.tableSens);
+      if(altCols.length<2){
+        const c = columnsByCenters(rows, medH);
+        if(c.length>=2) altCols = c;
+      }
+      if(altCols.length>=2){
+        cols = altCols;
+        [bT,bB] = bandOf();
+        diag.band3=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
+        if(bT>=0 && bB-bT+1>=3) diag.source='rlsa→grouprows+projection';
+      }
+    }
+  }
+  if(bT<0 || bB-bT+1<3){ pass.layout={...empty,medH,allRows:rows,diag}; return; }
 
   const tableRows=rows.slice(bT,bB+1);
   const table=unionBox(tableRows);
@@ -419,7 +540,7 @@ export function analyzeTable(pass,p){
   pass.layout={
     medH, allRows:rows, tRange:[bT,bB], table,
     rows:rowCells, cols:colCells, colHeader,
-    logicalRows, tableScore,
+    logicalRows, tableScore, diag,
     header: bT>0 ? unionBox(rows.slice(0,bT)) : null,
     footer: bB<rows.length-1 ? unionBox(rows.slice(bB+1)) : null
   };

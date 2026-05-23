@@ -157,6 +157,20 @@
             <input type="range" id="tableSens" min="1" max="10" step="1" value="5">
             <div class="hint">Higher splits the table into more, narrower columns; lower needs a wider whitespace gutter. Word boxes are grouped into rows, and the dominant multi-column band becomes the table — blank or wrapped-text rows inside it are kept — while the header / footer fall outside.</div>
           </div>
+          <label class="chk" style="margin-top:9px"><input type="checkbox" id="rlsa"> RLSA directional detection</label>
+          <div id="rlsaOpts" style="margin-top:9px;opacity:.4">
+            <div class="ctl">
+              <label>Row dilation — horizontal <span class="val" id="vRowDil">120 px</span></label>
+              <input type="range" id="rowDilH" min="0" max="500" step="5" value="120" disabled>
+              <div class="hint">Smears word boxes horizontally to fuse a row across its column gutters. Raise it if a row splits across a wide gap.</div>
+            </div>
+            <div class="ctl">
+              <label>Column dilation — vertical <span class="val" id="vColDil">12 px</span></label>
+              <input type="range" id="colDilV" min="0" max="50" step="1" value="12" disabled>
+              <div class="hint">Smears word boxes vertically to fuse a column's stacked cells. Raise it if a column splits at an empty cell.</div>
+            </div>
+            <div class="hint">Run-Length Smoothing: connects boxes by directional proximity instead of whitespace profiles. Tolerant of gutter-crossing words; can fragment on empty cells — tune the reach above.</div>
+          </div>
         </div>
       </div>
 

@@ -18,6 +18,7 @@ import { rectifyPerspective } from '../rectify/rectify.js';
 import { correctLensDistortion } from '../lens/lens.js';
 import { dewarpCurl } from '../dewarp/dewarp.js';
 import { analyzeTable } from '../table/table.js';
+import { detectBorders } from '../borders/borders.js';
 import { buildGallery, showStage } from '../gallery/gallery.js';
 import { fitView } from '../viewport/viewport.js';
 
@@ -38,6 +39,7 @@ export function readParams(){
     maxLen:+$('len').value, maxArea:+$('amax').value,
     splitMerged:$('splitMerged').checked, splitRatio:+$('splitRatio').value,
     detectTable:$('detectTable').checked, tableSens:+$('tableSens').value,
+    rlsa:$('rlsa').checked, rowDilH:+$('rowDilH').value, colDilV:+$('colDilV').value,
     showRej:$('showRej').checked
   };
 }
@@ -167,6 +169,10 @@ export async function runPipeline(){
     S.passes.B = await runPass(S.dewarpImageData, p.dilB, p);
     if(p.splitMerged) splitMergedBoxes(S.passes.B,p);
     if(p.detectTable) analyzeTable(S.passes.B,p);
+    // borders — Phase 1: run-length detection of horizontal & vertical
+    // rules on the Pass B binary mask. Result lives next to the table
+    // layout; Phase 2 will consume it inside analyzeTable.
+    S.passes.B.borders = detectBorders(S.passes.B.binary, S.W, S.H);
     t.passB=performance.now()-t0;
 
     oStep.textContent='7 · rendering stage outputs'; await raf();
