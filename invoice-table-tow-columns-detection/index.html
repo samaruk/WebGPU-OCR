@@ -82,21 +82,7 @@
       </div>
 
       <div class="grp">
-        <h3><span class="ix">04</span> Morphology · after rotate</h3>
-        <div class="ctl">
-          <label>Dilation H <span class="val" id="vDilHb">1 px</span></label>
-          <input type="range" id="dilHb" min="0" max="40" step="1" value="1">
-          <div class="hint">Pass B — runs on the deskewed image. Keep low for tight OBBs.</div>
-        </div>
-        <div class="ctl">
-          <label>Dilation V <span class="val" id="vDilVb">1 px</span></label>
-          <input type="range" id="dilVb" min="0" max="40" step="1" value="1">
-          <div class="hint">0 on both axes = OBBs hug the raw Sauvola blobs.</div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">05</span> Components</h3>
+        <h3><span class="ix">04</span> Components</h3>
         <div class="ctl">
           <label style="margin-bottom:5px">Connectivity</label>
           <div class="seg" id="conn">
@@ -149,6 +135,18 @@
       </div>
 
       <div class="grp">
+        <h3><span class="ix">07b</span> Height-density filter</h3>
+        <label class="chk"><input type="checkbox" id="densityFilter"> Reject blobs outside the modal height band</label>
+        <div id="densityOpts" style="margin-top:9px;opacity:.4">
+          <div class="ctl">
+            <label>Density threshold <span class="val" id="vDens">0.50</span></label>
+            <input type="range" id="densityThresh" min="0.10" max="0.90" step="0.05" value="0.50">
+            <div class="hint">All accepted blob heights are bucketed; the peak bucket defines the dominant text-line height. The band is grown outward while density stays above peak × this fraction. Blobs shorter than the band are rejected as noise; blobs taller are split at internal valleys and rejected when no in-range split is possible. Lower threshold → wider band (more permissive); higher → narrower band (more aggressive cleanup).</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
         <h3><span class="ix">08</span> Table layout</h3>
         <label class="chk"><input type="checkbox" id="detectTable" checked> Detect table rows &amp; columns</label>
         <div id="tableOpts" style="margin-top:9px">
@@ -157,19 +155,115 @@
             <input type="range" id="tableSens" min="1" max="10" step="1" value="5">
             <div class="hint">Higher splits the table into more, narrower columns; lower needs a wider whitespace gutter. Word boxes are grouped into rows, and the dominant multi-column band becomes the table — blank or wrapped-text rows inside it are kept — while the header / footer fall outside.</div>
           </div>
-          <label class="chk" style="margin-top:9px"><input type="checkbox" id="rlsa"> RLSA directional detection</label>
-          <div id="rlsaOpts" style="margin-top:9px;opacity:.4">
+          <div class="ctl" style="margin-top:9px">
+            <label>k for border binary <span class="val" id="vKB">0.18</span></label>
+            <input type="range" id="kBorder" min="0.01" max="0.80" step="0.01" value="0.18">
+            <div class="hint">Sauvola threshold weight used for the SEPARATE border-detection binary. Lower than k means more pixels are classified as ink, which helps thin / faint rules survive — they are often dropped at the higher k value tuned for word blobs. The word-detection binary stage (06) keeps using k. Set equal to k to skip the second Sauvola pass.</div>
+          </div>
+
+          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
+            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Border detection · solid rules</summary>
+            <div class="hint" style="margin:6px 0">Rules are extracted by bridging gaps in each row/column, then morphological opening keeps only locally-near-horizontal (or near-vertical) structures, then per-component centerline tracing gives a polyline.</div>
+
             <div class="ctl">
-              <label>Row dilation — horizontal <span class="val" id="vRowDil">120 px</span></label>
-              <input type="range" id="rowDilH" min="0" max="500" step="5" value="120" disabled>
-              <div class="hint">Smears word boxes horizontally to fuse a row across its column gutters. Raise it if a row splits across a wide gap.</div>
+              <label>Min length <span class="val" id="vBMinLenF">0.18</span> × side</label>
+              <input type="range" id="bMinLenF" min="0.05" max="0.60" step="0.01" value="0.18">
+              <div class="hint">A rule must span ≥ this fraction of image width (h-rules) or height (v-rules). Smaller catches shorter rules; larger filters out short text-like horizontals.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Gap-bridge — horizontal <span class="val" id="vBMaxGapH">12 px</span></label>
+              <input type="range" id="bMaxGapH" min="0" max="40" step="1" value="12">
             </div>
             <div class="ctl">
-              <label>Column dilation — vertical <span class="val" id="vColDil">12 px</span></label>
-              <input type="range" id="colDilV" min="0" max="50" step="1" value="12" disabled>
-              <div class="hint">Smears word boxes vertically to fuse a column's stacked cells. Raise it if a column splits at an empty cell.</div>
+              <label>Gap-bridge — vertical <span class="val" id="vBMaxGapV">12 px</span></label>
+              <input type="range" id="bMaxGapV" min="0" max="40" step="1" value="12">
+              <div class="hint">Per-row / per-column gap filling. Gaps up to this many pixels between consecutive ink runs in the same row/column are bridged. Set ≥ the widest text glyph that typically crosses a rule (usually 8-15 px). Doesn't extend past the rule's natural endpoints.</div>
             </div>
-            <div class="hint">Run-Length Smoothing: connects boxes by directional proximity instead of whitespace profiles. Tolerant of gutter-crossing words; can fragment on empty cells — tune the reach above.</div>
+
+            <div class="ctl">
+              <label>Opening kernel — horizontal <span class="val" id="vBOpenH">8 px</span></label>
+              <input type="range" id="bOpenH" min="2" max="20" step="1" value="8">
+            </div>
+            <div class="ctl">
+              <label>Opening kernel — vertical <span class="val" id="vBOpenV">8 px</span></label>
+              <input type="range" id="bOpenV" min="2" max="20" step="1" value="8">
+              <div class="hint">Erosion+dilation radius. Larger = more aggressive text rejection but less curvature tolerance. Max tolerable slope at any local point ≈ lineThickness / K. Lower this if real borders have sharper curves; raise it if text strokes are leaking through as false rules.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Max thickness <span class="val" id="vBMaxThick">8 px</span></label>
+              <input type="range" id="bMaxThick" min="1" max="30" step="1" value="8">
+              <div class="hint">Discards rules whose mean per-column / per-row ink height exceeds this. Genuine rules are 1-3 px thick; long horizontal text "lines" register as 6-15. Raise for thick decorative rules.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Min coverage <span class="val" id="vBMinCov">0.70</span></label>
+              <input type="range" id="bMinCov" min="0.30" max="1.00" step="0.05" value="0.70">
+              <div class="hint">Fraction of the rule's polyline points whose location coincides with ink in the original binary. Real rules score ~1.0; a row of disjointed shards or sparse dots that the gap-bridging artificially joined scores lower. Raise to 0.85+ to reject everything but the cleanest rules.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Polyline smoothing radius <span class="val" id="vBSmoothR">15</span></label>
+              <input type="range" id="bSmoothR" min="0" max="50" step="1" value="15">
+              <div class="hint">Sliding-window radius for smoothing the polyline along its axis. Removes the residual pixel-level jitter that's left after body-column detection has already excluded text-overlap regions. 0 disables.</div>
+            </div>
+          </details>
+
+          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
+            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Border detection · dashed / dotted rules</summary>
+            <div class="hint" style="margin:6px 0">Small connected components (dots) clustered into chains with uniform size and stride. Chains failing periodicity, size-consistency, or stride-to-size gates are rejected. Drawn in the gallery as a thin transparent line with explicit dot markers.</div>
+
+            <label class="chk"><input type="checkbox" id="bDetectDashed" checked> Detect dashed/dotted rules</label>
+
+            <div class="ctl" style="margin-top:9px">
+              <label>Max dot size <span class="val" id="vBDotMaxSize">6 px</span></label>
+              <input type="range" id="bDotMaxSize" min="1" max="12" step="1" value="6">
+              <div class="hint">A CCA component qualifies as a dot only if its bbox fits inside this in BOTH dimensions. Most text is 8-20 px; lowering this to 3-4 keeps only true dots, while 6 also catches short dashes.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Min dots in chain <span class="val" id="vBDotMinDots">4</span></label>
+              <input type="range" id="bDotMinDots" min="3" max="15" step="1" value="4">
+              <div class="hint">Minimum number of components in a chain. Higher → fewer false positives from coincidentally-aligned isolated marks.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Min stride / dot-size ratio <span class="val" id="vBDotStrideR">2.0</span></label>
+              <input type="range" id="bDotStrideR" min="1.0" max="5.0" step="0.1" value="2.0">
+              <div class="hint">The key discriminator between a dashed rule and a tightly-packed row of small text characters. A real dashed rule has stride ≫ dot size; text has stride ~ character width. Raise to 2.5+ if text-row false positives appear.</div>
+            </div>
+
+            <div class="ctl">
+              <label>Min length <span class="val" id="vBDashMinLenF">0.30</span> × side</label>
+              <input type="range" id="bDashMinLenF" min="0.10" max="0.80" step="0.05" value="0.30">
+              <div class="hint">Total span (last dot − first dot) must reach this fraction of the image side. Stricter than the solid-rule cutoff because dashed patterns at short lengths are usually coincidental, not real borders.</div>
+            </div>
+          </details>
+
+          <div style="margin-top:9px">
+            <div class="hint" style="margin-bottom:6px"><strong>Pass B · row dilation</strong> — H large fuses words into a full text-line; V small heals descenders/ascenders without bridging stacked lines.</div>
+            <div class="ctl">
+              <label>Pass B · Dilation H <span class="val" id="vRowDilH">120 px</span></label>
+              <input type="range" id="rowDilH" min="0" max="500" step="5" value="120">
+            </div>
+            <div class="ctl">
+              <label>Pass B · Dilation V <span class="val" id="vRowDilV">2 px</span></label>
+              <input type="range" id="rowDilV" min="0" max="20" step="1" value="2">
+            </div>
+
+            <div class="hint" style="margin-top:9px;margin-bottom:6px"><strong>Pass C · column dilation</strong> — V large fuses a column's stacked rows into one stripe; H small glues a row's word-fragments together without bridging side-by-side columns.</div>
+            <div class="ctl">
+              <label>Pass C · Dilation H <span class="val" id="vColDilH">2 px</span></label>
+              <input type="range" id="colDilH" min="0" max="20" step="1" value="2">
+            </div>
+            <div class="ctl">
+              <label>Pass C · Dilation V <span class="val" id="vColDilV">12 px</span></label>
+              <input type="range" id="colDilV" min="0" max="80" step="1" value="12">
+            </div>
+
+            <label class="chk" style="margin-top:9px;opacity:.5"><input type="checkbox" id="rlsa" checked disabled> Pass-based row/column detection (always on)</label>
+            <div class="hint" style="opacity:.6">Rows come from Pass B blobs and columns come from Pass C blobs. The legacy AABB-level union-find (RLSA on word boxes) and whitespace-projection paths have been replaced by pixel-level CCA on the directionally-dilated binaries.</div>
           </div>
         </div>
       </div>

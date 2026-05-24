@@ -14,6 +14,7 @@
    All of that is purely additive — the layout object keeps every field
    its consumers (render, JSON export) already rely on.
    ====================================================================== */
+import { S } from '../state/state.js';
 
 /* collapse each accepted OBB to an axis-aligned box.  Table analysis runs
    on the *deskewed* pass, where an OBB is already near axis-aligned, so
@@ -30,6 +31,218 @@ export function wordAABBs(pass){
     out.push({x0,y0,x1,y1,cx:(x0+x1)/2,cy:(y0+y1)/2,w:x1-x0,h:y1-y0});
   }
   return out;
+}
+
+/* Rows from Pass B blobs.  Pass B uses horizontal-only dilation
+   (rowDilH on x, 0 on y), so each accepted blob is one full text-line.
+   Returns row objects shaped the way the table-layout helpers expect:
+   x0/y0/x1/y1/cy and a single-box .boxes array carrying the AABB
+   itself.  Sorted top-to-bottom. */
+/* ----------------------------------------------------------------------
+   Convert Pass B blobs into row objects.
+
+   Pass B applies HORIZONTAL-only dilation (rowDilH on x, 0 on y), so
+   every accepted blob is one entire text-line — characters and words
+   within a line are fused into a single connected component, while
+   stacked lines remain separate.  Each blob is therefore one row.
+
+   The returned row objects match the shape expected by the rest of the
+   table machinery: {x0, y0, x1, y1, cy, boxes:[…]}.  The single-element
+   `boxes` array carries the row's own AABB so consumers that still walk
+   `row.boxes` (rowColumns, rowMetrics, etc.) continue to work.
+
+   Rows are sorted top-to-bottom by their vertical centre.
+   ---------------------------------------------------------------------- */
+export function rowsFromPassB(passB){
+  if(!passB || !passB.blobs) return [];
+
+  // --- gather candidate rows from every Pass B blob -----------------
+  // We deliberately do NOT filter by blob.accepted here.  Pass B is
+  // run with rmNon:false in the pipeline so every blob is "accepted",
+  // but even if rmNon were on, a real text-line has aspect ≈ 20–50 and
+  // would be rejected as "non-character" — the exact opposite of what
+  // we want.  Shape-based filtering happens below instead.
+  const candidateRows = [];
+  for(const blob of passB.blobs){
+    const obbCorners = blob.obb && blob.obb.corners;
+    let minX, minY, maxX, maxY;
+    if(obbCorners){
+      minX = maxX = obbCorners[0].x;
+      minY = maxY = obbCorners[0].y;
+      for(let i = 1; i < 4; i++){
+        if(obbCorners[i].x < minX) minX = obbCorners[i].x;
+        if(obbCorners[i].x > maxX) maxX = obbCorners[i].x;
+        if(obbCorners[i].y < minY) minY = obbCorners[i].y;
+        if(obbCorners[i].y > maxY) maxY = obbCorners[i].y;
+      }
+    } else {
+      minX = blob.bb.x0; maxX = blob.bb.x1;
+      minY = blob.bb.y0; maxY = blob.bb.y1;
+    }
+    const blobWidth  = maxX - minX;
+    const blobHeight = maxY - minY;
+
+    /* ---- shape filter: ROW must be wider than it is tall, and at
+       least 4 px tall (rejects 1-pixel dilation-strip noise). */
+    if(blobHeight < 4)               continue;
+    if(blobWidth  < blobHeight * 2)  continue;
+
+    candidateRows.push({
+      x0: minX, y0: minY, x1: maxX, y1: maxY,
+      cy: (minY + maxY) / 2,
+      width: blobWidth, height: blobHeight,
+      boxes: [{
+        x0: minX, y0: minY, x1: maxX, y1: maxY,
+        cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+        w: blobWidth, h: blobHeight
+      }]
+    });
+  }
+  if(candidateRows.length < 2) return candidateRows;
+
+  // --- median-size filter -------------------------------------------
+  // Keep rows whose width is at least 30% of the median width.  This
+  // wipes out noise stragglers (lonely speckle that managed to clear
+  // the shape filter) while keeping legitimately short rows like a
+  // single column header or a one-word footer line.
+  const widthList   = candidateRows.map(r => r.width).sort((a, b) => a - b);
+  const medianWidth = widthList[widthList.length >> 1] || 10;
+  const minRowWidth = Math.max(20, medianWidth * 0.3);
+
+  return candidateRows
+    .filter(r => r.width >= minRowWidth)
+    .sort((a, b) => a.cy - b.cy);
+}
+
+
+/* ----------------------------------------------------------------------
+   Convert Pass C blobs into column boundaries.
+
+   Pass C applies VERTICAL-only dilation (0 on x, colDilV on y), so each
+   accepted blob is one column-stripe — every text-line vertically
+   stacked in the same column is fused into one component, while side-
+   by-side columns stay separate.  Each blob's x-extent is therefore one
+   column boundary.
+
+   Page-wide spanners (a title, a "Total" rule, a horizontal line drawn
+   under the whole table) end up as a single very wide stripe that
+   horizontally overlaps every real column.  If we kept them as columns,
+   the table layout would collapse to one giant cell, so we filter them
+   out: a stripe wider than 4× the median stripe width is treated as a
+   banner and excluded.
+
+   Columns are sorted left-to-right.
+   ---------------------------------------------------------------------- */
+export function columnsFromPassC(passC){
+  if(!passC || !passC.blobs) return [];
+
+  // --- gather candidate column-stripes -----------------------------
+  // As with rowsFromPassB we ignore blob.accepted (Pass C is run with
+  // rmNon:false) and apply column-shape filtering directly.
+  const candidateStripes = [];
+  for(const blob of passC.blobs){
+    const obbCorners = blob.obb && blob.obb.corners;
+    let minX, maxX, minY, maxY;
+    if(obbCorners){
+      minX = maxX = obbCorners[0].x;
+      minY = maxY = obbCorners[0].y;
+      for(let i = 1; i < 4; i++){
+        if(obbCorners[i].x < minX) minX = obbCorners[i].x;
+        if(obbCorners[i].x > maxX) maxX = obbCorners[i].x;
+        if(obbCorners[i].y < minY) minY = obbCorners[i].y;
+        if(obbCorners[i].y > maxY) maxY = obbCorners[i].y;
+      }
+    } else {
+      minX = blob.bb.x0; maxX = blob.bb.x1;
+      minY = blob.bb.y0; maxY = blob.bb.y1;
+    }
+    const stripeWidth  = maxX - minX;
+    const stripeHeight = maxY - minY;
+
+    /* ---- shape filter: COLUMN must be taller than it is wide, and
+       at least 4 px wide (rejects 1-pixel dilation-strip noise). */
+    if(stripeWidth  < 4)                 continue;
+    if(stripeHeight < stripeWidth * 2)   continue;
+
+    candidateStripes.push({
+      x0: minX, x1: maxX,
+      y0: minY, y1: maxY,
+      width: stripeWidth, height: stripeHeight
+    });
+  }
+  if(candidateStripes.length < 2) return [];
+
+  // --- banner filter ------------------------------------------------
+  // A title / total-rule that spans the page horizontally still ends up
+  // as a single very-wide stripe.  If we kept it, every real column
+  // would x-overlap with it and the layout would collapse to one cell.
+  const sortedWidths      = candidateStripes.map(s => s.width).sort((a, b) => a - b);
+  const medianStripeWidth = sortedWidths[sortedWidths.length >> 1] || 10;
+  const bannerWidthLimit  = 4 * medianStripeWidth;
+
+  // --- median-size filter ------------------------------------------
+  // Drop very short stripes (height < 30% of median).  A real column
+  // spans multiple rows; a tiny stripe is noise or a stray glyph.
+  const sortedHeights      = candidateStripes.map(s => s.height).sort((a, b) => a - b);
+  const medianStripeHeight = sortedHeights[sortedHeights.length >> 1] || 10;
+  const minStripeHeight    = Math.max(20, medianStripeHeight * 0.3);
+
+  return candidateStripes
+    .filter(s => s.width  <= bannerWidthLimit)
+    .filter(s => s.height >= minStripeHeight)
+    .sort((a, b) => a.x0 - b.x0)
+    .map(s => ({ x0: s.x0, x1: s.x1 }));
+}
+
+
+/* ----------------------------------------------------------------------
+   Per-row column occupancy, derived from the raw Sauvola binary.
+
+   With Pass B's blobs being line-level, the row's AABB covers the full
+   width of the row — the legacy `rowColumns(row, cols)` would report
+   every column as "filled" because the row's single big box overlaps
+   every column horizontally.  That isn't useful information for table
+   detection.
+
+   Instead, look inside the (row.y-range × col.x-range) rectangle of the
+   un-dilated binary.  If enough ink pixels are present, that cell of
+   the row × column grid really has text in it.
+
+   "Enough" is set generously low to catch a single thin column number
+   while still ignoring stray Sauvola speckle: at least 4 ink pixels OR
+   at least 0.5% of the cell area, whichever is larger.
+
+   Returns a Set of column indices the row has ink in.
+   ---------------------------------------------------------------------- */
+export function rowColumnsByInk(binary, imageWidth, row, cols){
+  const occupiedColumnIndices = new Set();
+  const topY                  = Math.max(0, Math.floor(row.y0));
+  const bottomY               = Math.floor(row.y1);
+
+  for(let colIdx = 0; colIdx < cols.length; colIdx++){
+    const leftX  = Math.max(0, Math.floor(cols[colIdx].x0));
+    const rightX = Math.floor(cols[colIdx].x1);
+    if(rightX <= leftX || bottomY <= topY) continue;
+
+    const cellArea     = (rightX - leftX + 1) * (bottomY - topY + 1);
+    const inkThreshold = Math.max(4, Math.round(cellArea * 0.005));
+
+    // Early-exit scan: stop the moment we've seen enough ink.
+    let inkCount = 0;
+    outer: for(let y = topY; y <= bottomY; y++){
+      const rowOffset = y * imageWidth;
+      for(let x = leftX; x <= rightX; x++){
+        if(binary[rowOffset + x]){
+          inkCount++;
+          if(inkCount >= inkThreshold){
+            occupiedColumnIndices.add(colIdx);
+            break outer;
+          }
+        }
+      }
+    }
+  }
+  return occupiedColumnIndices;
 }
 export function unionBox(rows){
   let x0=1/0,y0=1/0,x1=-1/0,y1=-1/0;
@@ -394,109 +607,24 @@ export function rlsaColumns(rows,dilV){
   return out.sort((a,b)=>a.x0-b.x0);
 }
 
-export function analyzeTable(pass,p){
-  pass.layout=null;
-  const empty={medH:1,allRows:[],tRange:[-1,-1],table:null,rows:[],cols:[],
-               header:null,footer:null,colHeader:-1,logicalRows:[],tableScore:0};
-  const boxes=wordAABBs(pass);
-  // diagnostics — visible on the 'Table Columns' stage if detection fails,
-  // and attached to the success layout so we can see which method won.
-  const diag={boxes:boxes.length,rows:0,medH:0,
-              rlsaCols:-1,detectCols:-1,byCenters:-1,
-              band1:'-',band2:'-',band3:'-',source:'-'};
-  if(boxes.length<8){ pass.layout={...empty,diag}; return; }
-  const hs=boxes.map(b=>b.h).sort((a,b)=>a-b);
-  const medH=hs[hs.length>>1]||1;
-  diag.medH=+medH.toFixed(1);
-  let rows = p.rlsa ? rlsaRows(boxes,p.rowDilH) : groupRows(boxes,medH);
-  diag.rows=rows.length;
-  if(rows.length<3){ pass.layout={...empty,medH,allRows:rows,diag}; return; }
-
-  // columns: primary detector (RLSA or projection) + word-centre fallback
-  let cols;
-  if(p.rlsa){ cols=rlsaColumns(rows,p.colDilV); diag.rlsaCols=cols.length; }
-  else      { cols=detectColumns(rows,medH,p.tableSens); diag.detectCols=cols.length; }
-  if(cols.length<2){
-    const byC=columnsByCenters(rows,medH); diag.byCenters=byC.length;
-    if(byC.length>=2) cols=byC;
-  }
-  // table band = maximum-sum run (Kadane) of graded row values: clean
-  // multi-column rows pull the band, a wide header/footer line pushes it
-  // away hard, and a sparse row (blank / wrapped description) is bridged
-  // only while it is surrounded by genuine table rows.
-  const bandOf=()=>{
-    const gut=[];
-    for(let i=0;i<cols.length-1;i++) gut.push({x0:cols[i].x1,x1:cols[i+1].x0});
-    let bSum=-1e9,bT=-1,bB=-1,cSum=0,cS=0; const val=[];
-    for(let i=0;i<rows.length;i++){
-      const v=rowValue(rows[i],cols,gut); val.push(v);
-      if(cSum<=0){ cSum=v; cS=i; } else cSum+=v;
-      if(cSum>bSum){ bSum=cSum; bT=cS; bB=i; }
-    }
-    while(bT>=0 && bT<=bB && val[bT]<=0) bT++;       // begin/end on a real table row
-    while(bB>=bT && val[bB]<=0) bB--;
-    return [bT,bB];
-  };
-  let [bT,bB]=bandOf();
-  diag.band1=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
-  diag.source=p.rlsa?'rlsa':'projection';
-
-  if(bT>=0 && bB-bT+1>=3){                           // sharpen columns from the band, retry
-    const band=rows.slice(bT,bB+1);
-    let refined = p.rlsa ? rlsaColumns(band,p.colDilV) : detectColumns(band,medH,p.tableSens);
-    if(refined.length<2){
-      const c=columnsByCenters(band,medH);
-      if(c.length>=2) refined=c;
-    }
-    if(refined.length>=2){ cols=refined; [bT,bB]=bandOf(); }
-  }
-
-  // -- fallback A (RLSA mode only): rlsa-rows are fine but rlsaColumns
-  // didn't yield a usable band — try the projection detector on the same
-  // rows. Covers the case where columns have unusual vertical spacing.
-  if(p.rlsa && (bT<0 || bB-bT+1<3)){
-    const alt = detectColumns(rows, medH, p.tableSens);
-    diag.detectCols=alt.length;
-    if(alt.length>=2){
-      cols = alt;
-      [bT,bB] = bandOf();
-      diag.band2=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
-      if(bT>=0 && bB-bT+1>=3) diag.source='rlsa→projection';
-    }
-  }
-  // -- fallback B (RLSA mode only): rlsa-rows themselves may have merged
-  // adjacent text lines (vertical-overlap union-find chained them), which
-  // collapses the per-row column profile so detectColumns also fails. Rebuild
-  // rows with groupRows (medH spacing-based) and rerun. Last-ditch attempt.
-  if(p.rlsa && (bT<0 || bB-bT+1<3)){
-    const gRows = groupRows(boxes, medH);
-    if(gRows.length >= 3){
-      rows = gRows;                                  // rebind — bandOf reads `rows` from closure
-      let altCols = detectColumns(rows, medH, p.tableSens);
-      if(altCols.length<2){
-        const c = columnsByCenters(rows, medH);
-        if(c.length>=2) altCols = c;
-      }
-      if(altCols.length>=2){
-        cols = altCols;
-        [bT,bB] = bandOf();
-        diag.band3=bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
-        if(bT>=0 && bB-bT+1>=3) diag.source='rlsa→grouprows+projection';
-      }
-    }
-  }
-  if(bT<0 || bB-bT+1<3){ pass.layout={...empty,medH,allRows:rows,diag}; return; }
-
+/* Assemble the final layout object from row-grouping + column boundaries
+   + band indices.  Called by analyzeTable (pass-based), the heuristic
+   path and analyzeTableFromBorders so they produce structurally
+   identical outputs — rows/cols/header/footer/colCells/logicalRows/
+   tableScore.  occFull (optional) is a precomputed row→column occupancy
+   array indexed over the full rows[] — when present it is sliced to the
+   table band; when absent it is computed from row.boxes via
+   rowColumns (legacy AABB-based mode). */
+function buildLayout(rows, cols, bT, bB, medH, diag, occFull){
   const tableRows=rows.slice(bT,bB+1);
   const table=unionBox(tableRows);
   const nC=cols.length;
-  // per-row column occupancy — drives scores, the header pick and merging
-  const occ=tableRows.map(r=>rowColumns(r,cols));
+  const occ = occFull
+    ? occFull.slice(bT,bB+1)
+    : tableRows.map(r=>rowColumns(r,cols));
   const colHits=new Array(nC).fill(0);
   occ.forEach(set=>set.forEach(c=>colHits[c]++));
 
-  // row cells tile the table top-to-bottom — no empty gaps between rows.
-  // score = fraction of columns the row occupies (0..1).
   const rowCells=tableRows.map((r,i)=>({
     x0:table.x0,
     y0:i===0 ? table.y0 : (tableRows[i-1].y1+r.y0)/2,
@@ -506,9 +634,6 @@ export function analyzeTable(pass,p){
     score:+(occ[i].size/nC).toFixed(3),
     continuation:false, logical:-1
   }));
-  // logical rows — wrapped description lines folded onto the row above.
-  // The text-line rowCells above are kept as-is; each is tagged with the
-  // logical row it belongs to and whether it is a continuation line.
   const logical=buildLogicalRows(occ);
   logical.forEach((lg,li)=>lg.rows.forEach((ri,k)=>{
     rowCells[ri].logical=li;
@@ -520,8 +645,6 @@ export function analyzeTable(pass,p){
             x0:Math.min(...cs.map(c=>c.x0)), y0:Math.min(...cs.map(c=>c.y0)),
             x1:Math.max(...cs.map(c=>c.x1)), y1:Math.max(...cs.map(c=>c.y1))};
   });
-  // column cells tile the table left-to-right.
-  // score = fraction of table rows that have a word in this column.
   const colCells=cols.map((c,i)=>({
     x0:i===0 ? table.x0 : (cols[i-1].x1+c.x0)/2,
     y0:table.y0,
@@ -530,18 +653,228 @@ export function analyzeTable(pass,p){
     score:+(colHits[i]/tableRows.length).toFixed(3)
   }));
   const colHeader=detectHeaderRow(occ);
-  // overall table confidence — how full the rows are, how well the
-  // columns are supported, discounted for a very small table.
   const meanRow=rowCells.reduce((s,r)=>s+r.score,0)/rowCells.length;
   const meanCol=colCells.reduce((s,c)=>s+c.score,0)/colCells.length;
   const sizeOk=Math.min(1,tableRows.length/4)*Math.min(1,nC/2);
   const tableScore=+((meanRow*0.45+meanCol*0.40+0.15)*sizeOk).toFixed(3);
 
-  pass.layout={
+  return {
     medH, allRows:rows, tRange:[bT,bB], table,
     rows:rowCells, cols:colCells, colHeader,
     logicalRows, tableScore, diag,
     header: bT>0 ? unionBox(rows.slice(0,bT)) : null,
     footer: bB<rows.length-1 ? unionBox(rows.slice(bB+1)) : null
   };
+}
+
+/* ----------------------------------------------------------------------
+   PASS-BASED TABLE DETECTION
+   ----------------------------------------------------------------------
+   The whole point of having two directionally-dilated passes is that
+   the heavy lifting is already done by the time we get here:
+
+     - Pass B (horizontal-only dilation): each blob is one text-line.
+       → Rows are simply the Pass B blobs.
+
+     - Pass C (vertical-only dilation): each blob is one column-stripe.
+       → Columns are simply the Pass C blobs.
+
+   So this function does NOT do AABB-level union-find or whitespace-
+   projection — the GPU dilation + CCA already did the equivalent.  All
+   that's left is:
+
+     1. Convert blobs to row/col objects.
+     2. Decide, per row, which columns actually have ink in them
+        (using the un-dilated Sauvola binary inside the intersection
+        of row.y-range × col.x-range — see rowColumnsByInk).
+     3. Score each row by how many columns it occupies.
+     4. Find the run of consecutive rows with the highest cumulative
+        score — that's the table band (header rows and footer rows
+        score badly enough to fall outside the run).
+     5. Hand off to buildLayout, which assembles the final layout
+        object.
+
+   The legacy cascade of fallback detectors (rlsa → projection →
+   groupRows + projection) is gone — pass-level CCA is enough.
+   ---------------------------------------------------------------------- */
+export function analyzeTable(passB, p, passC){
+  passB.layout = null;
+
+  // Empty-layout template returned on any early failure so downstream
+  // consumers (renderer, JSON export) always see the same shape.
+  const emptyLayout = {
+    medH         : 1,
+    allRows      : [],
+    tRange       : [-1, -1],
+    table        : null,
+    rows         : [],
+    cols         : [],
+    header       : null,
+    footer       : null,
+    colHeader    : -1,
+    logicalRows  : [],
+    tableScore   : 0
+  };
+
+  const diagnostics = {
+    source       : 'pass-blobs',
+    rowsFromB    : -1,
+    colsFromC    : -1,
+    medH         : 0,
+    band1        : '-',
+    note         : ''
+  };
+
+  // Need Pass C — without it there's no column source.
+  if(!passC){
+    diagnostics.note = 'no pass C';
+    passB.layout = { ...emptyLayout, diag: diagnostics };
+    return;
+  }
+
+  // ---- Step 1: rows from Pass B, columns from Pass C ----
+  const rowList = rowsFromPassB(passB);
+  diagnostics.rowsFromB = rowList.length;
+  if(rowList.length < 3){
+    passB.layout = { ...emptyLayout, allRows: rowList, diag: diagnostics };
+    return;
+  }
+
+  const columnList = columnsFromPassC(passC);
+  diagnostics.colsFromC = columnList.length;
+  if(columnList.length < 2){
+    passB.layout = { ...emptyLayout, allRows: rowList, diag: diagnostics };
+    return;
+  }
+
+  const rowHeights      = rowList.map(r => r.y1 - r.y0).sort((a, b) => a - b);
+  const medianRowHeight = rowHeights[rowHeights.length >> 1] || 1;
+  diagnostics.medH      = +medianRowHeight.toFixed(1);
+
+  // ---- Step 2: ink-based row × column occupancy ----
+  // For each row × column pair, count ink in the un-dilated Sauvola
+  // binary inside the intersection rectangle.  Result: a Set of column
+  // indices for each row indicating which columns the row has text in.
+  const occupancyPerRow = rowList.map(row =>
+    rowColumnsByInk(passB.binary, S.W, row, columnList)
+  );
+
+  // ---- Step 3: score each row by column-fill count ----
+  //   ≥ 2 columns filled → +1.0  (clean multi-column table row)
+  //     1 column  filled → -0.3  (wrapped description / single-cell row)
+  //     0 columns filled → -0.8  (blank row — likely between tables)
+  // Header / footer / title rows typically have 0–1 columns filled and
+  // therefore score negatively, which drops them out of the band.
+  const rowValues = occupancyPerRow.map(occSet =>
+    occSet.size >= 2 ?  1.0 :
+    occSet.size === 1 ? -0.3 :
+                        -0.8
+  );
+
+  // ---- Step 4: find the highest-scoring contiguous run (Kadane) ----
+  // The table band = the run of consecutive rows whose cumulative score
+  // is maximised.  After Kadane we trim leading/trailing rows whose
+  // own value is ≤ 0 so the band starts and ends on real table rows.
+  let bestSum         = -Infinity;
+  let bandTopIdx      = -1;
+  let bandBottomIdx   = -1;
+  let currentSum      = 0;
+  let currentRunStart = 0;
+
+  for(let i = 0; i < rowList.length; i++){
+    // Restart the run whenever cumulative falls to or below zero —
+    // standard Kadane's algorithm.
+    if(currentSum <= 0){
+      currentSum      = rowValues[i];
+      currentRunStart = i;
+    } else {
+      currentSum += rowValues[i];
+    }
+    if(currentSum > bestSum){
+      bestSum       = currentSum;
+      bandTopIdx    = currentRunStart;
+      bandBottomIdx = i;
+    }
+  }
+  // Trim sub-zero edges.
+  while(bandTopIdx >= 0 && bandTopIdx <= bandBottomIdx && rowValues[bandTopIdx] <= 0)    bandTopIdx++;
+  while(bandBottomIdx >= bandTopIdx && rowValues[bandBottomIdx] <= 0)                    bandBottomIdx--;
+
+  const bandHeight   = Math.max(0, bandBottomIdx - bandTopIdx + 1);
+  diagnostics.band1  = bandTopIdx + '..' + bandBottomIdx + ' (' + bandHeight + ')';
+
+  // Bail if the band is too short to be a table.
+  if(bandTopIdx < 0 || bandHeight < 3){
+    passB.layout = { ...emptyLayout, medH: medianRowHeight, allRows: rowList, diag: diagnostics };
+    return;
+  }
+
+  // ---- Step 5: hand off the precomputed occupancy to buildLayout ----
+  // We pass occupancyPerRow (the FULL row-indexed array) so buildLayout
+  // doesn't recompute occupancy from row.boxes — its legacy AABB-based
+  // rowColumns gives meaningless answers on line-level row blobs.
+  passB.layout = buildLayout(
+    rowList,
+    columnList,
+    bandTopIdx,
+    bandBottomIdx,
+    medianRowHeight,
+    diagnostics,
+    occupancyPerRow
+  );
+}
+
+/* BORDER-ONLY table detection.  Uses ONLY the detected rules — vertical
+   borders become column boundaries, horizontal borders define the table
+   band.  If either axis isn't covered by enough borders the layout is
+   empty (no fallback to heuristic — that's analyzeTable's job).  The
+   pipeline runs both so the gallery can show them side-by-side. */
+export function analyzeTableFromBorders(pass, p){
+  pass.layoutBorders=null;
+  const empty={medH:1,allRows:[],tRange:[-1,-1],table:null,rows:[],cols:[],
+               header:null,footer:null,colHeader:-1,logicalRows:[],tableScore:0};
+  const boxes=wordAABBs(pass);
+  const borders=pass.borders;
+  const vL=(borders&&borders.vLines)||[];
+  const hL=(borders&&borders.hLines)||[];
+  const diag={boxes:boxes.length,rows:0,medH:0,
+              borderV:vL.length, borderH:hL.length,
+              source:'borders'};
+  if(boxes.length<8){ pass.layoutBorders={...empty,diag}; return; }
+  const hs=boxes.map(b=>b.h).sort((a,b)=>a-b);
+  const medH=hs[hs.length>>1]||1;
+  diag.medH=+medH.toFixed(1);
+  // Rows come from Pass B blobs directly — the directional-dilation +
+  // CCA in runPass already grouped each text-line into a single blob.
+  const rows = rowsFromPassB(pass);
+  diag.rows=rows.length;
+  if(rows.length<3){ pass.layoutBorders={...empty,medH,allRows:rows,diag}; return; }
+
+  // cols from V borders — need ≥ 3 V borders to form ≥ 2 columns
+  let cols=null;
+  if(vL.length>=2){
+    const sV=vL.slice().sort((a,b)=>a.x-b.x);
+    const bCols=[];
+    for(let i=0;i<sV.length-1;i++) bCols.push({x0:sV[i].x, x1:sV[i+1].x});
+    if(bCols.length>=2) cols=bCols;
+  }
+  // band from H borders — first and last rows whose centre y falls
+  // between topmost and bottommost border y
+  let bT=-1, bB=-1;
+  if(hL.length>=2){
+    const sH=hL.slice().sort((a,b)=>a.y-b.y);
+    const topY=sH[0].y, botY=sH[sH.length-1].y;
+    for(let i=0;i<rows.length;i++){
+      const cy=(rows[i].y0+rows[i].y1)/2;
+      if(bT<0 && cy>=topY) bT=i;
+      if(cy<=botY) bB=i;
+    }
+  }
+  diag.band1 = bT+".."+bB+" ("+Math.max(0,bB-bT+1)+")";
+
+  if(!cols || cols.length<2 || bT<0 || bB-bT+1<3){
+    pass.layoutBorders={...empty,medH,allRows:rows,diag};
+    return;
+  }
+  pass.layoutBorders = buildLayout(rows, cols, bT, bB, medH, diag);
 }

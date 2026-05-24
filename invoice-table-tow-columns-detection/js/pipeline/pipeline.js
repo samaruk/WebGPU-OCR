@@ -13,11 +13,12 @@ import { traceContour } from '../contour/contour.js';
 import { convexHull } from '../hull/hull.js';
 import { minAreaRect } from '../calipers/calipers.js';
 import { obbToPart, splitMergedBoxes } from '../splitter/splitter.js';
+import { filterByHeightDensity } from '../blobfilter/blobfilter.js';
 import { estimateSkew, buildDeskew } from '../skew/skew.js';
 import { rectifyPerspective } from '../rectify/rectify.js';
 import { correctLensDistortion } from '../lens/lens.js';
 import { dewarpCurl } from '../dewarp/dewarp.js';
-import { analyzeTable } from '../table/table.js';
+import { analyzeTable, analyzeTableFromBorders } from '../table/table.js';
 import { detectBorders } from '../borders/borders.js';
 import { buildGallery, showStage } from '../gallery/gallery.js';
 import { fitView } from '../viewport/viewport.js';
@@ -30,15 +31,33 @@ export function readParams(){
   return {
     deskew:$('deskew').checked, skewMax:+$('skewMax').value,
     radius:(win-1)>>1, k:+$('k').value, R:+$('rr').value, invert:$('invert').checked,
-    dilA:{h:+$('dilHa').value,v:+$('dilVa').value},   // before rotate
-    dilB:{h:+$('dilHb').value,v:+$('dilVb').value},   // after rotate
+    dilA:{h:+$('dilHa').value, v:+$('dilVa').value},                       // before rotate
+    dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value},                   // after rotate · Pass B (rows)
+    dilC:{h:+$('colDilH').value, v:+$('colDilV').value},                   // after rotate · Pass C (columns)
     conn8:$('conn').querySelector('.on').dataset.c==='8',
     minArea:+$('minA').value,
     rmNon:$('rmNon').checked,
     maxAspect:+$('asp').value, minFill:+$('fill').value,
     maxLen:+$('len').value, maxArea:+$('amax').value,
     splitMerged:$('splitMerged').checked, splitRatio:+$('splitRatio').value,
+    densityFilter:$('densityFilter').checked, densityThresh:+$('densityThresh').value,
     detectTable:$('detectTable').checked, tableSens:+$('tableSens').value,
+    kBorder:+$('kBorder').value,
+    // border-detection (solid-rule pipeline)
+    bMaxGapH       : +$('bMaxGapH').value,
+    bMaxGapV       : +$('bMaxGapV').value,
+    bOpenH         : +$('bOpenH').value,
+    bOpenV         : +$('bOpenV').value,
+    bMaxThickness  : +$('bMaxThick').value,
+    bMinCoverage   : +$('bMinCov').value,
+    bSmoothing     : +$('bSmoothR').value,
+    bMinLenFrac    : +$('bMinLenF').value,
+    // border-detection (dashed-rule pipeline)
+    bDetectDashed  : $('bDetectDashed').checked,
+    bDotMaxSize    : +$('bDotMaxSize').value,
+    bDotMinDots    : +$('bDotMinDots').value,
+    bDotStrideRatio: +$('bDotStrideR').value,
+    bDashMinLenFrac: +$('bDashMinLenF').value,
     rlsa:$('rlsa').checked, rowDilH:+$('rowDilH').value, colDilV:+$('colDilV').value,
     showRej:$('showRej').checked
   };
@@ -163,17 +182,123 @@ export async function runPipeline(){
     }
     t.dewarp=performance.now()-t0;
 
-    // 6 · pass B — detection on the corrected (deskewed + dewarped) image
-    t0=performance.now();
-    oStep.textContent='6 · pass B — after rotate'; await raf();
-    S.passes.B = await runPass(S.dewarpImageData, p.dilB, p);
-    if(p.splitMerged) splitMergedBoxes(S.passes.B,p);
-    if(p.detectTable) analyzeTable(S.passes.B,p);
-    // borders — Phase 1: run-length detection of horizontal & vertical
-    // rules on the Pass B binary mask. Result lives next to the table
-    // layout; Phase 2 will consume it inside analyzeTable.
-    S.passes.B.borders = detectBorders(S.passes.B.binary, S.W, S.H);
-    t.passB=performance.now()-t0;
+    /* ------------------------------------------------------------------
+       Step 6 — Pass B: ROW detection
+       ------------------------------------------------------------------
+       Asymmetric dilation: H large, V small.
+         - rowDilH (~120 px) fuses every word in a text-line into one
+           CCA component.
+         - rowDilV (~2 px) is just enough to heal the small vertical gap
+           between a descender and its body, or between an i-dot and
+           its stem.  Kept much smaller than the line gap so that two
+           stacked text-lines stay separate components.
+       Each accepted blob in S.passes.B therefore corresponds to one
+       row.
+
+       rmNon (the non-character / aspect filter) is intentionally
+       BYPASSED here.  That filter is tuned for word-shaped blobs and
+       rejects exactly what we want — text-lines have aspect ratios of
+       20–50 which would all fail maxAspect.  Pass-level shape
+       filtering (row-shape, column-shape) is instead performed inside
+       rowsFromPassB / columnsFromPassC, where it can use pass-
+       appropriate criteria.
+
+       Post-processing on the raw blobs:
+         - splitMergedBoxes catches the occasional 2-line bridge (two
+           lines fused vertically through stray ink) and cuts at the gap.
+         - filterByHeightDensity rejects blobs whose height lies outside
+           the modal text-line height band, and attempts a valley split
+           on too-tall residues.
+       ------------------------------------------------------------------ */
+    t0 = performance.now();
+    oStep.textContent = '6 · pass B — after rotate (rows)';
+    await raf();
+    S.passes.B = await runPass(S.dewarpImageData, p.dilB, {...p, rmNon: false});
+    if(p.splitMerged)   splitMergedBoxes(S.passes.B, p);
+    if(p.densityFilter) filterByHeightDensity(S.passes.B, p);
+    t.passB = performance.now() - t0;
+
+    /* ------------------------------------------------------------------
+       Step 6c — Pass C: COLUMN detection
+       ------------------------------------------------------------------
+       Asymmetric dilation: V large, H small.
+         - colDilV (~12 px) fuses every text-line stacked inside the
+           same column into one CCA component.
+         - colDilH (~2 px) is just enough to glue together a row's
+           word fragments so a single text-line is captured as one
+           horizontal piece of the stripe, but kept much smaller than
+           the column gutter so side-by-side columns stay separate.
+       Each accepted blob in S.passes.C therefore corresponds to one
+       column-stripe.
+
+       rmNon is bypassed for the same reason as Pass B — column-stripes
+       have aspect ratios that the character-filter would reject.
+       Column-shape filtering happens in columnsFromPassC.
+
+       Pass C runs on the same dewarped image as Pass B, so its Sauvola
+       binary is identical to Pass B's — the only difference is the
+       dilation kernel and the resulting CCA groupings.
+       ------------------------------------------------------------------ */
+    t0 = performance.now();
+    oStep.textContent = '6c · pass C — after rotate (columns)';
+    await raf();
+    S.passes.C = await runPass(S.dewarpImageData, p.dilC, {...p, rmNon: false});
+    t.passC = performance.now() - t0;
+
+    /* ------------------------------------------------------------------
+       Border detection — runs on a SEPARATE Sauvola binary built with
+       its own threshold weight (kBorder, typically lower than k so thin
+       / faint rules survive).  We do NOT touch S.passes.B.binary; word
+       detection keeps using its own tuning.
+
+       When kBorder === k the two Sauvola passes would produce identical
+       binaries, so we skip the second GPU call and reuse the existing
+       binary as a shortcut.
+       ------------------------------------------------------------------ */
+    if(p.kBorder === p.k){
+      S.passes.B.binaryBorder = S.passes.B.binary;
+    } else {
+      S.passes.B.binaryBorder = await gpuSauvola(S.dewarpImageData, { ...p, k: p.kBorder });
+    }
+    S.passes.B.borders = detectBorders(S.passes.B.binaryBorder, S.W, S.H, {
+      // Solid-rule pipeline
+      maxGapH         : p.bMaxGapH,
+      maxGapV         : p.bMaxGapV,
+      openKernelH     : p.bOpenH,
+      openKernelV     : p.bOpenV,
+      maxThickness    : p.bMaxThickness,
+      minCoverage     : p.bMinCoverage,
+      smoothingRadius : p.bSmoothing,
+      minLenFrac      : p.bMinLenFrac,
+      // Dashed-rule detector
+      detectDashed       : p.bDetectDashed,
+      maxDotSize         : p.bDotMaxSize,
+      minDots            : p.bDotMinDots,
+      minStrideToSizeRatio: p.bDotStrideRatio,
+      minLenFracDashed   : p.bDashMinLenFrac,
+      // Text masks for the structural discriminator: a dashed-rule
+      // candidate whose dots lie inside the row-dilation (h-chains)
+      // or column-dilation (v-chains) is rejected as text-aligned
+      // punctuation rather than a real border.  Pass B is row-dilated;
+      // Pass C is column-dilated.
+      textMaskH          : S.passes.B.dilated,
+      textMaskV          : S.passes.C && S.passes.C.dilated
+    });
+
+    /* ------------------------------------------------------------------
+       Two table layouts in parallel:
+         - analyzeTable          : pass-based detection (Pass B rows ×
+                                   Pass C columns + ink occupancy).
+         - analyzeTableFromBorders : rules-only — vertical borders give
+                                     columns, horizontal borders bound
+                                     the band.
+       Both write to separate fields on S.passes.B (.layout vs
+       .layoutBorders) so the gallery can show them side-by-side.
+       ------------------------------------------------------------------ */
+    if(p.detectTable){
+      analyzeTable(S.passes.B, p, S.passes.C);
+      analyzeTableFromBorders(S.passes.B, p);
+    }
 
     oStep.textContent='7 · rendering stage outputs'; await raf();
     // readout reflects the after-rotate pass (the corrected result)
@@ -191,7 +316,8 @@ export async function runPipeline(){
       `<span class="k">skew</span> <span class="v">${t.skew.toFixed(0)}ms</span> · `+
       `<span class="k">dewarp</span> <span class="v">${t.dewarp.toFixed(0)}ms</span> · `+
       `<span class="k">pass A</span> <span class="v">${t.passA.toFixed(0)}ms</span> · `+
-      `<span class="k">pass B</span> <span class="v">${t.passB.toFixed(0)}ms</span>`+
+      `<span class="k">pass B</span> <span class="v">${t.passB.toFixed(0)}ms</span> · `+
+      `<span class="k">pass C</span> <span class="v">${t.passC.toFixed(0)}ms</span>`+
       (splitN?` · <span class="k">split</span> <span class="v">${splitN}</span>`:'');
 
     await buildGallery();

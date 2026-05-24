@@ -16,7 +16,7 @@ export const S={
   workCanvas:null, workImageData:null,        // fully corrected working raster (pass A runs on this)
   deskewCanvas:null, deskewImageData:null, angle:0,   // rotation-corrected image + skew
   dewarpCanvas:null, dewarpImageData:null,    // curl-dewarped raster (pass B runs on this)
-  passes:{A:null,B:null},            // per-pass {binary,dilated,labels,ncomp,lab2blob,blobs}
+  passes:{A:null,B:null,C:null},            // per-pass {binary,dilated,labels,ncomp,lab2blob,blobs}
   stage:STAGES.length-1, stageCv:null,        // current stage index + offscreen render target
   thumbs:[],                                  // gallery thumbnail canvases
   view:{scale:1,tx:0,ty:0}, dpr:Math.min(devicePixelRatio||1,2),

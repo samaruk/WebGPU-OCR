@@ -48,9 +48,9 @@ export function renderStageInto(st,ctx,W,H){
   if(st.kind==='deskewed'){ if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
   if(st.kind==='dewarped'){ if(S.dewarpCanvas) ctx.drawImage(S.dewarpCanvas,0,0); else if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
 
-  const pass = st.pass==='A' ? S.passes.A : S.passes.B;
+  const pass = st.pass==='A' ? S.passes.A : st.pass==='C' ? S.passes.C : S.passes.B;
   if(!pass) return;
-  const base = st.pass==='A' ? S.origCanvas : S.deskewCanvas;
+  const base = st.pass==='A' ? S.origCanvas : (S.dewarpCanvas || S.deskewCanvas);
   const k=st.kind, N=W*H;
 
   if(k==='binary' || k==='dilated'){              // ---- raster mask ----
@@ -60,6 +60,119 @@ export function renderStageInto(st,ctx,W,H){
       const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255;
     }
     ctx.putImageData(id,0,0); return;
+  }
+
+  if(k==='borderbinary' || k==='borderhopened' || k==='bordervopened'){
+    // ---- border detector's binary masks ----
+    let mask = null;
+    if(k==='borderbinary')   mask = pass.binaryBorder;
+    if(k==='borderhopened')  mask = pass.borders && pass.borders.debug && pass.borders.debug.hOpened;
+    if(k==='bordervopened')  mask = pass.borders && pass.borders.debug && pass.borders.debug.vOpened;
+    if(!mask){
+      // No data — render a gray placeholder.
+      const id=ctx.createImageData(W,H), d=id.data;
+      for(let j=0;j<d.length;j+=4){ d[j]=d[j+1]=d[j+2]=200; d[j+3]=255; }
+      ctx.putImageData(id,0,0);
+      ctx.fillStyle='#333'; ctx.font='14px ui-monospace,Menlo,monospace';
+      ctx.fillText('(no data — re-run pipeline)', 20, 30);
+      return;
+    }
+    const id=ctx.createImageData(W,H), d=id.data;
+    for(let i=0,j=0;i<N;i++,j+=4){
+      const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255;
+    }
+    ctx.putImageData(id,0,0);
+    return;
+  }
+
+  if(k==='borderdots'){
+    // ---- dashed-detector's dot candidates ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.globalAlpha=0.35;
+    ctx.fillStyle='#000';
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha=1;
+
+    const dbg = pass.borders && pass.borders.debug;
+    if(!dbg || !dbg.dots){
+      ctx.fillStyle='#fff'; ctx.font='14px ui-monospace,Menlo,monospace';
+      ctx.fillText('(no dot data)', 20, 30);
+      return;
+    }
+
+    // Mark each dot's status by location key: ACCEPTED (in detected line),
+    // REJECTED (in rejected chain), or UNCHAINED.
+    const dotKey = (d) => d.cx + ',' + d.cy;
+    const acceptedDot = new Map();        // key -> chain index
+    const rejectedDot = new Map();        // key -> {reason, metric, chainIndex}
+
+    let chainIdx = 0;
+    const acceptedChainColors = [];
+    const tagAccepted = (line) => {
+      if(!line.isDashed || !line.polyline) return;
+      const myIdx = chainIdx++;
+      acceptedChainColors[myIdx] = labColor(myIdx);
+      for(const p of line.polyline){
+        acceptedDot.set(p.x + ',' + p.y, myIdx);
+      }
+    };
+    for(const h of (pass.borders.hLines || [])) tagAccepted(h);
+    for(const v of (pass.borders.vLines || [])) tagAccepted(v);
+
+    let rejectedChainIdx = 0;
+    const rejectedSamples = [];           // chains we'll label
+    for(const rej of (dbg.rejectedChains || [])){
+      const myIdx = rejectedChainIdx++;
+      for(const d of rej.chain){
+        rejectedDot.set(dotKey(d), { reason: rej.reason, metric: rej.metric, idx: myIdx });
+      }
+      if(rejectedSamples.length < 10) rejectedSamples.push(rej);   // keep first 10 for labels
+    }
+
+    // Paint dots.
+    const pad = Math.max(1, sw * 0.5);
+    for(const dot of dbg.dots){
+      const key = dotKey(dot);
+      if(acceptedDot.has(key)){
+        const ci = acceptedDot.get(key);
+        const c = acceptedChainColors[ci];
+        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      } else if(rejectedDot.has(key)){
+        ctx.fillStyle = 'rgba(255,140,40,0.95)';            // orange = rejected chain
+      } else {
+        ctx.fillStyle = 'rgba(140,140,140,0.55)';           // gray = unchained
+      }
+      ctx.fillRect(dot.x0 - pad, dot.y0 - pad,
+                   dot.x1 - dot.x0 + 1 + pad * 2,
+                   dot.y1 - dot.y0 + 1 + pad * 2);
+    }
+
+    // Annotate up to 10 rejected chains with their rejection reason.
+    ctx.font = (14 * sw) + 'px ui-monospace,Menlo,monospace';
+    ctx.fillStyle = 'rgba(255,200,140,0.95)';
+    for(const rej of rejectedSamples){
+      const first = rej.chain[0];
+      const last  = rej.chain[rej.chain.length - 1];
+      const cx = (first.cx + last.cx) / 2;
+      const cy = (first.cy + last.cy) / 2;
+      let tag = rej.reason + '=';
+      if(typeof rej.metric === 'number'){
+        tag += (rej.metric < 10 ? rej.metric.toFixed(2) : Math.round(rej.metric));
+      }
+      tag += ' (' + rej.chain.length + ' dots)';
+      ctx.fillText(tag, cx + 6, cy);
+    }
+
+    // Header legend.
+    ctx.fillStyle='#fff';
+    ctx.font = (15 * sw) + 'px ui-monospace,Menlo,monospace';
+    ctx.fillText(
+      `dots: ${dbg.dots.length}    accepted-chain dots: ${acceptedDot.size}    ` +
+      `rejected chains: ${(dbg.rejectedChains||[]).length}`,
+      8, 22);
+    ctx.fillStyle='rgba(255,140,40,0.95)';
+    ctx.fillText('orange = rejected chain   (reason shown next to chain)', 8, 42);
+    return;
   }
 
   if(k==='cca' || k==='blobs'){                   // ---- labelled raster ----
@@ -156,6 +269,113 @@ export function renderStageInto(st,ctx,W,H){
     return;
   }
 
+  if(k==='density'){                                // ---- height-density filter ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+    const hf=pass.heightFilter;
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90));
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    if(!hf || !hf.hist){
+      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
+      ctx.fillText(hf?.reason ? 'density filter: '+hf.reason : 'density filter disabled (toggle 07b)', W/2, H/2);
+      ctx.textAlign='left';
+      // still draw the parts as plain-accepted so the gallery shows them
+      ctx.lineWidth=sw; ctx.lineJoin='round';
+      for(const b of pass.blobs) for(const part of b.parts){
+        if(!part.accepted) continue;
+        const c=part.corners;
+        ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
+        for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
+        ctx.closePath();
+        ctx.strokeStyle='rgba(84,221,126,.65)'; ctx.fillStyle='rgba(84,221,126,.08)';
+        ctx.fill(); ctx.stroke();
+      }
+      return;
+    }
+    // draw every part, colour-coded by status
+    ctx.lineWidth=sw; ctx.lineJoin='round';
+    const drawPart=(part,stroke,fill)=>{
+      const c=part.corners;
+      ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
+      for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
+      ctx.closePath();
+      ctx.strokeStyle=stroke; ctx.fillStyle=fill;
+      ctx.fill(); ctx.stroke();
+    };
+    let nKept=0, nSplit=0, nSmall=0, nTall=0, nReplaced=0;
+    for(const b of pass.blobs) for(const part of b.parts){
+      if(part.accepted){
+        if(part.fromDensitySplit){
+          drawPart(part,'rgba(110,220,255,.95)','rgba(110,220,255,.15)'); nSplit++;
+        } else {
+          drawPart(part,'rgba(84,221,126,.95)','rgba(84,221,126,.13)'); nKept++;
+        }
+      } else if(part.rejectedBy==='density-small'){
+        drawPart(part,'rgba(170,170,170,.7)','rgba(170,170,170,.06)'); nSmall++;
+      } else if(part.rejectedBy==='density-tall-no-split'){
+        drawPart(part,'rgba(255,93,108,.95)','rgba(255,93,108,.12)'); nTall++;
+      } else if(part.rejectedBy==='density-replaced-by-split'){
+        drawPart(part,'rgba(255,160,40,.8)','rgba(255,160,40,.04)'); nReplaced++;
+      }
+      // parts rejected by earlier stages (CCA filter, splitter) are not drawn here
+    }
+    // histogram overlay (top-right)
+    const hist=hf.hist, bucket=hf.bucket;
+    const padW=Math.max(8, fs*0.5);
+    const chartW=Math.max(160, Math.min(W*0.30, 320));
+    const chartH=Math.max(110, Math.min(H*0.22, 200));
+    const chartX=W-chartW-padW, chartY=padW;
+    ctx.fillStyle='rgba(8,11,12,.85)';
+    ctx.fillRect(chartX,chartY,chartW,chartH);
+    ctx.strokeStyle='rgba(120,130,135,.4)'; ctx.lineWidth=1;
+    ctx.strokeRect(chartX+0.5,chartY+0.5,chartW-1,chartH-1);
+    const nB=hist.length;
+    const peakVal=hf.peakVal;
+    const barW=(chartW-padW*2)/nB;
+    const barAreaH=chartH-padW*2 - fs*1.2;          // leave room for axis label
+    // highlighted band in the back
+    const lo=Math.floor(hf.hMin/bucket), hi=Math.ceil(hf.hMax/bucket);
+    ctx.fillStyle='rgba(84,221,126,.18)';
+    ctx.fillRect(chartX+padW+lo*barW, chartY+padW, (hi-lo)*barW, barAreaH);
+    // bars
+    for(let i=0;i<nB;i++){
+      const v=hist[i];
+      if(v<=0) continue;
+      const bh=Math.max(1, Math.round(v/peakVal*barAreaH));
+      const bx=chartX+padW+i*barW, by=chartY+padW+barAreaH-bh;
+      ctx.fillStyle = (i*bucket>=hf.hMin && i*bucket<hf.hMax)
+        ? 'rgba(84,221,126,.92)'
+        : 'rgba(170,170,170,.70)';
+      ctx.fillRect(bx, by, Math.max(1,barW-1), bh);
+    }
+    // axis labels
+    ctx.fillStyle='rgba(220,235,240,.85)';
+    ctx.font=`500 ${Math.round(fs*0.78)}px "JetBrains Mono", monospace`;
+    ctx.fillText('0', chartX+padW, chartY+chartH-padW*0.4);
+    const maxTxt=Math.round(nB*bucket)+'px';
+    const mtw=ctx.measureText(maxTxt).width;
+    ctx.fillText(maxTxt, chartX+chartW-padW-mtw, chartY+chartH-padW*0.4);
+    const peakTxt='peak '+Math.round(hf.peakH)+'px';
+    const ptw=ctx.measureText(peakTxt).width;
+    ctx.fillText(peakTxt, chartX+(chartW-ptw)/2, chartY+chartH-padW*0.4);
+    // stats text (top-left)
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    const lines=[
+      'band: ['+Math.round(hf.hMin)+', '+Math.round(hf.hMax)+') px',
+      'thresh: '+hf.densityThresh.toFixed(2)+'   peak: '+hf.peakVal,
+      'kept: '+nKept+'    split→'+nSplit+' children ('+hf.splitOk+' parents)',
+      'dropped: '+nSmall+' small   '+nTall+' tall'
+    ];
+    const lh=fs*1.35;
+    const boxW=Math.max(...lines.map(t=>ctx.measureText(t).width))+padW*2;
+    const boxH=lines.length*lh+padW*0.6;
+    ctx.fillStyle='rgba(8,11,12,.85)';
+    ctx.fillRect(padW,padW,boxW,boxH);
+    ctx.fillStyle='rgba(220,235,240,.97)';
+    for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], padW*1.4, padW+fs*0.8+i*lh);
+    return;
+  }
+
   if(k==='borders'){                                // ---- detected rules ----
     if(base) ctx.drawImage(base,0,0);
     ctx.fillStyle='rgba(8,11,12,.45)'; ctx.fillRect(0,0,W,H);
@@ -167,22 +387,81 @@ export function renderStageInto(st,ctx,W,H){
       ctx.fillText('borders not computed',W/2,H/2); ctx.textAlign='left';
       return;
     }
-    // horizontal rules in cyan, vertical rules in lime — same colours
-    // used elsewhere for row/column visualisations so the meaning carries
-    const lw=Math.max(2,sw*1.6);
-    ctx.lineWidth=lw; ctx.lineCap='round';
-    ctx.strokeStyle='rgba(110,200,255,.95)';
+    // Horizontal rules in cyan, vertical rules in lime — same colours
+    // used elsewhere for row/column visualisations so the meaning
+    // carries through.  Each rule has a polyline (one (x,y) per pixel
+    // column for h-rules, per row for v-rules) — draw that as a smooth
+    // stroke so curved rules render as actual curves rather than
+    // collapsing to a straight line at the rule's mean Y / X.
+    const lw = Math.max(2, sw * 1.6);
+    ctx.lineWidth = lw;
+    ctx.lineCap   = 'round';
+    ctx.lineJoin  = 'round';
+
+    const strokePolyline = (poly) => {
+      if(!poly || poly.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x + 0.5, poly[0].y + 0.5);
+      for(let i = 1; i < poly.length; i++){
+        ctx.lineTo(poly[i].x + 0.5, poly[i].y + 0.5);
+      }
+      ctx.stroke();
+    };
+
+    const drawDotMarkers = (poly, fill) => {
+      // For dashed rules: draw a small filled circle at every polyline
+      // vertex (= every detected dot's centre).  The polyline itself is
+      // still stroked as a continuous line, so the user sees both the
+      // inferred rule's shape AND where every contributing dot sits.
+      if(!poly) return;
+      ctx.fillStyle = fill;
+      const r = Math.max(2.5, sw * 1.4);
+      for(const p of poly){
+        ctx.beginPath();
+        ctx.arc(p.x + 0.5, p.y + 0.5, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    ctx.strokeStyle = 'rgba(110,200,255,.95)';                  // h-rules
     for(const h of b.hLines){
-      ctx.beginPath();
-      ctx.moveTo(h.x0,h.y+0.5); ctx.lineTo(h.x1,h.y+0.5);
-      ctx.stroke();
+      // For dashed h-rules use a thinner, more transparent stroke so the
+      // dot markers (drawn next) read as the primary signal.
+      if(h.isDashed){
+        ctx.strokeStyle = 'rgba(110,200,255,.45)';
+        ctx.lineWidth   = Math.max(1, sw * 0.8);
+      } else {
+        ctx.strokeStyle = 'rgba(110,200,255,.95)';
+        ctx.lineWidth   = lw;
+      }
+      if(h.polyline) strokePolyline(h.polyline);
+      else {
+        ctx.beginPath();
+        ctx.moveTo(h.x0, h.y + 0.5);
+        ctx.lineTo(h.x1, h.y + 0.5);
+        ctx.stroke();
+      }
+      if(h.isDashed) drawDotMarkers(h.polyline, 'rgba(110,200,255,.95)');
     }
-    ctx.strokeStyle='rgba(166,255,63,.95)';
+
     for(const v of b.vLines){
-      ctx.beginPath();
-      ctx.moveTo(v.x+0.5,v.y0); ctx.lineTo(v.x+0.5,v.y1);
-      ctx.stroke();
+      if(v.isDashed){
+        ctx.strokeStyle = 'rgba(166,255,63,.45)';
+        ctx.lineWidth   = Math.max(1, sw * 0.8);
+      } else {
+        ctx.strokeStyle = 'rgba(166,255,63,.95)';
+        ctx.lineWidth   = lw;
+      }
+      if(v.polyline) strokePolyline(v.polyline);
+      else {
+        ctx.beginPath();
+        ctx.moveTo(v.x + 0.5, v.y0);
+        ctx.lineTo(v.x + 0.5, v.y1);
+        ctx.stroke();
+      }
+      if(v.isDashed) drawDotMarkers(v.polyline, 'rgba(166,255,63,.95)');
     }
+    ctx.lineWidth = lw;
     // count badge in the top-left
     const txt='H: '+b.hLines.length+'   V: '+b.vLines.length;
     const pad=fs*0.5, tw=ctx.measureText(txt).width;
@@ -193,10 +472,13 @@ export function renderStageInto(st,ctx,W,H){
     return;
   }
 
-  if(k==='rows'||k==='cols'||k==='table'){          // ---- table layout ----
+  if(k==='rows'||k==='cols'||k==='table'||k==='brows'||k==='bcols'||k==='btable'){
+    // ---- table layout (heuristic or border-only) ----
+    const fromBorders = (k==='brows'||k==='bcols'||k==='btable');
+    const kBase = fromBorders ? k.slice(1) : k;      // 'brows' -> 'rows'
     if(base) ctx.drawImage(base,0,0);
     ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const L=pass.layout;
+    const L = fromBorders ? pass.layoutBorders : pass.layout;
     const fs=Math.max(11,Math.round(Math.min(W,H)/90));
     ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
     ctx.textBaseline='middle'; ctx.lineJoin='round';
@@ -209,8 +491,14 @@ export function renderStageInto(st,ctx,W,H){
       if(diag){
         lines.push('');
         lines.push(`boxes:${diag.boxes}   rows:${diag.rows}   medH:${diag.medH}`);
-        lines.push(`rlsa cols:${diag.rlsaCols}   detect cols:${diag.detectCols}   by-centers:${diag.byCenters}`);
-        lines.push(`band tries: ${diag.band1}   ${diag.band2}   ${diag.band3}`);
+        if(diag.rlsaCols!==undefined){
+          lines.push(`rlsa cols:${diag.rlsaCols}   detect cols:${diag.detectCols}   by-centers:${diag.byCenters}`);
+        }
+        if(diag.borderV!==undefined){
+          lines.push(`borders: v=${diag.borderV}  h=${diag.borderH}`);
+        }
+        const bandLines=[diag.band1,diag.band2,diag.band3].filter(b=>b&&b!=='-');
+        if(bandLines.length) lines.push(`band tries: ${bandLines.join('   ')}`);
         lines.push(`source: ${diag.source}`);
       }
       const lh=fs*1.6, top=H/2-((lines.length-1)*lh)/2;
@@ -232,7 +520,7 @@ export function renderStageInto(st,ctx,W,H){
     const rect=b=>{ ctx.beginPath(); ctx.rect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0); };
     const [bT,bB]=L.tRange;
 
-    if(k==='rows'){
+    if(kBase==='rows'){
       L.allRows.forEach((r,i)=>{                    // non-table text lines, dim
         if(i>=bT && i<=bB) return;
         rect(r); ctx.fillStyle='rgba(150,165,170,.09)'; ctx.fill();
@@ -248,7 +536,7 @@ export function renderStageInto(st,ctx,W,H){
     const tb=L.table;
     if(!tb){ msgDiag('no multi-column table found', L.diag); return; }
 
-    if(k==='cols'){
+    if(kBase==='cols'){
       L.cols.forEach((c,i)=>{                       // tiled column cells
         rect(c);
         ctx.fillStyle=i%2?'rgba(110,200,255,.15)':'rgba(166,255,63,.12)'; ctx.fill();
@@ -257,7 +545,7 @@ export function renderStageInto(st,ctx,W,H){
       });
       return;
     }
-    // k==='table'
+    // kBase==='table'
     if(L.header){ rect(L.header);
       ctx.fillStyle='rgba(110,160,255,.16)'; ctx.fill();
       ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,160,255,.7)'; ctx.stroke();
