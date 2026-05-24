@@ -744,6 +744,14 @@ function traceVerticalRules(openedBinary, originalBinary, imageWidth, imageHeigh
    ---------------------------------------------------------------------- */
 export function detectBorders(binary, imageWidth, imageHeight, opts = {}){
   const minLenFrac        = opts.minLenFrac        ?? 0.18;
+  // Asymmetric defaults: H-rules in invoices are usually page-wide
+  // (top/bottom of tables, underlines), so 0.18 of W ~ 270 px at 1500
+  // is right.  V-rules are usually CELL-level borders 30-150 px tall;
+  // 0.18 of H rejects nearly all of them.  Lower the V default to
+  // 0.03 (~ 45 px at H=1500, ~ 90 px at H=3000) so short cell borders
+  // make it through.
+  const minLenFracH       = opts.minLenFracH       ?? minLenFrac;
+  const minLenFracV       = opts.minLenFracV       ?? 0.03;
   const maxGapH           = opts.maxGapH           ?? 12;
   const maxGapV           = opts.maxGapV           ?? 12;
   const openKernelH       = opts.openKernelH       ?? 8;
@@ -753,8 +761,8 @@ export function detectBorders(binary, imageWidth, imageHeight, opts = {}){
   const orientationRatio  = opts.orientationRatio  ?? 4;
   const smoothingRadius   = opts.smoothingRadius   ?? 15;
 
-  const minLenH = Math.max(8, Math.floor(imageWidth  * minLenFrac));
-  const minLenV = Math.max(8, Math.floor(imageHeight * minLenFrac));
+  const minLenH = Math.max(8, Math.floor(imageWidth  * minLenFracH));
+  const minLenV = Math.max(8, Math.floor(imageHeight * minLenFracV));
 
   // -- horizontal rules: bridge-then-open + CCA -----------------------
   const hBridged       = bridgeHorizontalGaps(binary, imageWidth, imageHeight, maxGapH);
@@ -765,6 +773,7 @@ export function detectBorders(binary, imageWidth, imageHeight, opts = {}){
   const hLines = hRulesRaw
     .filter(r => r.thickness <= maxThickness)
     .filter(r => r.coverage  >= minCoverage);
+    console.log([' hRulesRaw, hLines, hRulesRaw.filter(r => r.thickness <= maxThickness), hRulesRaw.filter(r => r.coverage >= minCoverage)', hRulesRaw, hLines, hRulesRaw.filter(r => r.thickness <= maxThickness), hRulesRaw.filter(r => r.coverage >= minCoverage)]);
 
   // -- vertical rules: same pipeline, axis swapped -------------------
   const vBridged       = bridgeVerticalGaps(binary, imageWidth, imageHeight, maxGapV);
@@ -1009,34 +1018,68 @@ function summariseChain(chain, isHorizontal){
    dilation than a chain of 1-px dots, and we don't want to count
    that as "text-wide". */
 function chainOrthogonalExtentFraction(chain, mask, imageWidth, imageHeight,
-                                       orientation, medianSize){
+                                       orientation, medianSize, searchRange){
   if(!mask) return 0;
   // Width threshold: anything that's more than 4× the dot's own size
   // (and at least 8 px) is "wider than the dot alone could account
   // for", and thus is a text-column or text-row dilation.
   const threshold = Math.max(8, Math.round(medianSize * 4));
+
+  // 2D neighborhood sampling.  Sampling only along the chain axis
+  // misses the common case where a decimal point sits in its OWN
+  // narrow Pass-C column stripe (because font kerning > 2·colDilH
+  // leaves a gap between digit and decimal columns that the
+  // horizontal dilation doesn't bridge).  The wide text structures
+  // are at neighboring X positions for v-chains and at neighboring
+  // Y positions for h-chains — orthogonal to the chain axis.
+  //
+  // Sampling pattern: 9 points = centre + 4 cardinal at ±range + 4
+  // diagonals at (±range, ±range).  Diagonals must be at full range,
+  // not halfRange — a decimal sitting at e.g. (519, 95) with the
+  // digit body at (498-512, 66-90) is only reachable by the
+  // (-range, -range) sample, since the digit's vertical-dilation
+  // reach doesn't extend down to the decimal's Y *and* its
+  // horizontal-dilation reach doesn't extend right to the decimal's
+  // X.  Each sample point walks the mask to find the FULL stripe at
+  // that pixel, so coarse sampling is fine.
+  const range = Math.max(4, searchRange | 0);
+  const offsets = [
+    [ 0,      0      ],
+    [+range,  0      ], [-range,  0      ],
+    [ 0,     +range  ], [ 0,     -range  ],
+    [+range, +range  ], [+range, -range  ],
+    [-range, +range  ], [-range, -range  ]
+  ];
+
   let hits = 0;
   for(const dot of chain){
     const cx = Math.round(dot.cx);
     const cy = Math.round(dot.cy);
-    if(cx < 0 || cx >= imageWidth || cy < 0 || cy >= imageHeight) continue;
-    if(!mask[cy * imageWidth + cx]) continue;     // mask cold at dot, can't be wide
+    let maxExtent = 0;
 
-    let extent;
-    if(orientation === 'vertical'){
-      // Measure horizontal extent at the dot's Y.
-      let left = cx, right = cx;
-      while(left > 0 && mask[cy * imageWidth + (left - 1)])  left--;
-      while(right < imageWidth - 1 && mask[cy * imageWidth + (right + 1)]) right++;
-      extent = right - left + 1;
-    } else {
-      // Measure vertical extent at the dot's X.
-      let top = cy, bot = cy;
-      while(top > 0 && mask[(top - 1) * imageWidth + cx])  top--;
-      while(bot < imageHeight - 1 && mask[(bot + 1) * imageWidth + cx]) bot++;
-      extent = bot - top + 1;
+    for(const [dx, dy] of offsets){
+      const sx = cx + dx;
+      const sy = cy + dy;
+      if(sx < 0 || sx >= imageWidth || sy < 0 || sy >= imageHeight) continue;
+      if(!mask[sy * imageWidth + sx]) continue;
+
+      let extent;
+      if(orientation === 'vertical'){
+        // Walk horizontally from (sx, sy) until mask drops to 0.
+        let left = sx, right = sx;
+        while(left > 0 && mask[sy * imageWidth + (left - 1)])  left--;
+        while(right < imageWidth - 1 && mask[sy * imageWidth + (right + 1)]) right++;
+        extent = right - left + 1;
+      } else {
+        // Walk vertically from (sx, sy) until mask drops to 0.
+        let top = sy, bot = sy;
+        while(top > 0 && mask[(top - 1) * imageWidth + sx])  top--;
+        while(bot < imageHeight - 1 && mask[(bot + 1) * imageWidth + sx]) bot++;
+        extent = bot - top + 1;
+      }
+      if(extent > maxExtent) maxExtent = extent;
     }
-    if(extent > threshold) hits++;
+    if(maxExtent > threshold) hits++;
   }
   return hits / chain.length;
 }
@@ -1138,15 +1181,19 @@ function detectDashedRules(binary, imageWidth, imageHeight, opts){
   const maxGapRatio         = opts.dashMaxGapRatio     ?? 3.0;
   const maxSizeRatio        = opts.dashMaxSizeRatio    ?? 2.5;
   const minStrideToSizeRatio = opts.minStrideToSizeRatio ?? 2.0;
-  // minLenFracDashed: dropped from 0.25 to 0.18 (same as solid rules).
-  // Table-cell-only vertical rules don't span 30 % of page height.
+  // Asymmetric length thresholds — same reasoning as the solid case:
+  // page-wide h-dashes vs cell-level v-dashes.  V default 0.03 and a
+  // 20-px absolute floor (~ 7 dots at 3-px stride) keeps short cell
+  // borders, while still requiring a structured chain to form.
   const minLenFracDashed    = opts.minLenFracDashed    ?? 0.18;
+  const minLenFracDashedH   = opts.minLenFracDashedH   ?? minLenFracDashed;
+  const minLenFracDashedV   = opts.minLenFracDashedV   ?? 0.03;
   // dashMaxStride: bumped from 0.15 to 0.20 of image dim so long-gap
   // patterns chain through.  At W=1500 this is 300 px between dots.
   const dashMaxStrideH      = opts.dashMaxStrideH      ?? Math.max(40, Math.floor(imageWidth  * 0.20));
   const dashMaxStrideV      = opts.dashMaxStrideV      ?? Math.max(40, Math.floor(imageHeight * 0.20));
-  const minLenH             = Math.max(40, Math.floor(imageWidth  * minLenFracDashed));
-  const minLenV             = Math.max(40, Math.floor(imageHeight * minLenFracDashed));
+  const minLenH             = Math.max(40, Math.floor(imageWidth  * minLenFracDashedH));
+  const minLenV             = Math.max(20, Math.floor(imageHeight * minLenFracDashedV));
 
   // -- perpendicular-isolation filter ----------------------------------
   // perpDistance default LOWERED from sR(15) to sR(5).  The previous 15 px
@@ -1170,6 +1217,11 @@ function detectDashedRules(binary, imageWidth, imageHeight, opts){
   const textMaskH           = opts.textMaskH || null;
   const textMaskV           = opts.textMaskV || null;
   const maxTextMaskFraction = opts.maxTextMaskFraction ?? 0.70;
+  // How far along the chain axis we sample around each dot for the
+  // orthogonal-extent check.  Scales with image size since text-body
+  // height scales too — a 1500-px image has ~15-20 px tall text; a
+  // 3000-px image has ~30-40 px.  sR(10) gives the right reach.
+  const extentSearchRange   = opts.extentSearchRange   ?? sR(10);
 
   const dots = extractSmallComponents(binary, imageWidth, imageHeight, maxDotSize);
   const rejectedChains = [];                          // for the gallery diagnostic stage
@@ -1215,7 +1267,8 @@ function detectDashedRules(binary, imageWidth, imageHeight, opts){
     // that's much taller than the dot itself indicates the dot is
     // embedded in a row of text.
     const textMaskFraction = chainOrthogonalExtentFraction(
-      chain, textMaskH, imageWidth, imageHeight, 'horizontal', summary.medianSize);
+      chain, textMaskH, imageWidth, imageHeight, 'horizontal',
+      summary.medianSize, extentSearchRange);
     if(textMaskFraction > maxTextMaskFraction){
       rejectWith(chain, 'horizontal', 'inTextRow', textMaskFraction); continue;
     }
@@ -1284,7 +1337,8 @@ function detectDashedRules(binary, imageWidth, imageHeight, opts){
     // full digit-body width; a real dashed border in the column gap
     // sits inside its own narrow dilation stripe (≈ dot + dilation).
     const textMaskFraction = chainOrthogonalExtentFraction(
-      chain, textMaskV, imageWidth, imageHeight, 'vertical', summary.medianSize);
+      chain, textMaskV, imageWidth, imageHeight, 'vertical',
+      summary.medianSize, extentSearchRange);
     if(textMaskFraction > maxTextMaskFraction){
       rejectWith(chain, 'vertical', 'inTextColumn', textMaskFraction); continue;
     }
