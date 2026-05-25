@@ -765,20 +765,31 @@ export function detectBorders(binary, imageWidth, imageHeight, opts = {}){
   const minLenV = Math.max(8, Math.floor(imageHeight * minLenFracV));
 
   // -- horizontal rules: bridge-then-open + CCA -----------------------
-  const hBridged       = bridgeHorizontalGaps(binary, imageWidth, imageHeight, maxGapH);
-  const hErodedForOpen = erodeHorizontal     (hBridged,         imageWidth, imageHeight, openKernelH);
-  const hOpened        = dilateHorizontal    (hErodedForOpen,   imageWidth, imageHeight, openKernelH);
+  // -- horizontal rules: bridge + open + CCA -----------------------
+  // The bridge / erode / dilate triple is the slow part on the CPU
+  // (O(N) sliding window × 3 axes × 2 dimensions on multi-megapixel
+  // binaries).  The pipeline can pre-compute these on the GPU and pass
+  // the results via opts.hOpenedPrecomputed / vOpenedPrecomputed —
+  // when both are present we skip the CPU loops entirely.
+  const hOpened = opts.hOpenedPrecomputed
+    || (() => {
+      const hBridged       = bridgeHorizontalGaps(binary, imageWidth, imageHeight, maxGapH);
+      const hErodedForOpen = erodeHorizontal     (hBridged,        imageWidth, imageHeight, openKernelH);
+      return       dilateHorizontal              (hErodedForOpen,  imageWidth, imageHeight, openKernelH);
+    })();
   const hRulesRaw      = traceHorizontalRules(hOpened, binary, imageWidth, imageHeight,
                                               minLenH, orientationRatio, smoothingRadius);
   const hLines = hRulesRaw
     .filter(r => r.thickness <= maxThickness)
     .filter(r => r.coverage  >= minCoverage);
-    console.log([' hRulesRaw, hLines, hRulesRaw.filter(r => r.thickness <= maxThickness), hRulesRaw.filter(r => r.coverage >= minCoverage)', hRulesRaw, hLines, hRulesRaw.filter(r => r.thickness <= maxThickness), hRulesRaw.filter(r => r.coverage >= minCoverage)]);
 
   // -- vertical rules: same pipeline, axis swapped -------------------
-  const vBridged       = bridgeVerticalGaps(binary, imageWidth, imageHeight, maxGapV);
-  const vErodedForOpen = erodeVertical     (vBridged,         imageWidth, imageHeight, openKernelV);
-  const vOpened        = dilateVertical    (vErodedForOpen,   imageWidth, imageHeight, openKernelV);
+  const vOpened = opts.vOpenedPrecomputed
+    || (() => {
+      const vBridged       = bridgeVerticalGaps(binary, imageWidth, imageHeight, maxGapV);
+      const vErodedForOpen = erodeVertical     (vBridged,         imageWidth, imageHeight, openKernelV);
+      return       dilateVertical              (vErodedForOpen,   imageWidth, imageHeight, openKernelV);
+    })();
   const vRulesRaw      = traceVerticalRules(vOpened, binary, imageWidth, imageHeight,
                                             minLenV, orientationRatio, smoothingRadius);
   const vLines = vRulesRaw

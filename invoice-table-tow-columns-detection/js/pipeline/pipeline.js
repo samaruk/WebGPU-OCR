@@ -7,7 +7,7 @@
    ====================================================================== */
 import { $, overlay, runBtn, oStep, savePng, saveJson, showError } from '../dom/dom.js';
 import { S } from '../state/state.js';
-import { gpuSauvola, gpuDilate } from '../webgpu/webgpu.js';
+import { gpuSauvola, gpuDilate, gpuMorph, gpuErode } from '../webgpu/webgpu.js';
 import { cca } from '../cca/cca.js';
 import { traceContour } from '../contour/contour.js';
 import { convexHull } from '../hull/hull.js';
@@ -31,9 +31,9 @@ export function readParams(){
   return {
     deskew:$('deskew').checked, skewMax:+$('skewMax').value,
     radius:(win-1)>>1, k:+$('k').value, R:+$('rr').value, invert:$('invert').checked,
-    dilA:{h:+$('dilHa').value, v:+$('dilVa').value},                       // before rotate
-    dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value},                   // after rotate · Pass B (rows)
-    dilC:{h:+$('colDilH').value, v:+$('colDilV').value},                   // after rotate · Pass C (columns)
+    dilA:{h:+$('dilHa').value, v:+$('dilVa').value, eh:0, ev:0},                       // before rotate (word detection — no erode, would damage thin glyphs)
+    dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value, eh:1, ev:0},                   // after rotate · Pass B (rows): 1-px H-erode strips noise specks before the huge H-dilation amplifies them
+    dilC:{h:+$('colDilH').value, v:+$('colDilV').value, eh:0, ev:1},                   // after rotate · Pass C (columns): 1-px V-erode, mirror of Pass B
     conn8:$('conn').querySelector('.on').dataset.c==='8',
     minArea:+$('minA').value,
     rmNon:$('rmNon').checked,
@@ -71,6 +71,18 @@ export const fmtDeg=a=>`${a>=0?'+':'−'}${Math.abs(a).toFixed(2)}°`;
 export async function runPass(imgData, dil, p){
   const W=S.W,H=S.H;
   const binary  = await gpuSauvola(imgData,p);
+  // Optional asymmetric erode of the Sauvola binary BEFORE the main
+  // dilation, to remove isolated noise specks.  See gpuErode's comment
+  // for the trade-off; called only when dil.eh or dil.ev is set so
+  // existing call sites (Pass A and any caller not opting in) are
+  // unaffected.  The Sauvola binary lives in b.outB, gpuErode mutates
+  // it in place, and gpuDilate then reads the cleaned binary.  The
+  // `binary` Uint8Array returned by gpuSauvola was already copied out
+  // before the erosion, so it preserves the raw Sauvola output for
+  // downstream ink-occupancy analyses that want untouched ink.
+  if(dil.eh || dil.ev){
+    await gpuErode(dil.eh || 0, dil.ev || 0);
+  }
   const dilated = await gpuDilate(dil.h,dil.v);
   const cc = cca(dilated,W,H,p.conn8);
   const blobs=[]; const lab2blob=new Int32Array(cc.count).fill(-1);
@@ -260,6 +272,31 @@ export async function runPipeline(){
     } else {
       S.passes.B.binaryBorder = await gpuSauvola(S.dewarpImageData, { ...p, k: p.kBorder });
     }
+
+    /* GPU pre-computation of the border opening pipeline.  This is
+       the costliest CPU step inside detectBorders (six O(N) sliding-
+       window morphology passes on the multi-megapixel border binary):
+         - bridge_H → erode_H → dilate_H  produces hOpened
+         - bridge_V → erode_V → dilate_V  produces vOpened
+       gpuMorph runs all three ops of each chain on the GPU as a
+       single command stream (one upload + many dispatches + one
+       download), so the binary never leaves GPU memory between ops.
+       At 3000×4000 this saves roughly an order of magnitude over the
+       CPU sliding-window implementation in borders.js.
+
+       If GPU is unavailable for any reason we just don't precompute —
+       detectBorders falls back to its CPU loops automatically. */
+    const hOpenedPrecomputed = await gpuMorph(S.passes.B.binaryBorder, S.W, S.H, [
+      { op: 'bridge', axis: 'h', radius: p.bMaxGapH },
+      { op: 'erode',  axis: 'h', radius: p.bOpenH  },
+      { op: 'dilate', axis: 'h', radius: p.bOpenH  }
+    ]);
+    const vOpenedPrecomputed = await gpuMorph(S.passes.B.binaryBorder, S.W, S.H, [
+      { op: 'bridge', axis: 'v', radius: p.bMaxGapV },
+      { op: 'erode',  axis: 'v', radius: p.bOpenV  },
+      { op: 'dilate', axis: 'v', radius: p.bOpenV  }
+    ]);
+
     S.passes.B.borders = detectBorders(S.passes.B.binaryBorder, S.W, S.H, {
       // Solid-rule pipeline
       maxGapH         : p.bMaxGapH,
@@ -270,6 +307,10 @@ export async function runPipeline(){
       minCoverage     : p.bMinCoverage,
       smoothingRadius : p.bSmoothing,
       minLenFrac      : p.bMinLenFrac,
+      // Pre-computed GPU outputs — detectBorders uses these directly
+      // and skips its own CPU sliding-window morphology.
+      hOpenedPrecomputed,
+      vOpenedPrecomputed,
       // Dashed-rule detector
       detectDashed       : p.bDetectDashed,
       maxDotSize         : p.bDotMaxSize,
