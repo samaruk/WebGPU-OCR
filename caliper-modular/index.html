@@ -68,6 +68,44 @@
       </div>
 
       <div class="grp">
+        <h3><span class="ix">02b</span> Text lines · clean</h3>
+        <label class="chk"><input type="checkbox" id="tlEnable" checked> Detect text lines and remove all non-text before pass A</label>
+        <div id="tlOpts" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Runs on the rectified image. Character components are filtered, chained into text lines, and only the ink of accepted lines is passed on: pass A runs on this clean binary instead of thresholding the image itself. Chaining (not dilation) is used so that skewed lines are followed and stacked lines never fuse.</div>
+          <div class="ctl">
+            <label>Min glyph height <span class="val" id="vTlMinH">0.30</span> × median</label>
+            <input type="range" id="tlMinH" min="0.05" max="1.00" step="0.05" value="0.30">
+            <div class="hint">Components shorter than this fraction of the median component height are noise: dust, halftone dots, thin rules.</div>
+          </div>
+          <div class="ctl">
+            <label>Max glyph height <span class="val" id="vTlMaxH">2.50</span> × median</label>
+            <input type="range" id="tlMaxH" min="1.20" max="5.00" step="0.10" value="2.50">
+            <div class="hint">Taller components are cut at their ink valleys; whatever is still taller (logos, vertical rules, box borders, uncuttable merges) is removed.</div>
+          </div>
+          <div class="ctl">
+            <label>Max glyph aspect <span class="val" id="vTlMaxAsp">12</span></label>
+            <input type="range" id="tlMaxAsp" min="3" max="40" step="1" value="12">
+            <div class="hint">Width ÷ height above this is rule-shaped. Touching characters in bold or small fonts rarely exceed 6–8.</div>
+          </div>
+          <div class="ctl">
+            <label>Chain gap <span class="val" id="vTlGap">1.50</span> × glyph height</label>
+            <input type="range" id="tlGap" min="0.30" max="4.00" step="0.10" value="1.50">
+            <div class="hint">Two components on the same line are linked when the horizontal gap between them is at most this multiple of the taller one. Word spaces are ~0.3–0.6; column gutters are usually 2+.</div>
+          </div>
+          <div class="ctl">
+            <label>Min vertical overlap <span class="val" id="vTlOverlap">0.35</span> × glyph height</label>
+            <input type="range" id="tlOverlap" min="0.10" max="0.90" step="0.05" value="0.35">
+            <div class="hint">Linked components must overlap vertically by this fraction of the shorter one. Lower follows steeper skew; higher separates tightly stacked lines more strictly.</div>
+          </div>
+          <div class="ctl">
+            <label>Min glyphs per line <span class="val" id="vTlMinChars">1</span></label>
+            <input type="range" id="tlMinChars" min="1" max="6" step="1" value="1">
+            <div class="hint">Chains with fewer components are rejected. At 1, a lone component is still accepted only if it looks like a glyph (height, fill and aspect checks).</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
         <h3><span class="ix">03</span> Morphology · before rotate</h3>
         <div class="ctl">
           <label>Dilation H <span class="val" id="vDilHa">3 px</span></label>
@@ -94,6 +132,52 @@
           <label>Min blob area <span class="val" id="vMin">12 px</span></label>
           <input type="range" id="minA" min="1" max="400" step="1" value="12">
           <div class="hint">Drops speckle noise below this pixel count.</div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3><span class="ix">05</span> Height filter · pass A</h3>
+        <label class="chk"><input type="checkbox" id="heightFilter" checked> One blob = one letter, word or line; keep only text-shaped blobs</label>
+        <div id="heightOpts" style="margin-top:9px">
+          <div class="ctl">
+            <label>Max line height <span class="val" id="vHSplit">1.60</span> × median</label>
+            <input type="range" id="hSplitF" min="1.20" max="3.00" step="0.05" value="1.60">
+            <div class="hint">A blob taller than this multiple of the median blob height spans more than one line: its ink is projected onto Y and cut at every genuine valley, and each piece becomes its own blob. Any blob or piece still taller than this after the cut is a merge that could not be separated and is removed. Blobs wider than the section 06 max aspect ratio (× their height) are also dropped as rule-shaped. Runs on the before-rotate pass only, right after the min-area filter, so contours, hulls, calipers and OBBs are computed on the survivors.</div>
+          </div>
+          <div class="ctl">
+            <label>Min height <span class="val" id="vHMin">0.30</span> × median</label>
+            <input type="range" id="hMinF" min="0.05" max="1.00" step="0.05" value="0.30">
+            <div class="hint">Blobs shorter than this fraction of the median blob height are removed — dots, dashes, speckle and thin horizontal rules.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3><span class="ix">05b</span> Line blobs · pass A</h3>
+        <label class="chk"><input type="checkbox" id="lineBlobs" checked> Fuse the kept word blobs into whole-line blobs</label>
+        <div id="lineOpts" style="margin-top:9px">
+          <div class="ctl">
+            <label>Line dilation H <span class="val" id="vLineDilH">60 px</span></label>
+            <input type="range" id="lineDilH" min="0" max="300" step="5" value="60">
+            <div class="hint">Horizontal growth applied to the blobs that survived section 05, so that neighbouring words on the same line merge into one component. Set it larger than the widest word gap on the page and smaller than the column gutter you want to keep separate.</div>
+          </div>
+          <div class="ctl">
+            <label>Line dilation V <span class="val" id="vLineDilV">1 px</span></label>
+            <input type="range" id="lineDilV" min="0" max="10" step="1" value="1">
+            <div class="hint">Vertical growth. Keep it far below the line gap so stacked lines stay separate. Because rules, borders, logos and multi-line merges were already removed in section 05, the fused components are clean whole text lines; the stage shows each line with its word count.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3><span class="ix">05c</span> Full lines · pass A</h3>
+        <label class="chk"><input type="checkbox" id="fullLines" checked> Join line blobs left to right into one full line per row</label>
+        <div id="fullOpts" style="margin-top:9px">
+          <div class="ctl">
+            <label>Min vertical overlap <span class="val" id="vFullOverlap">0.50</span> × line height</label>
+            <input type="range" id="fullOverlap" min="0.20" max="0.90" step="0.05" value="0.50">
+            <div class="hint">Two line blobs from section 05b are joined into one full line when their ink overlaps vertically by at least this fraction of the shorter one. A join is always refused when the combined height would exceed the section 05 max line height, and also whenever the two pieces overlap horizontally: reading left to right there is exactly one piece at any horizontal position, so pieces that share an x range are different lines no matter how little they are offset. The result is one line per text row spanning from its leftmost to its rightmost piece.</div>
+          </div>
         </div>
       </div>
 

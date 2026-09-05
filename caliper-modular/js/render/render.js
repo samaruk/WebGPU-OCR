@@ -8,6 +8,7 @@
 import { $ } from '../dom/dom.js';
 import { S } from '../state/state.js';
 import { STAGES } from '../config/config.js';
+import { HF_KEPT, HF_TALL, HF_SMALL, HF_RULE, HF_SPLIT, HF_PARENT } from '../heightfilter/heightfilter.js';
 
 /* =====================================================================
    RENDERING  —  draw the active stage to an offscreen canvas
@@ -48,13 +49,23 @@ export function renderStageInto(st,ctx,W,H){
   if(st.kind==='deskewed'){ if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
   if(st.kind==='dewarped'){ if(S.dewarpCanvas) ctx.drawImage(S.dewarpCanvas,0,0); else if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
 
-  const pass = st.pass==='A' ? S.passes.A : st.pass==='C' ? S.passes.C : S.passes.B;
-  if(!pass) return;
-  const base = st.pass==='A' ? S.origCanvas : (S.dewarpCanvas || S.deskewCanvas);
+  const pass = st.pass==='A' ? S.passes.A : st.pass==='C' ? S.passes.C
+             : st.pass==='TL' ? S.textLines : S.passes.B;
   const k=st.kind, N=W*H;
+  if(!pass){
+    if(st.pass==='TL'){
+      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
+      ctx.font=`600 ${Math.max(11,Math.round(Math.min(W,H)/90))}px "JetBrains Mono", monospace`;
+      ctx.fillText('text-line clean disabled (toggle 02b)',W/2,H/2); ctx.textAlign='left';
+    }
+    return;
+  }
+  // pass A and the text-line stage run on the lens- and perspective-
+  // corrected raster, so their boxes only line up with that image.
+  const base = (st.pass==='A'||st.pass==='TL') ? (S.workCanvas || S.origCanvas) : (S.dewarpCanvas || S.deskewCanvas);
 
-  if(k==='binary' || k==='dilated'){              // ---- raster mask ----
-    const mask = k==='binary' ? pass.binary : pass.dilated;
+  if(k==='binary' || k==='dilated' || k==='rawbinary'){   // ---- raster mask ----
+    const mask = k==='binary' ? pass.binary : k==='rawbinary' ? pass.binaryRaw : pass.dilated;
     const id=ctx.createImageData(W,H), d=id.data;
     for(let i=0,j=0;i<N;i++,j+=4){
       const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255;
@@ -176,10 +187,13 @@ export function renderStageInto(st,ctx,W,H){
   }
 
   if(k==='cca' || k==='blobs'){                   // ---- labelled raster ----
+    // Blob Pixels shows every blob that passed the min-area filter,
+    // i.e. the list BEFORE the pass-A height filter.
+    const l2b=pass.lab2blobAll||pass.lab2blob, blobs=pass.blobsAll||pass.blobs;
     const id=ctx.createImageData(W,H), d=id.data;
     for(let i=0,j=0;i<N;i++,j+=4){
       const l=pass.labels[i];
-      const idx = k==='cca' ? l : (l>=0?pass.lab2blob[l]:-1);
+      const idx = k==='cca' ? l : (l>=0?l2b[l]:-1);
       if(idx<0){d[j]=8;d[j+1]=12;d[j+2]=13;}
       else{const c=labColor(idx);d[j]=c[0];d[j+1]=c[1];d[j+2]=c[2];}
       d[j+3]=255;
@@ -187,9 +201,53 @@ export function renderStageInto(st,ctx,W,H){
     ctx.putImageData(id,0,0);
     if(k==='blobs'){
       ctx.lineWidth=sw; ctx.strokeStyle='rgba(166,255,63,.55)';
-      for(const b of pass.blobs)
+      for(const b of blobs)
         ctx.strokeRect(b.bb.x0+.5,b.bb.y0+.5,b.bb.x1-b.bb.x0+1,b.bb.y1-b.bb.y0+1);
     }
+    return;
+  }
+
+  if(k==='heightfilt'){                           // ---- pass-A height filter ----
+    // Raster colour per label status: kept green, split child cyan,
+    // too-tall red, too-short grey, rule-shaped orange.
+    const hf=pass.heightFilter;
+    // HF_PARENT pixels are the bridge rows dropped between two cut lines.
+    const PAL={[HF_KEPT]:[84,221,126],[HF_SPLIT]:[110,220,255],[HF_TALL]:[255,93,108],
+               [HF_SMALL]:[150,150,150],[HF_RULE]:[255,160,40],[HF_PARENT]:[70,70,70]};
+    const STROKE={[HF_KEPT]:'rgba(84,221,126,.55)',[HF_SPLIT]:'rgba(110,220,255,.95)',
+                  [HF_TALL]:'rgba(255,93,108,.9)',[HF_SMALL]:'rgba(170,170,170,.6)',
+                  [HF_RULE]:'rgba(255,160,40,.9)',[HF_PARENT]:'rgba(255,255,255,.35)'};
+    const ls=hf&&hf.labelStatus, l2bAll=pass.lab2blobAll||pass.lab2blob;
+    const id=ctx.createImageData(W,H), d=id.data;
+    for(let i=0,j=0;i<N;i++,j+=4){
+      const l=pass.labels[i];
+      if(l<0 || l2bAll[l]<0){d[j]=8;d[j+1]=12;d[j+2]=13;}      // background / sub-min-area
+      else{ const c=PAL[ls?ls[l]:HF_KEPT]||PAL[HF_KEPT]; d[j]=c[0];d[j+1]=c[1];d[j+2]=c[2]; }
+      d[j+3]=255;
+    }
+    ctx.putImageData(id,0,0);
+    ctx.lineWidth=sw;
+    const items = hf ? hf.items : (pass.blobsAll||pass.blobs).map(b=>({bb:b.bb,status:HF_KEPT}));
+    // parents first (dashed white) so the children's boxes draw on top
+    for(const it of items){ if(it.status!==HF_PARENT) continue;
+      ctx.setLineDash([sw*4,sw*3]); ctx.strokeStyle=STROKE[HF_PARENT];
+      ctx.strokeRect(it.bb.x0+.5,it.bb.y0+.5,it.bb.x1-it.bb.x0+1,it.bb.y1-it.bb.y0+1); }
+    ctx.setLineDash([]);
+    for(const it of items){ if(it.status===HF_PARENT) continue;
+      ctx.strokeStyle=STROKE[it.status]||STROKE[HF_KEPT];
+      ctx.strokeRect(it.bb.x0+.5,it.bb.y0+.5,it.bb.x1-it.bb.x0+1,it.bb.y1-it.bb.y0+1); }
+    // stats badge (top-left)
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5, lh=fs*1.35;
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    const lines = hf
+      ? ['median h: '+Math.round(hf.median)+' px   one line = ['+Math.round(hf.hMin)+', '+Math.round(hf.hMax)+'] px',
+         'kept: '+hf.kept+' / '+hf.total+'   split: '+hf.splitParents+' blobs → '+hf.splitChildren+' lines (cyan)',
+         'dropped: '+hf.small+' short (grey)   '+hf.tall+' multi-line, not cuttable (red)   '+hf.rule+' rule-shaped (orange)']
+      : ['height filter disabled (toggle '+(st.pass==='TL'?'02b':'05')+') — all '+(pass.blobsAll||pass.blobs).length+' blobs kept'];
+    const boxW=Math.max(...lines.map(t=>ctx.measureText(t).width))+pad*2;
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,boxW,lines.length*lh+pad*0.6);
+    ctx.fillStyle='rgba(220,235,240,.97)';
+    lines.forEach((t,i)=>ctx.fillText(t,pad*1.4,pad+fs*0.8+i*lh));
     return;
   }
 
@@ -373,6 +431,119 @@ export function renderStageInto(st,ctx,W,H){
     ctx.fillRect(padW,padW,boxW,boxH);
     ctx.fillStyle='rgba(220,235,240,.97)';
     for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], padW*1.4, padW+fs*0.8+i*lh);
+    return;
+  }
+
+  if(k==='lines'){                                  // ---- pass-A whole-line blobs ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+    const L=pass.lines;
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    if(!L){
+      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
+      ctx.fillText('line blobs disabled (toggle 05b)',W/2,H/2); ctx.textAlign='left';
+      return;
+    }
+    // tint the fused component mask cyan over the darkened page
+    const id=ctx.getImageData(0,0,W,H), d=id.data, m=L.dilated;
+    for(let i=0,j=0;i<N;i++,j+=4){
+      if(!m[i]) continue;
+      d[j]=(d[j]+110)>>1; d[j+1]=(d[j+1]+200)>>1; d[j+2]=(d[j+2]+255)>>1;
+    }
+    ctx.putImageData(id,0,0);
+    // one box + tag per line
+    ctx.lineWidth=sw; ctx.lineJoin='round'; ctx.textBaseline='middle';
+    let nWords=0;
+    L.lines.forEach((ln,i)=>{
+      const b=ln.bb; nWords+=ln.words.length;
+      ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
+      ctx.fillStyle='rgba(110,200,255,.08)'; ctx.fill();
+      ctx.strokeStyle='rgba(110,200,255,.95)'; ctx.stroke();
+      const t='L'+(i+1)+' · '+ln.words.length+'w';
+      const tw=ctx.measureText(t).width, tp=fs*0.3;
+      const tx=Math.max(0,b.x0-tw-tp*3), ty=(b.y0+b.y1)/2;
+      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(tx,ty-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
+      ctx.fillStyle='rgba(120,205,255,.97)'; ctx.fillText(t,tx+tp,ty);
+    });
+    ctx.textBaseline='alphabetic';
+    const txt='lines: '+L.lines.length+'   words: '+nWords;
+    const tw=ctx.measureText(txt).width;
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
+    return;
+  }
+
+  if(k==='tlchains'){                               // ---- text-line chains ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    ctx.lineJoin='round'; ctx.textBaseline='middle';
+    let ai=0, nRej=0, labelled=0;
+    for(const c of pass.chains){
+      if(c.accepted){
+        const col=labColor(ai++), rgb=col[0]+','+col[1]+','+col[2];
+        ctx.lineWidth=sw*0.7; ctx.strokeStyle=`rgba(${rgb},.55)`; ctx.fillStyle=`rgba(${rgb},.18)`;
+        for(const m of c.members){ const b=m.bb;
+          ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
+          ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
+        const b=c.bb; ctx.lineWidth=sw*1.3; ctx.strokeStyle=`rgba(${rgb},.95)`;
+        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
+      } else {
+        nRej++;
+        const b=c.bb; ctx.lineWidth=sw; ctx.strokeStyle='rgba(255,93,108,.9)'; ctx.fillStyle='rgba(255,93,108,.10)';
+        ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
+        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
+        if(labelled<40){ labelled++;
+          const t=c.reason, tw=ctx.measureText(t).width, tp=fs*0.3;
+          ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(b.x1+tp,(b.y0+b.y1)/2-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
+          ctx.fillStyle='rgba(255,160,160,.97)'; ctx.fillText(t,b.x1+tp*2,(b.y0+b.y1)/2); }
+      }
+    }
+    ctx.textBaseline='alphabetic';
+    const s=pass.stats;
+    const txt='glyphs: '+s.kept+' / '+s.components+'   lines: '+s.accepted+' accepted, '+nRej+' rejected   median glyph h: '+Math.round(s.hMed)+' px';
+    const tw=ctx.measureText(txt).width;
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
+    return;
+  }
+
+  if(k==='fulllines'){                              // ---- full lines (pass A / TL) ----
+    if(base) ctx.drawImage(base,0,0);
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+    const R=pass.rows;
+    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
+    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+    if(!R){
+      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
+      ctx.fillText(st.pass==='TL'?'no full lines':pass.lines?'full lines disabled (toggle 05c)':'full lines need line blobs (toggle 05b)',W/2,H/2);
+      ctx.textAlign='left'; return;
+    }
+    ctx.lineJoin='round'; ctx.textBaseline='middle';
+    let nWords=0, nPieces=0;
+    R.rows.forEach((r,i)=>{
+      // faint outline of each joined piece
+      ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(110,200,255,.35)';
+      for(const ln of r.lines){ const b=ln.ink;
+        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
+      // the full line, leftmost → rightmost piece
+      const b=r.ink; nWords+=r.words; nPieces+=r.lines.length;
+      ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
+      ctx.fillStyle=i%2?'rgba(84,221,126,.12)':'rgba(166,255,63,.10)'; ctx.fill();
+      ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.95)'; ctx.stroke();
+      const t='R'+(i+1)+' · '+r.lines.length+'p · '+r.words+'w';
+      const tw=ctx.measureText(t).width, tp=fs*0.3;
+      const tx=Math.max(0,b.x0-tw-tp*3), ty=(b.y0+b.y1)/2;
+      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(tx,ty-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
+      ctx.fillStyle='rgba(166,255,63,.97)'; ctx.fillText(t,tx+tp,ty);
+    });
+    ctx.textBaseline='alphabetic';
+    const txt='full lines: '+R.rows.length+'   pieces: '+nPieces+'   words: '+nWords+'   max line h: '+Math.round(R.hMax)+' px';
+    const tw=ctx.measureText(txt).width;
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
     return;
   }
 

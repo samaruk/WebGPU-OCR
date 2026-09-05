@@ -14,6 +14,9 @@ import { convexHull } from '../hull/hull.js';
 import { minAreaRect } from '../calipers/calipers.js';
 import { obbToPart, splitMergedBoxes } from '../splitter/splitter.js';
 import { filterByHeightDensity } from '../blobfilter/blobfilter.js';
+import { filterBlobsByHeight } from '../heightfilter/heightfilter.js';
+import { buildLineBlobs, buildFullLines } from '../lines/lines.js';
+import { detectTextLines } from '../textlines/textlines.js';
 import { estimateSkew, buildDeskew } from '../skew/skew.js';
 import { rectifyPerspective } from '../rectify/rectify.js';
 import { correctLensDistortion } from '../lens/lens.js';
@@ -31,6 +34,9 @@ export function readParams(){
   return {
     deskew:$('deskew').checked, skewMax:+$('skewMax').value,
     radius:(win-1)>>1, k:+$('k').value, R:+$('rr').value, invert:$('invert').checked,
+    tlEnable:$('tlEnable').checked, tlMinH:+$('tlMinH').value, tlMaxH:+$('tlMaxH').value,
+    tlMaxAsp:+$('tlMaxAsp').value, tlGap:+$('tlGap').value, tlOverlap:+$('tlOverlap').value,
+    tlMinChars:+$('tlMinChars').value,
     dilA:{h:+$('dilHa').value, v:+$('dilVa').value, eh:0, ev:0},                       // before rotate (word detection — no erode, would damage thin glyphs)
     dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value,                                 // after rotate · Pass B (rows)
           eh:+$('rowEroH').value, ev:+$('rowEroV').value},                              //   erode is selectable from the UI; defaults are 0/0 (off) — opt-in for noisy scans
@@ -38,6 +44,9 @@ export function readParams(){
           eh:+$('colEroH').value, ev:+$('colEroV').value},                              //   mirror of Pass B; defaults 0/0 (off)
     conn8:$('conn').querySelector('.on').dataset.c==='8',
     minArea:+$('minA').value,
+    heightFilter:$('heightFilter').checked, hMinF:+$('hMinF').value, hSplitF:+$('hSplitF').value,
+    lineBlobs:$('lineBlobs').checked, lineDilH:+$('lineDilH').value, lineDilV:+$('lineDilV').value,
+    fullLines:$('fullLines').checked, fullOverlap:+$('fullOverlap').value,
     rmNon:$('rmNon').checked,
     maxAspect:+$('asp').value, minFill:+$('fill').value,
     maxLen:+$('len').value, maxArea:+$('amax').value,
@@ -101,7 +110,7 @@ export async function runPass(imgData, dil, p, opts = {}){
   }
   const dilated = await gpuDilate(dil.h,dil.v);
   const cc = cca(dilated,W,H,p.conn8);
-  const blobs=[]; const lab2blob=new Int32Array(cc.count).fill(-1);
+  let blobs=[]; let lab2blob=new Int32Array(cc.count).fill(-1);
   for(let l=0;l<cc.count;l++){
     if(cc.area[l]>=p.minArea){
       lab2blob[l]=blobs.length;
@@ -109,6 +118,23 @@ export async function runPass(imgData, dil, p, opts = {}){
         bb:{x0:cc.bx0[l],y0:cc.by0[l],x1:cc.bx1[l],y1:cc.by1[l]},
         start:cc.start[l]});
     }
+  }
+  /* Optional height filter (section 05, pass A only).  Multi-line blobs
+     are cut at their ink valleys into one blob per line (the label map is
+     rewritten in place), then every blob is kept only if its height sits
+     in the [minF, maxF] × median band and it is not rule-shaped.  Runs
+     BEFORE the geometry stages, so contours / hulls / calipers / OBBs
+     are only computed for single-line, text-shaped blobs.  The full
+     pre-filter list is kept on the pass (blobsAll / lab2blobAll) so the
+     Blob Pixels stage still shows everything and the Height Filter
+     stage can colour the rejects and the split children. */
+  let blobsAll=blobs, lab2blobAll=lab2blob, heightFilter=null;
+  if(opts.heightFilter && blobs.length){
+    const r=filterBlobsByHeight(blobs, cc.labels, binary, W, H, {
+      lo:opts.heightFilter.lo, split:opts.heightFilter.split,
+      maxAspect:opts.heightFilter.maxAspect, minArea:p.minArea, conn8:p.conn8, count:cc.count });
+    blobs=r.blobs; lab2blob=r.lab2blob; lab2blobAll=r.lab2blobAll; blobsAll=r.blobsAll;
+    heightFilter=r.heightFilter;
   }
   for(const bl of blobs) bl.contour=traceContour(cc.labels,W,H,bl.label,bl.start,bl.bb);
   for(const bl of blobs) bl.hull=convexHull(bl.contour);
@@ -131,7 +157,7 @@ export async function runPass(imgData, dil, p, opts = {}){
     bl.accepted=ok; bl.reject=why;
     bl.parts=[obbToPart(r,ok,bl.area,bl.aspect,bl.fill)];   // 1 box; split step may replace
   }
-  return {binary,dilated,labels:cc.labels,ncomp:cc.count,lab2blob,blobs};
+  return {binary,dilated,labels:cc.labels,ncomp:cc.count,lab2blob,blobs,blobsAll,lab2blobAll,heightFilter};
 }
 
 export async function runPipeline(){
@@ -164,11 +190,41 @@ export async function runPipeline(){
       : S.workCanvas.getContext('2d').getImageData(0,0,S.W,S.H);
       t.rect = performance.now() - t0;
       console.log(['lens, rect,S,t', lens, rect, S, t]);
+    // 2b · text-line clean — detect whole text lines on the rectified
+    //      image and drop every non-text component. Pass A then runs on
+    //      the resulting clean binary rather than on its own threshold.
+    t0=performance.now();
+    S.textLines=null;
+    if(p.tlEnable){
+      oStep.textContent='2b · text lines · clean'; await raf();
+      S.textLines = await detectTextLines(S.workImageData, p);
+    }
+    t.textLines=performance.now()-t0;
+
     // 3 · pass A — detection on the corrected, un-rotated image
     t0=performance.now();
     oStep.textContent='3 · pass A — before rotate'; await raf();
-    S.passes.A = await runPass(S.workImageData, p.dilA, p);
+    const passAopts = p.heightFilter ? { heightFilter:{lo:p.hMinF, split:p.hSplitF,
+                                                        maxAspect:p.rmNon ? p.maxAspect : 0} } : {};
+    if(S.textLines) passAopts.binary = S.textLines.binary;
+    S.passes.A = await runPass(S.workImageData, p.dilA, p, passAopts);
     t.passA=performance.now()-t0;
+
+    // 3b · line blobs — fuse the clean pass-A word blobs into whole text
+    //      lines (section 05b). Uses the GPU dilation buffers, which pass B
+    //      re-initialises with its own explicit upload later on.
+    t0=performance.now();
+    S.passes.A.lines=null;
+    if(p.lineBlobs){
+      oStep.textContent='3b · pass A — line blobs'; await raf();
+      S.passes.A.lines = await buildLineBlobs(S.passes.A, {lineDilH:p.lineDilH, lineDilV:p.lineDilV, conn8:p.conn8});
+    }
+    // 3c · full lines — join the line blobs left → right per text row
+    //      (section 05c), never taller than one line.
+    S.passes.A.rows = (p.fullLines && S.passes.A.lines)
+      ? buildFullLines(S.passes.A.lines, S.passes.A.heightFilter ? S.passes.A.heightFilter.hMax : 0, p.fullOverlap)
+      : null;
+    t.lines=performance.now()-t0;
 
     // 4 · skew — measured directly from pass A's accepted word OBBs,
     //     which already sit at the page's true rotation
@@ -382,7 +438,9 @@ export async function runPipeline(){
       `<span class="k">rectify</span> <span class="v">${t.rect.toFixed(0)}ms</span> · `+
       `<span class="k">skew</span> <span class="v">${t.skew.toFixed(0)}ms</span> · `+
       `<span class="k">dewarp</span> <span class="v">${t.dewarp.toFixed(0)}ms</span> · `+
+      `<span class="k">text lines</span> <span class="v">${t.textLines.toFixed(0)}ms</span> · `+
       `<span class="k">pass A</span> <span class="v">${t.passA.toFixed(0)}ms</span> · `+
+      `<span class="k">lines</span> <span class="v">${t.lines.toFixed(0)}ms</span> · `+
       `<span class="k">pass B</span> <span class="v">${t.passB.toFixed(0)}ms</span> · `+
       `<span class="k">pass C</span> <span class="v">${t.passC.toFixed(0)}ms</span>`+
       (splitN?` · <span class="k">split</span> <span class="v">${splitN}</span>`:'');

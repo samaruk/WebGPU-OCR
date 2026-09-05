@@ -25,8 +25,23 @@ export const STAGES=[{id:'source',kind:'source',pass:null,group:'SOURCE',
   desc:'Radial lens distortion removed — barrel/pincushion edge bowing straightened. Identical to the source when no edge bowing is detected.'},
   {id:'rectified',kind:'rectified',pass:null,group:'SOURCE',name:'Rectified',
   desc:'Perspective-corrected image — the page quad warped back to a rectangle. Identical to the source when no confident page perspective is detected.'}];
-for(const [k,n,d] of PASS_KINDS) STAGES.push({id:'A_'+k,kind:k,pass:'A',group:'BEFORE ROTATE · pass A',
-  name:'A · '+n,desc:'Before-rotate pass (original image). '+d});
+for(const [k,n,d] of [
+  ['rawbinary', 'Binary',      'Sauvola binary of the rectified image (section 02 parameters). Components are labelled on this mask after a 1 px heal dilation.'],
+  ['heightfilt','Components',  'Character-level components after the noise filter. Green = kept glyph, cyan = piece cut out of a tall component (parent dashed white, dropped bridge rows dark grey), red = still multi-line after the cut, grey = too short (dust, halftone, thin rules), orange = rule-shaped.'],
+  ['tlchains',  'Text Lines',  'Kept components chained into text lines by horizontal proximity, vertical overlap and comparable height. One colour per accepted line with its member boxes; rejected chains are red and labelled with the reason (lone speck, dash-like, uneven heights, too few glyphs).'],
+  ['fulllines', 'Full Lines',  'Accepted lines joined left to right into one full line per text row — never overlapping horizontally, never taller than one line.'],
+  ['binary',    'Clean Binary','Ink of the accepted text lines only. This is the binary that pass A consumes: every rule, border, logo, halftone region and speck is gone before any word box is fitted.']
+]) STAGES.push({id:'TL_'+k,kind:k,pass:'TL',group:'TEXT LINES · clean',name:'TL · '+n,desc:d});
+for(const [k,n,d] of PASS_KINDS){
+  STAGES.push({id:'A_'+k,kind:k,pass:'A',group:'BEFORE ROTATE · pass A',
+    name:'A · '+n,desc:'Before-rotate pass (rectified image). '+d});
+  if(k==='blobs') STAGES.push({id:'A_heightfilt',kind:'heightfilt',pass:'A',group:'BEFORE ROTATE · pass A',
+    name:'A · Height Filter',desc:'Before-rotate pass (rectified image). One blob must be a single letter, word or line: blobs taller than the max line height are cut at their ink valleys into one blob per line, then every blob is kept only if its height is between the min height and the max line height and it is not rule-shaped (section 05). Green = kept, cyan = line cut out of a multi-line blob (parent outlined dashed white, dropped bridge rows dark grey), red = multi-line merge that could not be cut, grey = too short, orange = rule-shaped. Only green and cyan blobs go on to the contour, hull, calipers and OBB stages.'});
+  if(k==='obb') STAGES.push({id:'A_lines',kind:'lines',pass:'A',group:'BEFORE ROTATE · pass A',
+    name:'A · Line Blobs',desc:'Before-rotate pass (rectified image). The blobs kept by the height filter are fused horizontally (section 05b) and re-labelled, so every connected component is one whole text line. The tinted mask is the fused component; each line box carries its index and the number of word blobs inside it.'});
+  if(k==='obb') STAGES.push({id:'A_fulllines',kind:'fulllines',pass:'A',group:'BEFORE ROTATE · pass A',
+    name:'A · Full Lines',desc:'Before-rotate pass (rectified image). Line blobs from 05b that sit on the same text row are joined left to right into one full line (section 05c). A join is refused when the combined height would exceed the max line height, and whenever two pieces overlap horizontally — reading left to right there is exactly one piece at any x position, so no full line ever contains more than one line. Each row box carries its index, how many line pieces it joined and its word count; the pieces are outlined faintly inside it.'});
+}
 STAGES.push({id:'deskew',kind:'deskewed',pass:null,group:'DESKEW',
   name:'Deskewed',desc:'Rotation-corrected image. Curl dewarping runs on this.'});
 STAGES.push({id:'dewarp',kind:'dewarped',pass:null,group:'DESKEW',

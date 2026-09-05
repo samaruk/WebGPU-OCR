@@ -48,10 +48,21 @@ bind('bDotMinDots','vBDotMinDots',v=>String(v));
 bind('bDotStrideR','vBDotStrideR',v=>(+v).toFixed(1));
 bind('bDashMinLenF','vBDashMinLenF',v=>(+v).toFixed(2));
 bind('rr','vR',v=>(+v).toFixed(2));
+bind('tlMinH','vTlMinH',v=>(+v).toFixed(2));
+bind('tlMaxH','vTlMaxH',v=>(+v).toFixed(2));
+bind('tlMaxAsp','vTlMaxAsp',v=>v);
+bind('tlGap','vTlGap',v=>(+v).toFixed(2));
+bind('tlOverlap','vTlOverlap',v=>(+v).toFixed(2));
+bind('tlMinChars','vTlMinChars',v=>v);
 bind('skewMax','vSkew',v=>v+'°');
 bind('dilHa','vDilHa',v=>v+' px');
 bind('dilVa','vDilVa',v=>v+' px');
 bind('minA','vMin',v=>v+' px');
+bind('hSplitF','vHSplit',v=>(+v).toFixed(2));
+bind('hMinF','vHMin',v=>(+v).toFixed(2));
+bind('lineDilH','vLineDilH',v=>v+' px');
+bind('lineDilV','vLineDilV',v=>v+' px');
+bind('fullOverlap','vFullOverlap',v=>(+v).toFixed(2));
 bind('asp','vAsp',v=>v);
 bind('fill','vFill',v=>(+v).toFixed(2));
 bind('len','vLen',v=>(+v).toFixed(2));
@@ -75,6 +86,14 @@ $('densityFilter').addEventListener('change',e=>{$('densityOpts').style.opacity=
   $('densityOpts').style.pointerEvents=e.target.checked?'auto':'none';});
 $('conn').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   $('conn').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');});
+$('heightFilter').addEventListener('change',e=>{$('heightOpts').style.opacity=e.target.checked?1:.4;
+  $('heightOpts').style.pointerEvents=e.target.checked?'auto':'none';});
+$('lineBlobs').addEventListener('change',e=>{$('lineOpts').style.opacity=e.target.checked?1:.4;
+  $('lineOpts').style.pointerEvents=e.target.checked?'auto':'none';});
+$('fullLines').addEventListener('change',e=>{$('fullOpts').style.opacity=e.target.checked?1:.4;
+  $('fullOpts').style.pointerEvents=e.target.checked?'auto':'none';});
+$('tlEnable').addEventListener('change',e=>{$('tlOpts').style.opacity=e.target.checked?1:.4;
+  $('tlOpts').style.pointerEvents=e.target.checked?'auto':'none';});
 $('rmNon').addEventListener('change',e=>{$('nonOpts').style.opacity=e.target.checked?1:.4;
   $('nonOpts').style.pointerEvents=e.target.checked?'auto':'none';});
 $('deskew').addEventListener('change',e=>{$('deskewOpts').style.opacity=e.target.checked?1:.4;
@@ -128,7 +147,14 @@ saveJson.onclick=()=>{
     image:{width:S.W,height:S.H,source:{width:S.srcW,height:S.srcH},
            resized:!!S.scaledFrom, skewAngleDeg:+S.angle.toFixed(3)},
     params:readParams(),
-    beforeRotate:{ space:'original image',  count:boxesOf(A).length, boxes:boxesOf(A) },
+    textLines: S.textLines ? {
+      space:'rectified image',
+      lines:S.textLines.chains.filter(c=>c.accepted).map(c=>({bbox:ib(c.bb), glyphs:c.members.length})),
+      fullLines:S.textLines.rows.rows.map(r=>({bbox:ib(r.bb), pieces:r.lines.length, glyphs:r.words}))
+    } : null,
+    beforeRotate:{ space:'rectified image', count:boxesOf(A).length, boxes:boxesOf(A),
+      lines:(A.lines?A.lines.lines:[]).map(ln=>({bbox:ib(ln.bb), ink:ib(ln.ink), words:ln.words.length})),
+      fullLines:(A.rows?A.rows.rows:[]).map(r=>({bbox:ib(r.bb), ink:ib(r.ink), pieces:r.lines.length, words:r.words})) },
     afterRotate: { space:'deskewed image',  count:boxesOf(B).length, boxes:boxesOf(B) },
     table: tableJson(B)
   };

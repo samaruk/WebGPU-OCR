@@ -38,6 +38,10 @@ The pipeline runs three geometric correction stages, then three detection passes
 3. **Skew** ([js/skew/skew.js](js/skew/skew.js)). Measures the page tilt from the median angle of pass A's word boxes, with a projection-profile fallback for near-blank pages, and rotates the raster upright.
 4. **Curl dewarp** ([js/dewarp/dewarp.js](js/dewarp/dewarp.js)). Fits the text-line baselines and applies a dense displacement field to straighten the non-planar curl that a homography cannot remove.
 
+### Text-line clean
+
+Before pass A, the **text-line clean** stage ([js/textlines/textlines.js](js/textlines/textlines.js), section 02b) detects whole text lines on the rectified image and removes everything that is not text. Character components from the Sauvola binary are filtered by height, shape and multi-line splitting, then chained into lines by horizontal proximity, vertical overlap and comparable height. Chaining is used instead of a horizontal dilation so that skewed lines are followed and stacked lines never fuse. Lone specks, dash-like fragments and chains with uneven heights are rejected. Accepted lines are joined left to right into full lines, and only their ink is kept in a clean binary. Pass A runs on that clean binary, so rules, borders, logos, halftone and dust never reach the word-box stages.
+
 ### Detection passes
 
 Each pass runs the same chain: Sauvola binarisation → optional erode → separable dilation → connected-component analysis → Moore contour trace → Andrew monotone-chain hull → rotating calipers → minimum-area rectangle. The passes differ only in which image they read and in their dilation kernel.
@@ -48,7 +52,14 @@ Each pass runs the same chain: Sauvola binarisation → optional erode → separ
 | B | deskewed + dewarped | large H, small V | fuses each text line into one blob; gives table rows |
 | C | deskewed + dewarped | small H, large V | fuses each column into one stripe; gives table columns |
 
-Pass A applies the non-character filter, which rejects blobs by aspect ratio, fill ratio, length and area to drop rules and box borders. Passes B and C bypass it, because text lines and column stripes are exactly the shapes it rejects.
+Pass A adds two filters and one extra output that the other passes skip.
+
+- **Height filter** ([js/heightfilter/heightfilter.js](js/heightfilter/heightfilter.js), section 05). Right after the min-area filter it enforces that one blob is a single letter, word or line. Any blob taller than the max line height is cut at its ink valleys into one blob per line, with the bridge rows dropped. Every blob is then kept only if its height is between the min height and the max line height and it is not rule-shaped. A merge that could not be cut is removed, not kept. Dots, thin rules, logos, box borders and multi-line merges therefore never reach the contour, hull, calipers and OBB stages.
+- **Line blobs** ([js/lines/lines.js](js/lines/lines.js), section 05b). The kept word blobs are dilated horizontally and re-labelled, so each connected component is one whole text line. Because the height filter already removed everything that is not text, the strong horizontal growth cannot pull rules or borders into a line. Each line records the word blobs inside it and is included in the JSON export.
+- **Full lines** (same module, section 05c). Line blobs that overlap vertically are joined left to right into one full line per text row. A join is refused when the combined height would exceed the max line height, and whenever the two pieces overlap horizontally, since one line has exactly one piece at any horizontal position. A full line therefore never contains more than one line, even when neighbouring columns are staggered or a fragment sits just above or below a line.
+- **Non-character filter** (section 06) rejects the remaining blobs by aspect ratio, fill ratio, length and area.
+
+Passes B and C bypass both filters, because text lines and column stripes are exactly the shapes they reject.
 
 Two optional clean-up steps run on pass B:
 
@@ -62,14 +73,14 @@ Two optional clean-up steps run on pass B:
 
 ## Stage gallery
 
-Every stage is rendered at full resolution into the gallery under the main viewport. Click any panel to inspect it with pan and zoom. The stage list, in order, lives in [js/config/config.js](js/config/config.js): source, lens-corrected, rectified, the eight pass A stages, deskewed, dewarped, the eight pass B and pass C stages, the height-density filter, five border-debugging stages, and the two table layouts.
+Every stage is rendered at full resolution into the gallery under the main viewport. Click any panel to inspect it with pan and zoom. The stage list, in order, lives in [js/config/config.js](js/config/config.js): source, lens-corrected, rectified, the five text-line clean stages, the eleven pass A stages (height filter, line blobs and full lines included), deskewed, dewarped, the eight pass B and pass C stages, the height-density filter, five border-debugging stages, and the two table layouts.
 
 The border-debugging stages are the fastest way to find out why a rule was missed. If it is absent from **Border · Binary** the problem is the threshold; if it is present in **Border · H-opened** but missing from **Detected Borders**, one of the length, coverage or thickness filters removed it.
 
 ## Exports
 
 - **Stage PNG** downloads the currently displayed stage at full resolution.
-- **OBB JSON** downloads `caliper_obb.json` containing the run parameters, the accepted word boxes for pass A (original image space) and pass B (deskewed image space) with centre, size, angle and four corners, and the detected table with its region, rows, columns, header and footer.
+- **OBB JSON** downloads `caliper_obb.json` containing the run parameters, the detected text lines and full lines from the clean stage, the accepted word boxes, line-blob boxes and full-line boxes for pass A (rectified image space) and the word boxes for pass B (deskewed image space) with centre, size, angle and four corners, and the detected table with its region, rows, columns, header and footer.
 
 ## Project layout
 
@@ -90,6 +101,9 @@ js/rectify/             page quad detection and perspective rectification
 js/skew/                skew estimation and deskew rotation
 js/dewarp/              curl dewarping via displacement field
 js/splitter/            merged two-line box splitting
+js/textlines/           pre-pass-A text-line detection and non-text removal
+js/heightfilter/        blob height filter and multi-line blob splitting (shared by 02b and 05)
+js/lines/               pass A whole-line blobs and left-to-right full lines
 js/blobfilter/          height-density blob filter
 js/borders/             solid and dashed rule detection
 js/table/               row, column and table layout analysis
