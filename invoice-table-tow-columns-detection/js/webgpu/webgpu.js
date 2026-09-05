@@ -116,12 +116,19 @@ fn main(@builtin(global_invocation_id) g:vec3<u32>){
   if(g.x>=P.w || g.y>=P.h){return;}
   let r=i32(P.rad);
   var on=0u;
+  var on1=0u;
   if(P.axis==0u){
     let x=i32(g.x);
     let x0=max(0,x-r); let x1=min(i32(P.w)-1,x+r);
     let base=g.y*P.w;
-    for(var xi=x0; xi<=x1; xi=xi+1){
-      if(src[base+u32(xi)]!=0u){ on=1u; break; }
+    on=src[base+u32(g.x)];
+    for(var xi=x0; xi<x; xi=xi+1){
+      if(src[base+u32(xi)]!=0u){ on1=1u; break; }
+    }
+    if(on1==1u){
+        for(var xi=x+1; xi<=x1; xi=xi+1){
+          if(src[base+u32(xi)]!=0u){ on=1u; break; }
+        }
     }
   } else {
     let y=i32(g.y);
@@ -284,7 +291,7 @@ export function ensureGpuBuffers(N){
     sqH  : d.createBuffer({size:stor,usage:U.STORAGE}),
     sumV : d.createBuffer({size:stor,usage:U.STORAGE}),
     sqV  : d.createBuffer({size:stor,usage:U.STORAGE}),
-    outB : d.createBuffer({size:stor,usage:U.STORAGE|U.COPY_SRC}),
+    outB : d.createBuffer({size:stor,usage:U.STORAGE|U.COPY_SRC|U.COPY_DST}),
     dilA : d.createBuffer({size:stor,usage:U.STORAGE}),
     read : d.createBuffer({size:stor,usage:U.COPY_DST|U.MAP_READ})
   };
@@ -360,6 +367,51 @@ export async function gpuDilate(dilH,dilV){
   for(let i=0;i<N;i++) out[i]=u32[i]?1:0;
   b.read.unmap();
   return out;
+}
+
+/* ----------------------------------------------------------------------
+   Explicitly upload a CPU-side Uint8Array binary into the GPU buffer
+   b.outB (the same buffer gpuErode and gpuDilate read from).
+   --------------------------------------------------------------------
+   Why this exists.  Both Pass B and Pass C dilate the Sauvola binary
+   that lives in b.outB.  If both passes call gpuSauvola separately,
+   the second call's shader writes to b.outB are SUPPOSED to overwrite
+   the first pass's leftover dilated content — but in practice that
+   overwrite has not been reliable, and the second pass has been
+   observed dilating the first pass's wide H-dilated content instead
+   of the Sauvola binary.
+
+   This function lets the pipeline compute Sauvola ONCE and then push
+   the Sauvola binary explicitly into b.outB before each pass's
+   erode + dilation, guaranteeing that B and C start from the same
+   binary and that nothing Pass B writes to b.outB can leak into
+   Pass C.
+
+   It routes through a staging buffer + copyBufferToBuffer command
+   rather than queue.writeBuffer(b.outB, ...) directly.  Wrapping the
+   upload in an explicit submit + onSubmittedWorkDone makes the
+   ordering against subsequent compute submits unambiguous, where
+   direct writeBuffer to b.outB has historically not been. */
+export async function gpuUploadBinary(binary){
+  if(!S.device || !S.gpuBuf) return;
+  const d = S.device, U = GPUBufferUsage;
+  const N = S.W * S.H;
+
+  const staging = d.createBuffer({
+    size : N * 4,
+    usage: U.COPY_SRC | U.COPY_DST
+  });
+
+  const u32 = new Uint32Array(N);
+  for(let i = 0; i < N; i++) u32[i] = binary[i] ? 1 : 0;
+  d.queue.writeBuffer(staging, 0, u32);
+
+  const enc = d.createCommandEncoder();
+  enc.copyBufferToBuffer(staging, 0, S.gpuBuf.outB, 0, N * 4);
+  d.queue.submit([enc.finish()]);
+
+  await d.queue.onSubmittedWorkDone();
+  staging.destroy();
 }
 
 /* ----------------------------------------------------------------------

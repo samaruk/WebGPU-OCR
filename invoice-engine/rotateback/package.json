@@ -1,0 +1,24 @@
+{
+  "name": "invoice-engine",
+  "version": "1.0.0",
+  "description": "GRIDLIFT WebGPU geometry pipeline + InvoiceForensics + PaddleOCR-VL sidecar",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node test/run.js && node test/gpu.js && node test/rectify.js",
+    "test:cpu": "node test/run.js",
+    "test:gpu": "node test/gpu.js",
+    "shaders:dump": "node tools/dump-shaders.mjs",
+    "shaders:validate": "node tools/dump-shaders.mjs && python3 tools/validate-shaders.py",
+    "serve": "npx --yes serve .",
+    "test:rectify": "node test/rectify.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "src",
+    "docs",
+    "README.md"
+  ]
+}

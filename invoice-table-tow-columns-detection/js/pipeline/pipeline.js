@@ -7,7 +7,7 @@
    ====================================================================== */
 import { $, overlay, runBtn, oStep, savePng, saveJson, showError } from '../dom/dom.js';
 import { S } from '../state/state.js';
-import { gpuSauvola, gpuDilate, gpuMorph, gpuErode } from '../webgpu/webgpu.js';
+import { gpuSauvola, gpuDilate, gpuMorph, gpuErode, gpuUploadBinary } from '../webgpu/webgpu.js';
 import { cca } from '../cca/cca.js';
 import { traceContour } from '../contour/contour.js';
 import { convexHull } from '../hull/hull.js';
@@ -32,8 +32,10 @@ export function readParams(){
     deskew:$('deskew').checked, skewMax:+$('skewMax').value,
     radius:(win-1)>>1, k:+$('k').value, R:+$('rr').value, invert:$('invert').checked,
     dilA:{h:+$('dilHa').value, v:+$('dilVa').value, eh:0, ev:0},                       // before rotate (word detection — no erode, would damage thin glyphs)
-    dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value, eh:1, ev:0},                   // after rotate · Pass B (rows): 1-px H-erode strips noise specks before the huge H-dilation amplifies them
-    dilC:{h:+$('colDilH').value, v:+$('colDilV').value, eh:0, ev:1},                   // after rotate · Pass C (columns): 1-px V-erode, mirror of Pass B
+    dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value,                                 // after rotate · Pass B (rows)
+          eh:+$('rowEroH').value, ev:+$('rowEroV').value},                              //   erode is selectable from the UI; defaults are 0/0 (off) — opt-in for noisy scans
+    dilC:{h:+$('colDilH').value, v:+$('colDilV').value,                                 // after rotate · Pass C (columns)
+          eh:+$('colEroH').value, ev:+$('colEroV').value},                              //   mirror of Pass B; defaults 0/0 (off)
     conn8:$('conn').querySelector('.on').dataset.c==='8',
     minArea:+$('minA').value,
     rmNon:$('rmNon').checked,
@@ -68,9 +70,23 @@ export const raf=()=>new Promise(r=>requestAnimationFrame(()=>r()));
 export const fmtDeg=a=>`${a>=0?'+':'−'}${Math.abs(a).toFixed(2)}°`;
 
 
-export async function runPass(imgData, dil, p){
+export async function runPass(imgData, dil, p, opts = {}){
   const W=S.W,H=S.H;
-  const binary  = await gpuSauvola(imgData,p);
+
+  /* Pass B and Pass C share the Sauvola binary but must be independent
+     after that.  When the caller supplies opts.binary (a precomputed
+     Sauvola binary), runPass uploads it explicitly to b.outB so the
+     subsequent erode + dilation starts from that exact binary —
+     regardless of what any previous pass left in b.outB.  When no
+     opts.binary is supplied, the legacy path runs gpuSauvola here
+     (still used by Pass A). */
+  let binary;
+  if(opts.binary){
+    binary = opts.binary;
+    await gpuUploadBinary(binary);
+  } else {
+    binary = await gpuSauvola(imgData,p);
+  }
   // Optional asymmetric erode of the Sauvola binary BEFORE the main
   // dilation, to remove isolated noise specks.  See gpuErode's comment
   // for the trade-off; called only when dil.eh or dil.ev is set so
@@ -225,7 +241,16 @@ export async function runPipeline(){
     t0 = performance.now();
     oStep.textContent = '6 · pass B — after rotate (rows)';
     await raf();
-    S.passes.B = await runPass(S.dewarpImageData, p.dilB, {...p, rmNon: false});
+
+    /* Compute the Sauvola binary ONCE for the dewarped image, shared by
+       Pass B and Pass C (and reused for the border binary when
+       kBorder === k below).  Each pass uploads this binary explicitly
+       to b.outB at the start of its erode + dilation, so Pass B's
+       dilated output cannot leak into Pass C's input. */
+    const passBCbinary = await gpuSauvola(S.dewarpImageData, p);
+
+    S.passes.B = await runPass(S.dewarpImageData, p.dilB, {...p, rmNon: false},
+                               { binary: passBCbinary });
     if(p.splitMerged)   splitMergedBoxes(S.passes.B, p);
     if(p.densityFilter) filterByHeightDensity(S.passes.B, p);
     t.passB = performance.now() - t0;
@@ -254,7 +279,8 @@ export async function runPipeline(){
     t0 = performance.now();
     oStep.textContent = '6c · pass C — after rotate (columns)';
     await raf();
-    S.passes.C = await runPass(S.dewarpImageData, p.dilC, {...p, rmNon: false});
+    S.passes.C = await runPass(S.dewarpImageData, p.dilC, {...p, rmNon: false},
+                               { binary: passBCbinary });
     t.passC = performance.now() - t0;
 
     /* ------------------------------------------------------------------

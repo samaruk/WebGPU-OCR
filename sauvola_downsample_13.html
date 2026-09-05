@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STRATA · multi-scale horizontal erosion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0b0e;
+    --panel:#131319;
+    --panel-2:#191921;
+    --line:#26262f;
+    --ink:#e9e7df;
+    --dim:#8a8a96;
+    --acid:#c6f24e;
+    --acid-dim:#8fa83a;
+    --paper:#ece8df;
+    --ink-bin:#101013;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;}
+  body{
+    background-image:
+      radial-gradient(900px 500px at 85% -10%, rgba(198,242,78,.06), transparent 60%),
+      linear-gradient(transparent 0, transparent 96%, rgba(255,255,255,.02) 100%);
+    min-height:100vh;
+  }
+  .wrap{max-width:1280px;margin:0 auto;padding:28px 20px 80px;}
+  header.top{display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--line);padding-bottom:20px;}
+  .brand{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;}
+  h1{font-family:"Syne",sans-serif;font-weight:800;font-size:clamp(34px,6vw,62px);
+    letter-spacing:-.03em;margin:0;line-height:.92;text-transform:uppercase;}
+  h1 .dot{color:var(--acid);}
+  .tag{color:var(--dim);font-size:12px;letter-spacing:.18em;text-transform:uppercase;}
+  .blurb{color:var(--dim);font-size:13px;max-width:760px;line-height:1.6;}
+  .blurb b{color:var(--ink);font-weight:600;}
+
+  .console{display:grid;grid-template-columns:1fr;gap:18px;margin-top:24px;}
+  @media(min-width:880px){.console{grid-template-columns:340px 1fr;align-items:start;}}
+
+  .panel{background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border:1px solid var(--line);border-radius:14px;padding:18px;}
+  .panel.controls{position:sticky;top:16px;}
+  .sec-title{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--acid-dim);
+    margin:0 0 12px;display:flex;align-items:center;gap:8px;}
+  .sec-title::before{content:"";width:8px;height:8px;background:var(--acid);
+    box-shadow:0 0 10px var(--acid);border-radius:1px;}
+
+  .drop{position:relative;overflow:hidden;border:1.5px dashed var(--line);border-radius:10px;padding:22px 14px;
+    text-align:center;cursor:pointer;transition:.18s;background:rgba(255,255,255,.012);}
+  .drop strong,.drop span{position:relative;pointer-events:none;}
+  .drop:hover,.drop.hot{border-color:var(--acid);background:rgba(198,242,78,.05);}
+  .drop strong{color:var(--ink);}
+  .drop span{display:block;color:var(--dim);font-size:11px;margin-top:6px;letter-spacing:.05em;}
+  input[type=file]{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:2;}
+  .minirow{display:flex;gap:8px;margin-top:10px;}
+  .mini{flex:1;background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:8px;
+    padding:10px 6px;font-family:inherit;font-size:11px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.15s;}
+  .mini:hover,.mini:active{border-color:var(--acid);color:var(--acid);}
+
+  .ctrl{margin:16px 0;}
+  .ctrl label{display:flex;justify-content:space-between;font-size:11px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--dim);margin-bottom:8px;}
+  .ctrl label b{color:var(--acid);font-weight:600;}
+  input[type=range]{-webkit-appearance:none;width:100%;height:3px;background:var(--line);border-radius:3px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;
+    background:var(--acid);cursor:pointer;border:3px solid var(--bg);box-shadow:0 0 0 1px var(--acid);}
+  input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--acid);
+    cursor:pointer;border:3px solid var(--bg);}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
+  .seg button{flex:1;background:transparent;border:none;color:var(--dim);padding:8px 4px;cursor:pointer;
+    font-family:inherit;font-size:11px;letter-spacing:.08em;text-transform:uppercase;transition:.15s;}
+  .seg button.on{background:var(--acid);color:#101010;font-weight:600;}
+
+  .check{display:flex;align-items:center;gap:9px;font-size:11px;color:var(--dim);
+    letter-spacing:.08em;text-transform:uppercase;cursor:pointer;user-select:none;margin-top:6px;}
+  .check input{accent-color:var(--acid);width:15px;height:15px;}
+
+  .run{width:100%;margin-top:8px;padding:14px;border:none;border-radius:10px;cursor:pointer;
+    font-family:"Syne",sans-serif;font-weight:800;font-size:15px;letter-spacing:.05em;text-transform:uppercase;
+    background:var(--acid);color:#0c0c0c;transition:.15s;}
+  .run:disabled{opacity:.4;cursor:not-allowed;}
+  .run:not(:disabled):hover{box-shadow:0 0 24px rgba(198,242,78,.35);transform:translateY(-1px);}
+
+  .status{font-size:11px;color:var(--dim);margin-top:12px;min-height:16px;letter-spacing:.06em;}
+  .status.busy{color:var(--acid);}
+
+  /* results */
+  .stage{min-height:240px;}
+  .empty{display:flex;align-items:center;justify-content:center;height:340px;color:var(--dim);
+    border:1px solid var(--line);border-radius:14px;text-align:center;font-size:13px;line-height:1.7;
+    background:repeating-linear-gradient(45deg,transparent,transparent 12px,rgba(255,255,255,.015) 12px,rgba(255,255,255,.015) 13px);}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;}
+  .card .head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--line);}
+  .card .name{font-size:12px;font-weight:600;letter-spacing:.04em;display:flex;align-items:center;gap:8px;}
+  .swatch{width:11px;height:11px;border-radius:2px;flex:none;box-shadow:0 0 8px currentColor;}
+  .card .dims{font-size:10px;color:var(--dim);letter-spacing:.05em;}
+  .card .body{padding:10px;background:
+    repeating-conic-gradient(#1c1c24 0% 25%, #16161d 0% 50%) 0/18px 18px;}
+  .card canvas{display:block;width:100%;height:auto;border-radius:4px;image-rendering:pixelated;
+    box-shadow:0 6px 20px rgba(0,0,0,.4);}
+  .card .foot{padding:9px 13px;display:flex;justify-content:space-between;align-items:center;gap:8px;border-top:1px solid var(--line);}
+  .card .note{font-size:10px;color:var(--dim);letter-spacing:.04em;}
+  .dl{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:6px;
+    padding:5px 10px;font-family:inherit;font-size:10px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:.15s;}
+  .dl:hover{border-color:var(--acid);color:var(--acid);}
+  .divider{grid-column:1/-1;display:flex;align-items:center;gap:12px;color:var(--acid-dim);
+    font-size:11px;letter-spacing:.2em;text-transform:uppercase;margin-top:6px;}
+  .divider::after{content:"";flex:1;height:1px;background:var(--line);}
+  footer{margin-top:48px;color:var(--dim);font-size:11px;line-height:1.7;border-top:1px solid var(--line);padding-top:20px;}
+  code{background:var(--panel-2);padding:1px 6px;border-radius:4px;color:var(--acid);font-size:11px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>Strata<span class="dot">.</span></h1>
+      <span class="tag">multi-scale horizontal erosion</span>
+    </div>
+    <p class="blurb">
+      Upload an image → <b>Sauvola</b> adaptive binarization → iterative <b>3×1 horizontal min-downsample</b>:
+      every 3 columns collapse to 1, and the group is <b>feature</b> only if all three are feature; if <em>any</em>
+      is non-feature the output is non-feature and the contributing columns are <b>marked back onto the original</b>
+      in that pass's colour. Repeats — width ÷3 each pass, a new colour each time — until the target width is reached.
+      Marks live only on the original; each downstream stays a clean binary fed to the next pass.
+    </p>
+  </header>
+
+  <div class="console">
+    <!-- CONTROLS -->
+    <div class="panel controls">
+      <p class="sec-title">Source</p>
+      <label class="drop" id="drop">
+        <strong>Tap to choose a photo</strong>
+        <span id="fname">png · jpg · webp · heic</span>
+        <input type="file" id="file" accept="image/*">
+      </label>
+      <div class="minirow">
+        <button class="mini" id="sample">▶ Sample image</button>
+        <button class="mini" id="paste">⧉ Paste image</button>
+      </div>
+
+      <p class="sec-title" style="margin-top:22px">Sauvola</p>
+      <div class="ctrl">
+        <label>Window <b id="vWin">25 px</b></label>
+        <input type="range" id="win" min="3" max="61" step="2" value="25">
+      </div>
+      <div class="ctrl">
+        <label>k <b id="vK">0.20</b></label>
+        <input type="range" id="k" min="0" max="0.6" step="0.01" value="0.20">
+      </div>
+      <div class="ctrl">
+        <label>R (std range) <b id="vR">128</b></label>
+        <input type="range" id="R" min="32" max="200" step="1" value="128">
+      </div>
+      <div class="ctrl">
+        <label>Feature = </label>
+        <div class="seg" id="polarity">
+          <button data-p="dark" class="on">Dark ink</button>
+          <button data-p="light">Light</button>
+        </div>
+      </div>
+
+      <p class="sec-title" style="margin-top:22px">Pyramid</p>
+      <div class="ctrl">
+        <label>Axis</label>
+        <div class="seg" id="axis">
+          <button data-a="h" class="on">Horiz</button>
+          <button data-a="v">Vert</button>
+          <button data-a="both">Both</button>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label>Stop at size <b id="vTgt">16 px</b></label>
+        <input type="range" id="tgt" min="1" max="120" step="1" value="16">
+      </div>
+      <div class="ctrl">
+        <label>Max process width <b id="vProc">1000 px</b></label>
+        <input type="range" id="proc" min="500" max="2400" step="50" value="1000">
+      </div>
+      <label class="check"><input type="checkbox" id="stretch" checked> Stretch downstream to source width</label>
+
+      <p class="sec-title" style="margin-top:22px">Lines</p>
+      <label class="check"><input type="checkbox" id="detect"> Detect lines (per axis)</label>
+      <label class="check"><input type="checkbox" id="table"> Detect invoice table</label>
+      <div class="ctrl" style="margin-top:12px">
+        <label>Min H-line length <b id="vMinLenH">60 px</b></label>
+        <input type="range" id="minLenH" min="5" max="600" step="5" value="60">
+      </div>
+      <div class="ctrl">
+        <label>Min V-line length <b id="vMinLenV">60 px</b></label>
+        <input type="range" id="minLenV" min="5" max="600" step="5" value="60">
+      </div>
+      <div class="ctrl">
+        <label>Max line thickness <b id="vThick">8 px</b></label>
+        <input type="range" id="maxThick" min="2" max="40" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>Gap bridge <b id="vGap">6 px</b></label>
+        <input type="range" id="gap" min="0" max="40" step="1" value="6">
+      </div>
+      <div class="ctrl">
+        <label>Assembly level <b id="vAsm">H2</b></label>
+        <input type="range" id="asmLvl" min="1" max="4" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label>Straight ↔ curved split <b id="vStr">0.020</b></label>
+        <input type="range" id="strThr" min="0.002" max="0.15" step="0.002" value="0.020">
+      </div>
+
+      <button class="run" id="go" disabled>Run pipeline</button>
+      <div class="status" id="status">Load an image to begin.</div>
+    </div>
+
+    <!-- RESULTS -->
+    <div class="stage">
+      <div class="empty" id="empty">
+        No output yet.<br>Pick an image and hit <b style="color:var(--acid)">Run pipeline</b>.
+      </div>
+      <div class="grid" id="grid" style="display:none"></div>
+    </div>
+  </div>
+
+  <footer>
+    <b style="color:var(--ink)">Pipeline notes.</b> Sauvola threshold per pixel: <code>T = m·(1 + k·(s/R − 1))</code>
+    over a window, via integral images. Each pass groups 3 adjacent columns of the <i>current</i> binary into 1
+    output column (incomplete edge groups count as non-feature). A pass-<i>p</i> output column maps to a block of
+    3<sup>p</sup> original columns on one row — that whole block is painted with the pass colour wherever the output
+    is non-feature. Everything runs on the CPU; the per-pixel kernels port cleanly to WGSL compute if you want it on
+    WebGPU.
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PALETTE = ['#ff3b30','#ff9f0a','#ffd60a','#34c759','#00d4c4','#3aa0ff','#7a78ff','#cf5bff','#ff4fa3','#9bff5a','#ff7a59'];
+
+const state = { img:null, src:null, W:0, H:0, gray:null, polarity:'dark', axis:'h' };
+
+/* ---------- input ---------- */
+const drop = $('drop'), fileInput = $('file');
+;['dragenter','dragover'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hot');}));
+;['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('hot');}));
+drop.addEventListener('drop',ev=>{const f=ev.dataTransfer.files[0]; if(f) loadFile(f);});
+fileInput.addEventListener('change',ev=>{const f=ev.target.files[0]; if(f) loadFile(f);});
+
+/* ---- picker-free inputs (for sandboxed iOS preview) ---- */
+$('sample').addEventListener('click', genSample);
+$('paste').addEventListener('click', async ()=>{
+  try{
+    const items = await navigator.clipboard.read();
+    for(const it of items){
+      const t = it.types.find(t=>t.startsWith('image/'));
+      if(t){ const blob=await it.getType(t); loadFile(new File([blob],'pasted',{type:t})); return; }
+    }
+    $('status').textContent='No image found in clipboard.';
+  }catch(err){ $('status').textContent='Paste blocked here — use ▶ Sample, or open on desktop.'; }
+});
+document.addEventListener('paste', e=>{
+  const items = e.clipboardData && e.clipboardData.items; if(!items) return;
+  for(const it of items){ if(it.type.startsWith('image/')){ loadFile(it.getAsFile()); break; } }
+});
+
+function wrapText(ctx,text,x,y,maxW,lh){
+  const words=text.split(' '); let line='';
+  for(const w of words){ const t=line+w+' ';
+    if(ctx.measureText(t).width>maxW){ ctx.fillText(line.trim(),x,y); line=w+' '; y+=lh; } else line=t; }
+  ctx.fillText(line.trim(),x,y);
+}
+function genSample(){
+  const W=850,H=1100;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const x=c.getContext('2d');
+  x.fillStyle='#fbfbf8'; x.fillRect(0,0,W,H);
+  x.fillStyle='#141414'; x.textBaseline='top';
+  x.font='bold 34px Georgia, serif'; x.fillText('INVOICE  #2026-0531', 60, 48);
+  x.font='16px Georgia, serif';
+  let y=108;
+  for(const l of ['Acme Geospatial Systems','1042 Raster Way, Tile City',
+                  'Billed to: Strata Imaging Lab','Date 2026-05-31    Terms Net 30']){
+    x.fillText(l,60,y); y+=24;
+  }
+  x.fillRect(60,y+10,W-120,2); y+=32;
+  x.font='15px Georgia, serif';
+  const rows=[['WebGPU compute kernel — WGSL','12','$1,440.00'],
+              ['Sauvola binarization module','8','$960.00'],
+              ['Connected-component labeling','5','$600.00'],
+              ['Oriented bounding rectangles (PCA)','6','$720.00'],
+              ['Tile cache and CDN edge config','4','$480.00'],
+              ['Coordinate projection (ProjNet)','7','$840.00']];
+  for(const [d,q,a] of rows){
+    x.textAlign='left'; x.fillText(d,60,y); x.fillText(q,565,y);
+    x.textAlign='right'; x.fillText(a,W-60,y); y+=30;
+  }
+  x.textAlign='left'; x.fillRect(60,y+6,W-120,1); y+=22;
+  x.font='bold 18px Georgia, serif'; x.textAlign='right'; x.fillText('TOTAL   $5,040.00',W-60,y);
+  x.textAlign='left'; y+=52; x.font='13px Georgia, serif';
+  wrapText(x,'Payment due within thirty days of the invoice date. Late payments accrue interest at the statutory rate. This page was rendered procedurally so the multi-scale horizontal erosion pipeline can run on a device where the native file picker is unavailable.',60,y,W-120,19);
+  const img=new Image();
+  img.onload=()=>{ state.img=img; prepareSource(); $('go').disabled=false;
+    $('fname').textContent='sample image'; $('status').textContent=`Sample ${W}×${H} ready — hit Run.`; };
+  img.src=c.toDataURL();
+}
+
+function loadFile(file){
+  $('fname').textContent = file.name;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = ()=>{ state.img = img; URL.revokeObjectURL(url); prepareSource(); $('go').disabled=false;
+    $('status').textContent = `Loaded ${img.naturalWidth}×${img.naturalHeight}. Ready.`; };
+  img.onerror = ()=>{ $('status').textContent='Could not decode that image.'; };
+  img.src = url;
+}
+
+/* downscale to processing resolution + grayscale */
+function prepareSource(){
+  const maxW = +$('proc').value;
+  const W = Math.min(state.img.naturalWidth, maxW);
+  const H = Math.round(state.img.naturalHeight * (W/state.img.naturalWidth));
+  const c = document.createElement('canvas'); c.width=W; c.height=H;
+  const cx = c.getContext('2d',{willReadFrequently:true});
+  cx.drawImage(state.img,0,0,W,H);
+  const id = cx.getImageData(0,0,W,H);
+  const gray = new Float32Array(W*H);
+  const d = id.data;
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    gray[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+  }
+  state.src=id; state.W=W; state.H=H; state.gray=gray;
+}
+
+/* ---------- Sauvola via integral images ---------- */
+function sauvola(win,k,R,dark){
+  const {W,H,gray}=state;
+  const ww=W+1;
+  const I = new Float64Array(ww*(H+1));
+  const I2 = new Float64Array(ww*(H+1));
+  for(let y=0;y<H;y++){
+    let row=0,row2=0;
+    const o=y*W, oi=(y+1)*ww, oiPrev=y*ww;
+    for(let x=0;x<W;x++){
+      const v=gray[o+x]; row+=v; row2+=v*v;
+      I[oi+x+1]=I[oiPrev+x+1]+row;
+      I2[oi+x+1]=I2[oiPrev+x+1]+row2;
+    }
+  }
+  const r=win>>1;
+  const out=new Uint8Array(W*H);
+  for(let y=0;y<H;y++){
+    const y0=Math.max(0,y-r), y1=Math.min(H-1,y+r);
+    for(let x=0;x<W;x++){
+      const x0=Math.max(0,x-r), x1=Math.min(W-1,x+r);
+      const n=(x1-x0+1)*(y1-y0+1);
+      const A=I[y0*ww+x0], B=I[y0*ww+x1+1], C=I[(y1+1)*ww+x0], D=I[(y1+1)*ww+x1+1];
+      const sum=D-B-C+A;
+      const A2=I2[y0*ww+x0], B2=I2[y0*ww+x1+1], C2=I2[(y1+1)*ww+x0], D2=I2[(y1+1)*ww+x1+1];
+      const sum2=D2-B2-C2+A2;
+      const m=sum/n;
+      const variance=Math.max(0, sum2/n - m*m);
+      const s=Math.sqrt(variance);
+      const T=m*(1 + k*(s/R - 1));
+      const g=gray[y*W+x];
+      // feature(1) if matches polarity, else non-feature(0)
+      out[y*W+x] = dark ? (g < T ? 1:0) : (g > T ? 1:0);
+    }
+  }
+  return out;
+}
+
+/* ---------- 3->1 min passes ----------
+   horizontal: group 3 columns; vertical: group 3 rows.
+   feature only if all three feature; otherwise non-feature + record run for mark-back. */
+function passHoriz(input,w,h){
+  const wo=Math.ceil(w/3);
+  const out=new Uint8Array(wo*h); const runs=[]; // {y,x0,len} in output coords
+  for(let y=0;y<h;y++){
+    const ri=y*w, ro=y*wo; let s=-1;
+    for(let ox=0;ox<wo;ox++){
+      const c=ox*3;
+      const a=c<w?input[ri+c]:0, b=c+1<w?input[ri+c+1]:0, d=c+2<w?input[ri+c+2]:0;
+      const v=(a&&b&&d)?1:0; out[ro+ox]=v;
+      if(!v){ if(s<0)s=ox; } else if(s>=0){ runs.push({y,x0:s,len:ox-s}); s=-1; }
+    }
+    if(s>=0) runs.push({y,x0:s,len:wo-s});
+  }
+  return {out,wo,ho:h,runs};
+}
+function passVert(input,w,h){
+  const ho=Math.ceil(h/3);
+  const out=new Uint8Array(w*ho); const runs=[]; // {x,y0,len} in output coords
+  for(let x=0;x<w;x++){
+    let s=-1;
+    for(let oy=0;oy<ho;oy++){
+      const r=oy*3;
+      const a=r<h?input[r*w+x]:0, b=r+1<h?input[(r+1)*w+x]:0, d=r+2<h?input[(r+2)*w+x]:0;
+      const v=(a&&b&&d)?1:0; out[oy*w+x]=v;
+      if(!v){ if(s<0)s=oy; } else if(s>=0){ runs.push({x,y0:s,len:oy-s}); s=-1; }
+    }
+    if(s>=0) runs.push({x,y0:s,len:ho-s});
+  }
+  return {out,wo:w,ho,runs};
+}
+
+/* ---------- renderers ---------- */
+function binCanvas(binary,w,h,axis,S,stretch){
+  // stretch -> upscale the reduced axis back to source size with nearest-neighbour
+  const {W,H}=state;
+  let outW,outH;
+  if(!stretch){ outW=w; outH=h; }
+  else if(axis==='h'){ outW=W; outH=h; }   // height unchanged in horizontal passes
+  else { outW=w; outH=H; }                  // width unchanged in vertical passes
+  const c=document.createElement('canvas'); c.width=outW; c.height=outH;
+  const cx=c.getContext('2d'); const id=cx.createImageData(outW,outH); const o=id.data;
+  for(let y=0;y<outH;y++){
+    for(let x=0;x<outW;x++){
+      let v;
+      if(!stretch) v=binary[y*w+x];
+      else if(axis==='h') v=binary[y*w + Math.min(w-1, Math.floor(x/S))];
+      else v=binary[Math.min(h-1, Math.floor(y/S))*w + x];
+      const i=(y*outW+x)*4;
+      if(v){ o[i]=16;o[i+1]=16;o[i+2]=19; } else { o[i]=236;o[i+1]=232;o[i+2]=223; }
+      o[i+3]=255;
+    }
+  }
+  cx.putImageData(id,0,0);
+  return c;
+}
+
+let dimmedID=null;
+function buildDimmed(){
+  const {src,W,H}=state;
+  const id=new ImageData(W,H); const s=src.data, o=id.data;
+  for(let i=0;i<s.length;i+=4){
+    o[i]  = s[i]*0.28 + 11*0.72;
+    o[i+1]= s[i+1]*0.28 + 11*0.72;
+    o[i+2]= s[i+2]*0.28 + 14*0.72;
+    o[i+3]=255;
+  }
+  dimmedID=id;
+}
+
+function marksCanvas(passList){
+  // passList: array of {axis, S, runs, color}; draw coarse first, fine last
+  const {W,H}=state;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const cx=c.getContext('2d');
+  cx.putImageData(dimmedID,0,0);
+  const ordered=[...passList].sort((a,b)=>b.S-a.S);
+  for(const pl of ordered){
+    cx.fillStyle=pl.color; const S=pl.S;
+    if(pl.axis==='h'){
+      for(const r of pl.runs){ const x=r.x0*S, w=Math.min(W-x, r.len*S); if(w>0) cx.fillRect(x, r.y, w, 1); }
+    } else {
+      for(const r of pl.runs){ const y=r.y0*S, hh=Math.min(H-y, r.len*S); if(hh>0) cx.fillRect(r.x, y, 1, hh); }
+    }
+  }
+  return c;
+}
+
+/* ---------- card builder ---------- */
+function addCard(grid,{name,dims,note,canvas,color}){
+  const card=document.createElement('div'); card.className='card';
+  const sw = color ? `<span class="swatch" style="background:${color};color:${color}"></span>` : '';
+  card.innerHTML=`<div class="head"><div class="name">${sw}${name}</div><div class="dims">${dims}</div></div>
+    <div class="body"></div>
+    <div class="foot"><span class="note">${note||''}</span></div>`;
+  card.querySelector('.body').appendChild(canvas);
+  const dl=document.createElement('button'); dl.className='dl'; dl.textContent='PNG';
+  dl.onclick=()=>{const a=document.createElement('a');a.download=name.replace(/[^\w]+/g,'_')+'.png';a.href=canvas.toDataURL();a.click();};
+  card.querySelector('.foot').appendChild(dl);
+  grid.appendChild(card);
+}
+function addDivider(grid,t){const d=document.createElement('div');d.className='divider';d.textContent=t;grid.appendChild(d);}
+
+/* build one full pyramid (downstream + mark-back + combined) for a single axis */
+function runAxis(axis,bin0,target,stretch,grid){
+  const {W,H}=state;
+  const isH = axis==='h';
+  let cur=bin0, w=W, h=H, p=0;
+  const passes=[];
+  while((isH?w:h)>target && p<14){
+    p++;
+    const S=Math.pow(3,p);
+    const res = isH ? passHoriz(cur,w,h) : passVert(cur,w,h);
+    if(isH ? res.wo>=w : res.ho>=h) break;     // no-progress guard
+    passes.push({axis,p,S,wo:res.wo,ho:res.ho,out:res.out,runs:res.runs,color:PALETTE[(p-1)%PALETTE.length]});
+    cur=res.out; w=res.wo; h=res.ho;
+  }
+  const word = isH ? 'horizontal' : 'vertical';
+  const pre  = isH ? 'H' : 'V';
+
+  addDivider(grid,`${word} pyramid · ${isH?'3×1':'1×3'} min`);
+  for(const pz of passes){
+    addCard(grid,{name:`${pre}${pz.p} · downstream`,dims:`${pz.wo}×${pz.ho}`,
+      note:`÷3 → block ×${pz.S}${stretch?' · stretched':''}`,
+      canvas:binCanvas(pz.out,pz.wo,pz.ho,axis,pz.S,stretch), color:pz.color});
+  }
+  addDivider(grid,`${word} mark-back on original`);
+  for(const pz of passes){
+    addCard(grid,{name:`${pre}${pz.p} · marks`,dims:`${W}×${H}`,
+      note:`non-feature groups · ${pz.runs.length.toLocaleString()} runs`,
+      canvas:marksCanvas([pz]), color:pz.color});
+  }
+  addCard(grid,{name:`★ combined ${word}`,dims:`${W}×${H}`,
+    note:`all ${passes.length} passes · coarse→fine`,
+    canvas:marksCanvas(passes)});
+  return passes;
+}
+
+/* ---------- line extraction from the combined marks ---------- */
+function buildMarkMask(passes){
+  const {W,H}=state;
+  const mask=new Uint8Array(W*H);
+  for(const pz of passes){
+    const S=pz.S;
+    if(pz.axis==='h'){
+      for(const r of pz.runs){
+        const x0=r.x0*S, x1=Math.min(W,x0+r.len*S), row=r.y*W;
+        for(let x=x0;x<x1;x++) mask[row+x]=1;
+      }
+    }else{
+      for(const r of pz.runs){
+        const y0=r.y0*S, y1=Math.min(H,y0+r.len*S);
+        for(let y=y0;y<y1;y++) mask[y*W+r.x]=1;
+      }
+    }
+  }
+  return mask;
+}
+
+/* separable binary morphology (sliding-window) for gap-bridging */
+function dilH(s,W,H,r){ if(r<=0)return Uint8Array.from(s); const o=new Uint8Array(W*H);
+  for(let y=0;y<H;y++){ const row=y*W; let cnt=0;
+    for(let x=0;x<=Math.min(r,W-1);x++) cnt+=s[row+x];
+    for(let x=0;x<W;x++){ o[row+x]=cnt>0?1:0; const a=x+1+r,rm=x-r;
+      if(a<W)cnt+=s[row+a]; if(rm>=0)cnt-=s[row+rm]; } } return o; }
+function dilV(s,W,H,r){ if(r<=0)return Uint8Array.from(s); const o=new Uint8Array(W*H);
+  for(let x=0;x<W;x++){ let cnt=0;
+    for(let y=0;y<=Math.min(r,H-1);y++) cnt+=s[y*W+x];
+    for(let y=0;y<H;y++){ o[y*W+x]=cnt>0?1:0; const a=y+1+r,rm=y-r;
+      if(a<H)cnt+=s[a*W+x]; if(rm>=0)cnt-=s[rm*W+x]; } } return o; }
+function erH(s,W,H,r){ if(r<=0)return Uint8Array.from(s); const o=new Uint8Array(W*H);
+  for(let y=0;y<H;y++){ const row=y*W; let cnt=0;
+    for(let x=0;x<=Math.min(r,W-1);x++) cnt+=s[row+x];
+    for(let x=0;x<W;x++){ const need=Math.min(W-1,x+r)-Math.max(0,x-r)+1;
+      o[row+x]=(cnt===need)?1:0; const a=x+1+r,rm=x-r;
+      if(a<W)cnt+=s[row+a]; if(rm>=0)cnt-=s[row+rm]; } } return o; }
+function erV(s,W,H,r){ if(r<=0)return Uint8Array.from(s); const o=new Uint8Array(W*H);
+  for(let x=0;x<W;x++){ let cnt=0;
+    for(let y=0;y<=Math.min(r,H-1);y++) cnt+=s[y*W+x];
+    for(let y=0;y<H;y++){ const need=Math.min(H-1,y+r)-Math.max(0,y-r)+1;
+      o[y*W+x]=(cnt===need)?1:0; const a=y+1+r,rm=y-r;
+      if(a<H)cnt+=s[a*W+x]; if(rm>=0)cnt-=s[rm*W+x]; } } return o; }
+
+/* axis-biased closing: bridge gaps ALONG the line direction (±1px perpendicular tolerance) */
+function closeAxis(mask,W,H,axis,gap){
+  if(gap<=0) return Uint8Array.from(mask);
+  let t=mask;
+  if(axis==='h'){ t=dilH(t,W,H,gap); t=dilV(t,W,H,1); t=erH(t,W,H,gap); t=erV(t,W,H,1); }
+  else          { t=dilV(t,W,H,gap); t=dilH(t,W,H,1); t=erV(t,W,H,gap); t=erH(t,W,H,1); }
+  return t;
+}
+
+/* Zhang–Suen thinning to 1px skeleton */
+function thin(src,W,H){
+  const img=Uint8Array.from(src);
+  const clear=[];
+  const P=(x,y)=>(x<0||y<0||x>=W||y>=H)?0:img[y*W+x];
+  function step(sub){
+    clear.length=0;
+    for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){
+      if(img[y*W+x]!==1) continue;
+      const p2=P(x,y-1),p3=P(x+1,y-1),p4=P(x+1,y),p5=P(x+1,y+1),
+            p6=P(x,y+1),p7=P(x-1,y+1),p8=P(x-1,y),p9=P(x-1,y-1);
+      const B=p2+p3+p4+p5+p6+p7+p8+p9;
+      if(B<2||B>6) continue;
+      const s=[p2,p3,p4,p5,p6,p7,p8,p9,p2]; let A=0;
+      for(let i=0;i<8;i++) if(s[i]===0&&s[i+1]===1)A++;
+      if(A!==1) continue;
+      if(sub===0){ if(p2*p4*p6) continue; if(p4*p6*p8) continue; }
+      else      { if(p2*p4*p8) continue; if(p2*p6*p8) continue; }
+      clear.push(y*W+x);
+    }
+    for(const i of clear) img[i]=0;
+    return clear.length>0;
+  }
+  let it=0,changed=true;
+  while(changed && it++<300){ const a=step(0), b=step(1); changed=a||b; }
+  return img;
+}
+
+/* connected components -> per-component "is it a line?" test.
+   line  := skeleton length >= minLen  AND  mean thickness (area/skelLen) <= maxThick.
+   keeps curves/polylines/polygons (follows connectivity); rejects fat text blobs.
+   classifies each kept line straight (cyan) vs curved (amber) by PCA eigen-ratio. */
+function lineComponents(closed,W,H,minLen,maxThick,straightThr){
+  const N=W*H, parent=new Int32Array(N);
+  for(let i=0;i<N;i++) parent[i]=i;
+  const find=i=>{ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; };
+  const uni=(a,b)=>{ a=find(a); b=find(b); if(a!==b) parent[a]=b; };
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=y*W+x; if(!closed[i]) continue;
+    if(x>0       && closed[i-1])   uni(i,i-1);
+    if(y>0       && closed[i-W])   uni(i,i-W);
+    if(y>0&&x>0  && closed[i-W-1]) uni(i,i-W-1);
+    if(y>0&&x<W-1&& closed[i-W+1]) uni(i,i-W+1);
+  }
+  const area=new Map();
+  for(let i=0;i<N;i++){ if(!closed[i]) continue; const r=find(i); area.set(r,(area.get(r)||0)+1); }
+
+  const skel=thin(closed,W,H);
+  const sk=new Map();
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=y*W+x; if(!skel[i]) continue;
+    const r=find(i); let s=sk.get(r);
+    if(!s){ s={n:0,sx:0,sy:0,sxx:0,syy:0,sxy:0}; sk.set(r,s); }
+    s.n++; s.sx+=x; s.sy+=y; s.sxx+=x*x; s.syy+=y*y; s.sxy+=x*y;
+  }
+
+  const decide=new Map(); let nStraight=0,nCurved=0,total=0;
+  for(const [r,s] of sk){
+    const a=area.get(r)||s.n;
+    const thick=a/Math.max(1,s.n);
+    if(s.n<minLen || thick>maxThick){ decide.set(r,0); continue; }   // too short, or a blob
+    const mx=s.sx/s.n, my=s.sy/s.n;
+    const cxx=s.sxx/s.n-mx*mx, cyy=s.syy/s.n-my*my, cxy=s.sxy/s.n-mx*my;
+    const tr=cxx+cyy, dt=cxx*cyy-cxy*cxy, disc=Math.sqrt(Math.max(0,tr*tr/4-dt));
+    const l1=tr/2+disc, l2=tr/2-disc, ratio=l1>1e-6?l2/l1:0;
+    const straight=ratio<straightThr;
+    decide.set(r, straight?1:2);
+    straight?nStraight++:nCurved++; total++;
+  }
+  const cls=new Uint8Array(N);
+  for(let i=0;i<N;i++){ if(!closed[i]) continue; const d=decide.get(find(i))||0; if(d) cls[i]=d; }
+  return {cls,total,nStraight,nCurved};
+}
+
+const STRAIGHT_COL=[0,224,255], CURVED_COL=[255,159,10];
+function renderLines(cls){
+  const {W,H}=state;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const cx=c.getContext('2d');
+  const id=new ImageData(W,H); id.data.set(dimmedID.data); const o=id.data;
+  const put=(p,col)=>{ const i=p*4; o[i]=col[0];o[i+1]=col[1];o[i+2]=col[2];o[i+3]=255; };
+  for(let p=0;p<cls.length;p++){
+    const d=cls[p]; if(!d) continue;
+    const col=d===1?STRAIGHT_COL:CURVED_COL;
+    const x=p%W, y=(p/W)|0;
+    put(p,col); if(x+1<W)put(p+1,col); if(y+1<H)put(p+W,col); if(x+1<W&&y+1<H)put(p+W+1,col);
+  }
+  cx.putImageData(id,0,0);
+  return c;
+}
+function maskCanvas(mask){
+  const {W,H}=state;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const cx=c.getContext('2d'); const id=cx.createImageData(W,H); const o=id.data;
+  for(let p=0;p<mask.length;p++){ const i=p*4;
+    if(mask[p]){o[i]=16;o[i+1]=16;o[i+2]=19;}else{o[i]=236;o[i+1]=232;o[i+2]=223;} o[i+3]=255; }
+  cx.putImageData(id,0,0); return c;
+}
+/* directed-grow neighbour sets: progress along the axis, never pure cross-axis climbing */
+const NB_H=[[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
+const NB_V=[[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+
+/* coarsen bin0 by L horizontal/vertical AND-downsamples (kills cross-axis lines) */
+function levelBinary(bin,W,H,axis,L){
+  let cur=bin, w=W, h=H, lvl=0;
+  for(;lvl<L;){
+    const r = axis==='h' ? passHoriz(cur,w,h) : passVert(cur,w,h);
+    if(axis==='h' ? r.wo>=w : r.ho>=h) break;        // no progress (already minimal)
+    cur=r.out; w=r.wo; h=r.ho; lvl++;
+  }
+  return {bin:cur,w,h,S:Math.pow(3,lvl),lvl};
+}
+/* nearest-neighbour upscale of a level map back to W×H along the reduced axis */
+function upscaleAxis(src,w,h,axis,S){
+  const {W,H}=state; const out=new Uint8Array(W*H);
+  if(axis==='h'){
+    for(let y=0;y<H;y++){ const ly=Math.min(h-1,y), row=y*W, lrow=ly*w;
+      for(let x=0;x<W;x++) out[row+x]=src[lrow+Math.min(w-1,(x/S)|0)]; }
+  }else{
+    for(let y=0;y<H;y++){ const ly=Math.min(h-1,(y/S)|0), row=y*W, lrow=ly*w;
+      for(let x=0;x<W;x++) out[row+x]=src[lrow+Math.min(w-1,x)]; }
+  }
+  return out;
+}
+
+function detectAxisLines(word,axis,asmLvl,minLen,maxThick,gap,straightThr,grid){
+  const {W,H,bin0}=state;
+  // work at H{L}/V{L}: cross-axis lines are eroded away here
+  const {bin,w,h,S,lvl}=levelBinary(bin0,W,H,axis,asmLvl);
+  const coreLen=Math.max(2, Math.round(minLen/S));   // thresholds expressed in level pixels
+  const gapL=Math.max(0, Math.round(gap/S));
+
+  // 1) bridge small breaks along the axis
+  let closed = axis==='h' ? erH(dilH(bin,w,h,gapL),w,h,gapL)
+                          : erV(dilV(bin,w,h,gapL),w,h,gapL);
+  // 2) backbone: axis-aligned runs >= coreLen
+  const core=new Uint8Array(w*h);
+  if(axis==='h'){
+    for(let y=0;y<h;y++){ const row=y*w; let run=0;
+      for(let x=0;x<=w;x++){ if(x<w&&closed[row+x])run++;
+        else{ if(run>=coreLen) for(let kx=x-run;kx<x;kx++) core[row+kx]=1; run=0; } } }
+  }else{
+    for(let x=0;x<w;x++){ let run=0;
+      for(let y=0;y<=h;y++){ if(y<h&&closed[y*w+x])run++;
+        else{ if(run>=coreLen) for(let ky=y-run;ky<y;ky++) core[ky*w+x]=1; run=0; } } }
+  }
+  // 3) grow from cores (no cross-axis climb)
+  const grown=new Uint8Array(w*h);
+  const stack=new Int32Array(w*h); let sp=0;
+  for(let i=0;i<w*h;i++) if(core[i]){ grown[i]=1; stack[sp++]=i; }
+  const NB = axis==='h'?NB_H:NB_V;
+  while(sp>0){
+    const i=stack[--sp], x=i%w, y=(i/w)|0;
+    for(let n=0;n<6;n++){
+      const nx=x+NB[n][0], ny=y+NB[n][1];
+      if(nx<0||ny<0||nx>=w||ny>=h) continue;
+      const j=ny*w+nx;
+      if(closed[j] && !grown[j]){ grown[j]=1; stack[sp++]=j; }
+    }
+  }
+  // 4) label + classify at level resolution
+  const floor=Math.max(2,(coreLen*0.7)|0);
+  const {cls,total,nStraight,nCurved}=lineComponents(grown,w,h,floor,maxThick,straightThr);
+
+  // 5) upscale results back to full resolution for display
+  const grownFull=upscaleAxis(grown,w,h,axis,S);
+  const clsFull=upscaleAxis(cls,w,h,axis,S);
+
+  addDivider(grid,`${word} line extraction · H${lvl} · core ≥ ${minLen}px`);
+  addCard(grid,{name:`${word} core + grown`,dims:`${W}×${H}`,
+    note:`assembled at ${axis==='h'?'H':'V'}${lvl} (${w}×${h}) · gap ${gap}px`,canvas:maskCanvas(grownFull)});
+  addCard(grid,{name:`★ ${word} lines`,dims:`${W}×${H}`,
+    note:`${total} lines · ${nStraight} straight (cyan) · ${nCurved} curved (amber)`,
+    canvas:renderLines(clsFull)});
+  return clsFull;
+}
+
+/* both axes' lines drawn on the real original image */
+function combinedLines(hMask,vMask,grid){
+  const {W,H,src}=state;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const cx=c.getContext('2d');
+  const id=new ImageData(W,H); id.data.set(src.data); const o=id.data;
+  const HC=[0,224,255], VC=[255,59,221], BOTH=[255,255,255];
+  const put=(p,col)=>{ const i=p*4; o[i]=col[0];o[i+1]=col[1];o[i+2]=col[2];o[i+3]=255; };
+  for(let p=0;p<W*H;p++){
+    const hv=hMask&&hMask[p], vv=vMask&&vMask[p];
+    if(!hv&&!vv) continue;
+    const col=(hv&&vv)?BOTH:(hv?HC:VC);
+    const x=p%W, y=(p/W)|0;
+    put(p,col); if(x+1<W)put(p+1,col); if(y+1<H)put(p+W,col); if(x+1<W&&y+1<H)put(p+W+1,col);
+  }
+  cx.putImageData(id,0,0);
+  addDivider(grid,'lines on original · horizontal + vertical');
+  addCard(grid,{name:'★ lines on original',dims:`${W}×${H}`,
+    note:'cyan = horizontal · magenta = vertical · white = both',canvas:c});
+}
+
+/* connected components -> bounding boxes (8-conn) */
+function components(mask,W,H){
+  const N=W*H, parent=new Int32Array(N);
+  for(let i=0;i<N;i++) parent[i]=i;
+  const find=i=>{ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; };
+  const uni=(a,b)=>{ a=find(a); b=find(b); if(a!==b) parent[a]=b; };
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(!mask[i]) continue;
+    if(x>0&&mask[i-1])uni(i,i-1);
+    if(y>0&&mask[i-W])uni(i,i-W);
+    if(y>0&&x>0&&mask[i-W-1])uni(i,i-W-1);
+    if(y>0&&x<W-1&&mask[i-W+1])uni(i,i-W+1); }
+  const m=new Map();
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(!mask[i]) continue;
+    const r=find(i); let s=m.get(r);
+    if(!s){ s={x0:x,y0:y,x1:x,y1:y,n:0}; m.set(r,s); }
+    if(x<s.x0)s.x0=x; if(x>s.x1)s.x1=x; if(y<s.y0)s.y0=y; if(y>s.y1)s.y1=y; s.n++; }
+  return [...m.values()];
+}
+function srcCanvas(){ const {W,H,src}=state; const c=document.createElement('canvas');
+  c.width=W; c.height=H; c.getContext('2d').putImageData(src,0,0); return c; }
+
+/* detect the invoice table — columns first, then build the table from them */
+function detectTable(hMask,vMask,grid){
+  const {W,H,src}=state;
+  const minColH=Math.max(20,0.10*H);
+  const cols=(vMask?components(vMask,W,H):[]).filter(s=>(s.y1-s.y0)>=minColH);
+
+  addDivider(grid,'table detection');
+  // --- card 1: every possible column ---
+  {
+    const c=document.createElement('canvas'); c.width=W; c.height=H; const cx=c.getContext('2d');
+    const id=new ImageData(W,H); id.data.set(src.data); cx.putImageData(id,0,0);
+    cx.strokeStyle='#ff3bdd'; cx.lineWidth=Math.max(2,Math.round(W/600));
+    for(const s of cols){ const xc=(s.x0+s.x1)/2; cx.beginPath(); cx.moveTo(xc,s.y0); cx.lineTo(xc,s.y1); cx.stroke(); }
+    addCard(grid,{name:'possible columns',dims:`${W}×${H}`,
+      note:`${cols.length} candidate column lines`,canvas:c});
+  }
+
+  if(cols.length<2){
+    addCard(grid,{name:'★ invoice table',dims:`${W}×${H}`,
+      note:'need ≥2 aligned columns; no bordered table found',canvas:srcCanvas()});
+    return;
+  }
+
+  // --- find the vertical band where the most columns overlap (the table body) ---
+  const cov=new Float64Array(H+1);
+  for(const s of cols){ cov[s.y0]++; cov[Math.min(H,s.y1+1)]--; }
+  for(let y=1;y<=H;y++) cov[y]+=cov[y-1];
+  let ymax=0; for(let y=1;y<H;y++) if(cov[y]>cov[ymax]) ymax=y;
+  const maxCov=cov[ymax], thr=Math.max(2,Math.ceil(maxCov*0.5));
+  let by0=ymax, by1=ymax;
+  while(by0>0   && cov[by0-1]>=thr) by0--;
+  while(by1<H-1 && cov[by1+1]>=thr) by1++;
+
+  // columns that cross that band == table columns
+  const tcols=cols.filter(s=> Math.min(s.y1,by1)-Math.max(s.y0,by0) > 0.3*Math.max(1,by1-by0));
+  let tX0=Math.min(...tcols.map(s=>(s.x0+s.x1)/2)), tX1=Math.max(...tcols.map(s=>(s.x0+s.x1)/2));
+  let tY0=Math.min(...tcols.map(s=>s.y0)),          tY1=Math.max(...tcols.map(s=>s.y1));
+
+  // horizontal rules spanning the column block become rows
+  const rows=(hMask?components(hMask,W,H):[]).filter(s=>{
+    const yc=(s.y0+s.y1)/2;
+    return yc>=tY0-6 && yc<=tY1+6 && (Math.min(s.x1,tX1)-Math.max(s.x0,tX0))>0.5*(tX1-tX0);
+  });
+
+  // --- card 2: table built from columns ---
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const cx=c.getContext('2d');
+  const id=new ImageData(W,H); id.data.set(src.data); cx.putImageData(id,0,0);
+  cx.strokeStyle='#ff3bdd'; cx.lineWidth=Math.max(2,Math.round(W/600));
+  for(const s of tcols){ const xc=(s.x0+s.x1)/2; cx.beginPath(); cx.moveTo(xc,tY0); cx.lineTo(xc,tY1); cx.stroke(); }
+  cx.strokeStyle='#00e0ff';
+  for(const s of rows){ const yc=(s.y0+s.y1)/2; cx.beginPath(); cx.moveTo(tX0,yc); cx.lineTo(tX1,yc); cx.stroke(); }
+  cx.strokeStyle='#c6f24e'; cx.lineWidth=Math.max(3,Math.round(W/300));
+  cx.strokeRect(tX0,tY0,tX1-tX0,tY1-tY0);
+  addCard(grid,{name:'★ invoice table',dims:`${W}×${H}`,
+    note:`${tcols.length} columns × ${rows.length} rows · bbox ${Math.round(tX1-tX0)}×${Math.round(tY1-tY0)}`,
+    canvas:c});
+}
+
+/* enclosed cells (<td>): holes in the H∪V border grid that don't touch the image edge */
+function detectCells(hMask,vMask,grid){
+  const {W,H,src}=state; const N=W*H;
+  const border=new Uint8Array(N);
+  for(let i=0;i<N;i++) if((hMask&&hMask[i])||(vMask&&vMask[i])) border[i]=1;
+  const S=Math.pow(3,+$('asmLvl').value);
+  const r=Math.max(3,Math.ceil(S/2));                       // seal corner gaps from the H2/V2 grid
+  const sealed=dilV(dilH(border,W,H,r),W,H,r);
+
+  const parent=new Int32Array(N);
+  for(let i=0;i<N;i++) parent[i]=i;
+  const find=i=>{ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; };
+  const uni=(a,b)=>{ a=find(a); b=find(b); if(a!==b) parent[a]=b; };
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(sealed[i]) continue;  // 4-conn background
+    if(x>0&&!sealed[i-1]) uni(i,i-1);
+    if(y>0&&!sealed[i-W]) uni(i,i-W); }
+  // roots that reach the image edge = outside
+  const outside=new Set();
+  for(let x=0;x<W;x++){ if(!sealed[x])outside.add(find(x)); const b=(H-1)*W+x; if(!sealed[b])outside.add(find(b)); }
+  for(let y=0;y<H;y++){ const l=y*W,rr=y*W+W-1; if(!sealed[l])outside.add(find(l)); if(!sealed[rr])outside.add(find(rr)); }
+  // bbox of each enclosed hole
+  const cm=new Map();
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(sealed[i]) continue;
+    const rt=find(i); if(outside.has(rt)) continue;
+    let s=cm.get(rt); if(!s){ s={x0:x,y0:y,x1:x,y1:y,n:0}; cm.set(rt,s); }
+    if(x<s.x0)s.x0=x; if(x>s.x1)s.x1=x; if(y<s.y0)s.y0=y; if(y>s.y1)s.y1=y; s.n++; }
+  const minA=Math.max(80,S*S);
+  const cells=[...cm.values()].filter(s=> s.n>=minA && (s.x1-s.x0)>=6 && (s.y1-s.y0)>=6);
+
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const cx=c.getContext('2d');
+  const id=new ImageData(W,H); id.data.set(src.data); cx.putImageData(id,0,0);
+  cx.lineWidth=Math.max(1,Math.round(W/900));
+  cells.forEach((s,idx)=>{
+    const col=PALETTE[idx%PALETTE.length];
+    const x=Math.max(0,s.x0-r), y=Math.max(0,s.y0-r);            // undo seal shrink
+    const w=Math.min(W,s.x1+r)-x, h=Math.min(H,s.y1+r)-y;
+    cx.fillStyle=col+'33'; cx.fillRect(x,y,w,h);
+    cx.strokeStyle=col; cx.strokeRect(x+0.5,y+0.5,w-1,h-1);
+  });
+  addCard(grid,{name:'★ table cells (td)',dims:`${W}×${H}`,
+    note:`${cells.length} enclosed cells`,canvas:c});
+}
+
+/* ---------- run ---------- */
+$('go').addEventListener('click',()=>{
+  if(!state.img) return;
+  $('go').disabled=true;
+  $('status').textContent='Processing…'; $('status').classList.add('busy');
+  requestAnimationFrame(()=>requestAnimationFrame(runPipeline));
+});
+
+function runPipeline(){
+  try{
+    prepareSource();           // re-read in case proc width changed
+    buildDimmed();
+    const {W,H}=state;
+    const win=+$('win').value, k=+$('k').value, R=+$('R').value;
+    const dark=state.polarity==='dark';
+    const target=+$('tgt').value;
+    const stretch=$('stretch').checked;
+
+    const grid=$('grid'); grid.innerHTML='';
+    $('empty').style.display='none'; grid.style.display='grid';
+
+    // source
+    const srcC=document.createElement('canvas'); srcC.width=W; srcC.height=H;
+    srcC.getContext('2d').putImageData(state.src,0,0);
+    addCard(grid,{name:'00 · source',dims:`${W}×${H}`,note:'processing resolution',canvas:srcC});
+
+    // sauvola (level 0)
+    const bin0=sauvola(win,k,R,dark);
+    state.bin0=bin0;
+    addCard(grid,{name:'00 · sauvola',dims:`${W}×${H}`,
+      note:`feature = ${dark?'dark ink':'light'} · win ${win}, k ${k.toFixed(2)}`,
+      canvas:binCanvas(bin0,W,H,'h',1,false)});
+
+    // pyramid(s)
+    const axisMode=state.axis;
+    let hP=[], vP=[];
+    if(axisMode==='h'||axisMode==='both') hP=runAxis('h',bin0,target,stretch,grid);
+    if(axisMode==='v'||axisMode==='both') vP=runAxis('v',bin0,target,stretch,grid);
+    const total=hP.length+vP.length;
+
+    if($('detect').checked || $('table').checked){
+      const mt=+$('maxThick').value, gp=+$('gap').value, st=+$('strThr').value, lv=+$('asmLvl').value;
+      let hMask=null, vMask=null;
+      if(axisMode==='h'||axisMode==='both') hMask=detectAxisLines('horizontal','h',lv,+$('minLenH').value,mt,gp,st,grid);
+      if(axisMode==='v'||axisMode==='both') vMask=detectAxisLines('vertical','v',lv,+$('minLenV').value,mt,gp,st,grid);
+      if(hMask||vMask) combinedLines(hMask,vMask,grid);
+      if($('table').checked && (hMask||vMask)){ detectTable(hMask,vMask,grid); detectCells(hMask,vMask,grid); }
+    }
+
+    $('status').textContent=`Done · ${total} pass${total===1?'':'es'} across ${axisMode==='both'?'both axes':axisMode==='h'?'horizontal':'vertical'}.`;
+  }catch(err){
+    console.error(err);
+    $('status').textContent='Error: '+err.message;
+  }finally{
+    $('status').classList.remove('busy');
+    $('go').disabled=false;
+  }
+}
+
+/* ---------- control wiring ---------- */
+$('win').oninput=e=>$('vWin').textContent=e.target.value+' px';
+$('k').oninput  =e=>$('vK').textContent=(+e.target.value).toFixed(2);
+$('R').oninput  =e=>$('vR').textContent=e.target.value;
+$('tgt').oninput=e=>$('vTgt').textContent=e.target.value+' px';
+$('proc').oninput=e=>$('vProc').textContent=e.target.value+' px';
+$('minLenH').oninput=e=>$('vMinLenH').textContent=e.target.value+' px';
+$('minLenV').oninput=e=>$('vMinLenV').textContent=e.target.value+' px';
+$('maxThick').oninput=e=>$('vThick').textContent=e.target.value+' px';
+$('gap').oninput=e=>$('vGap').textContent=e.target.value+' px';
+$('asmLvl').oninput=e=>$('vAsm').textContent='H'+e.target.value;
+$('strThr').oninput=e=>$('vStr').textContent=(+e.target.value).toFixed(3);
+document.querySelectorAll('#polarity button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#polarity button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); state.polarity=b.dataset.p;
+});
+document.querySelectorAll('#axis button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#axis button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); state.axis=b.dataset.a;
+});
+</script>
+</body>
+</html>
