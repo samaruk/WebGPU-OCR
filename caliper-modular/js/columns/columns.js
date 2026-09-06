@@ -1,287 +1,460 @@
 /* ======================================================================
-   COLUMN DETECTION  ·  table band, gutters, columns and cells, pre pass A
-   Why: once the text-line clean stage has produced trustworthy rows (full
+   COLUMN DETECTION  ·  table band, gutters, columns and cells
+   Why: once the text-line stage has produced trustworthy rows (full
    lines) with a known page tilt, the column structure of the invoice can
-   be read directly from where the glyphs are and are not. Doing it here,
-   before any word box is fitted, gives every later stage the table
-   skeleton for free and does not depend on rules or borders at all.
+   be read directly from where the glyphs are and are not. It does not
+   depend on rules or borders, but uses them as priors when present.
 
    Everything is computed in the DE-SKEWED frame of the text-line stage:
        x' = x + slope·y        y' = y − slope·x
    so a tilted photo does not smear a gutter across neighbouring columns.
 
    Method
-     1. Row bands. Every full line is a row; a row with at least
-        minPieces pieces is tabular. Runs of tabular rows (tolerating up
-        to rowGap non-tabular rows in between — blank or wrapped cells)
-        are found; the longest is the seed of the TABLE BAND. An invoice
-        has exactly one item table, so a watermark, a pen line or a paper
-        fold that damages a few rows must not cut it in two: every other
-        run within mergeGap rows of the band whose glyphs respect the
-        band's gutters (column-compatible) is merged into it, the damaged
-        rows in between included, and the gutters are recomputed from the
-        whole table. The band also grows through every adjacent tabular,
-        column-compatible row, so a seed that stopped early (a border box
-        ending at a crease, a run cut by a damaged row) is completed. Rows
-        glued to the band's ends that cross most of its gutters (a
-        paragraph, a summary block) are trimmed off. Rows above the band
-        are HEADER, rows below FOOTER.
-     2. Coverage profile. For every 1 px column x' inside the band, count
-        how many band rows have a GLYPH covering it. Glyph-level (not
-        piece-level) coverage matters: two table columns whose cells were
-        chained into one piece (invoice no + product name) still show a
-        gap that lines up in every row, while ordinary word spaces fall at
-        different x' in every row and never line up.
-     3. Gutters. Maximal runs of x' where the coverage is at most
-        gutterCov × rows and the run is at least gutterW × glyph height
-        wide (wider than a word space). The page edges are not gutters.
-     4. Columns. The intervals between gutters, each trimmed to the glyphs
-        it actually contains, classified left / right / centre aligned
-        from the spread of the cell edges across rows.
-     5. Cells. Every glyph of every band row goes to the column under its
+     1. Row bands. Every full line is a row; a row with at least minPieces
+        pieces is tabular. Runs of tabular rows (tolerating rowGap non-
+        tabular rows in between) are found and scored by column structure
+        (gutters × rows). A table box from the border stage is folded in
+        afterwards — its rows join the band when they touch it — but never
+        replaces the text-based search. Rows glued to the band's ends that
+        cross a third or more of its gutters (a paragraph, a summary block)
+        are trimmed off; the band then grows through every adjacent
+        tabular, column-compatible row (a seed that stopped early at a
+        crease or a damaged row is completed), and every other run within
+        mergeGap rows whose glyphs respect the gutters is merged in, the
+        damaged rows in between included. One invoice, one item table.
+        Rows above the band are HEADER, rows below FOOTER.
+     2. Coverage profile. For every 1 px column x' inside the band, how
+        many band rows have a GLYPH covering it. Glyph-level, not piece-
+        level: two columns whose cells were chained into one piece still
+        show a gap that lines up in every row, while ordinary word spaces
+        fall at different x' in every row and never line up.
+     3. Gutters = valleys of the profile: clear runs almost no row crosses,
+        or deep valleys at most 42 % of the neighbouring peaks (a word-
+        space-sized gap that lines up in every row). Found recursively so
+        peaks are local and a sparse column is not swallowed. Column
+        boundaries from the border stage are added where the coverage
+        allows.
+     4. Columns = intervals between gutters, trimmed to content, classified
+        left / right / centre aligned from the spread of the cell edges.
+     5. Cells: every glyph of every band row goes to the column under its
         centre; the union of a row's glyphs in a column is the cell. A
-        piece that spanned two columns is thereby split correctly.
+        piece that spanned two columns is thereby split correctly. Pieces
+        the full-line join left out (a one-piece row of their own, or a
+        piece outside every row) are first folded into the band row they
+        sit on, so no text inside the table is left without a cell.
    ====================================================================== */
 
-const sd=a=>{ if(a.length<2) return 0; const m=a.reduce((s,x)=>s+x,0)/a.length;
+import { rebuildRow } from '../lines/lines.js';
+import { median } from '../morph/morph.js';
+
+const stdDev=a=>{ if(a.length<2) return 0; const m=a.reduce((s,x)=>s+x,0)/a.length;
   return Math.sqrt(a.reduce((s,x)=>s+(x-m)*(x-m),0)/a.length); };
 
-/* coverage profile + gutters for a set of rows (steps 2–3) */
-function gutterProfile(band,p,hMed){
+/* Coverage profile + gutters for a set of rows (steps 2–3).
+   params: {minGutterWidth (× glyph height), maxGutterCoverage (× rows)}  */
+function gutterProfile(bandRows,params,glyphHeight){
   let X0=1/0,X1=-1/0;
-  for(const r of band) for(const g of r.glyphs){ if(g.x0<X0)X0=g.x0; if(g.x1>X1)X1=g.x1; }
-  if(X0===1/0) return {X0:0,X1:0,cov:new Uint16Array(1),nRows:band.length,thr:0,minW:0,gutters:[]};
+  for(const r of bandRows) for(const g of r.glyphs){ if(g.x0<X0)X0=g.x0; if(g.x1>X1)X1=g.x1; }
+  if(X0===1/0) return {X0:0,X1:0,coverage:new Uint16Array(1),rowCount:bandRows.length,clearMax:0,minWidth:0,gutters:[]};
   X0=Math.floor(X0); X1=Math.ceil(X1);
-  const nb=Math.max(1,X1-X0+1), cov=new Uint16Array(nb), mask=new Uint8Array(nb);
-  for(const r of band){
-    mask.fill(0);
-    for(const g of r.glyphs){
-      // g.x1 is exclusive: covered bins are floor(x0) .. ceil(x1)-1
-      const a=Math.max(0,Math.floor(g.x0)-X0), b=Math.min(nb-1,Math.ceil(g.x1)-1-X0);
-      for(let x=a;x<=b;x++) mask[x]=1;
+  const bins=Math.max(1,X1-X0+1), coverage=new Uint16Array(bins), rowMask=new Uint8Array(bins);
+  for(const r of bandRows){
+    rowMask.fill(0);
+    for(const g of r.glyphs){                      // g.x1 is exclusive: bins floor(x0) .. ceil(x1)-1
+      const a=Math.max(0,Math.floor(g.x0)-X0), b=Math.min(bins-1,Math.ceil(g.x1)-1-X0);
+      for(let x=a;x<=b;x++) rowMask[x]=1;
     }
-    for(let x=0;x<nb;x++) cov[x]+=mask[x];
+    for(let x=0;x<bins;x++) coverage[x]+=rowMask[x];
   }
-  const nR=band.length, thr=p.clGutterCov*nR, minW=Math.max(2,p.clGutterW*hMed);
-  /* --- gutters = valleys of the profile ------------------------------
-     Two kinds qualify:
-       · absolute: coverage ≤ thr (almost no row has ink there);
-       · relative: coverage ≤ 42 % of the lower of the two neighbouring
-         peaks. Columns separated only by a word-space-sized gap (plus a
-         printed rule) show up this way: the gap sits at the same x in
-         every row, so the profile drops deeply there, whereas word
-         spaces inside a column fall at different x per row and merely
-         dent it. Comparing against the LOCAL peaks keeps a sparse column
-         (few filled cells) from being swallowed by the gaps around it.
-     The search is recursive: find the deepest valid valley of a range,
-     widen it to the run that stays near the minimum, then search both
-     sides again. A candidate must leave at least one glyph width of
-     column on either side.                                             */
-  const sm=new Float32Array(nb);
-  for(let x=0;x<nb;x++){ const a=cov[Math.max(0,x-1)], b=cov[x], c=cov[Math.min(nb-1,x+1)]; sm[x]=(a+b+c)/3; }
-  const minCol=Math.max(3,Math.round(0.8*hMed));
+  const rowCount=bandRows.length, clearMax=params.maxGutterCoverage*rowCount;
+  const minWidth=Math.max(2,params.minGutterWidth*glyphHeight);
+  /* valleys: candidates on a lightly smoothed profile, run width on the
+     raw one (smoothing blurs the edges of a narrow gap) */
+  const smooth=new Float32Array(bins);
+  for(let x=0;x<bins;x++){ smooth[x]=(coverage[Math.max(0,x-1)]+coverage[x]+coverage[Math.min(bins-1,x+1)])/3; }
+  const minColumn=Math.max(3,Math.round(0.8*glyphHeight));
   const gutters=[];
-  const rec=(a,b)=>{
-    if(b-a+1 < 2*minCol+minW) return;
-    // local minima of the smoothed profile, deepest first
-    const cands=[];
-    for(let x=a+minCol;x<=b-minCol;x++) if(sm[x]<=sm[x-1] && sm[x]<=sm[x+1]) cands.push(x);
-    cands.sort((u,v)=>sm[u]-sm[v]);
-    for(const bi of cands){
-      const bv=sm[bi];
-      let lp=0,rp=0; for(let x=a;x<bi;x++) if(sm[x]>lp) lp=sm[x]; for(let x=bi+1;x<=b;x++) if(sm[x]>rp) rp=sm[x];
-      const peak=Math.min(lp,rp);
-      if(!(bv<=thr || (peak>0 && bv<=0.42*peak))) continue;
-      // the run that stays near the minimum — measured on the RAW
-      // profile: smoothing blurs the edges of a narrow gap and would
-      // report a 5 px gap as 3 px
-      const lim=Math.max(bv+0.05*nR, thr);
-      let s=bi,e=bi; while(s-1>=a && cov[s-1]<=lim) s--; while(e+1<=b && cov[e+1]<=lim) e++;
-      if(e-s+1>=minW && s>0 && e<nb-1) gutters.push({x0:X0+s, x1:X0+e, w:e-s+1, rel:bv>thr, depth:peak?bv/peak:0});
-      rec(a,s-1); rec(e+1,b);
+  const search=(a,b)=>{
+    if(b-a+1 < 2*minColumn+minWidth) return;
+    const candidates=[];
+    for(let x=a+minColumn;x<=b-minColumn;x++) if(smooth[x]<=smooth[x-1] && smooth[x]<=smooth[x+1]) candidates.push(x);
+    candidates.sort((u,v)=>smooth[u]-smooth[v]);
+    for(const at of candidates){
+      const depth=smooth[at];
+      let leftPeak=0,rightPeak=0;
+      for(let x=a;x<at;x++) if(smooth[x]>leftPeak) leftPeak=smooth[x];
+      for(let x=at+1;x<=b;x++) if(smooth[x]>rightPeak) rightPeak=smooth[x];
+      const peak=Math.min(leftPeak,rightPeak);
+      if(!(depth<=clearMax || (peak>0 && depth<=0.42*peak))) continue;
+      const limit=Math.max(depth+0.05*rowCount, clearMax);   // the run that stays near the minimum
+      let s=at,e=at; while(s-1>=a && coverage[s-1]<=limit) s--; while(e+1<=b && coverage[e+1]<=limit) e++;
+      // too narrow to be a gutter: try the next valley of this stretch —
+      // a needle at the bottom of a wider trough is rejected, the trough's
+      // shoulder is the next candidate and is measured on its own; the
+      // stretch is not split at the needle, which would hide that shoulder
+      // inside the margin no candidate may lie in
+      // a RELATIVE valley (deep but not clear) is weaker evidence and must
+      // be half as wide again: word gaps inside a name column line up over
+      // a few rows and are exactly one word space wide
+      if(e-s+1 < (depth>clearMax ? 1.5*minWidth : minWidth)) continue;
+      if(s>0 && e<bins-1) gutters.push({x0:X0+s, x1:X0+e, width:e-s+1, relative:depth>clearMax});
+      search(a,s-1); search(e+1,b);
       return;
     }
   };
-  rec(0,nb-1);
+  search(0,bins-1);
   gutters.sort((u,v)=>u.x0-v.x0);
-  return {X0,X1,cov,nRows:nR,thr,minW,gutters};
+  return {X0,X1,coverage,rowCount,clearMax,minWidth,gutters};
 }
 
-/* does a row respect the given gutters?  A gutter is CROSSED when the
+/* Does a row respect the given gutters?  A gutter is CROSSED when the
    row's glyphs cover at least half of its width. A table row crosses at
    most one or two (a long name spilling into the next column); a
-   paragraph or a summary line crosses nearly all of them. Compatible when
-   the crossed fraction is at most maxFrac (0.34 for joining a separate
-   run and for the band's own edge rows: a table row crosses at most a
-   couple of gutters, a paragraph or summary line a third or more). */
-function rowOk(r,gutters,maxFrac=0.34){
-  if(!gutters.length || !r.glyphs.length) return true;
+   paragraph or a summary line crosses a third or more.                  */
+function rowRespectsGutters(row,gutters,maxCrossedFrac=0.34){
+  if(!gutters.length || !row.glyphs.length) return true;
   let crossed=0;
   for(const gt of gutters){
-    const w=gt.x1-gt.x0+1; let cov=0;
-    for(const g of r.glyphs){ const o=Math.min(g.x1,gt.x1+1)-Math.max(g.x0,gt.x0); if(o>0) cov+=o; }
-    if(cov>=0.5*w) crossed++;
+    const w=gt.x1-gt.x0+1; let covered=0;
+    for(const g of row.glyphs){ const o=Math.min(g.x1,gt.x1+1)-Math.max(g.x0,gt.x0); if(o>0) covered+=o; }
+    if(covered>=0.5*w) crossed++;
   }
-  return crossed<=maxFrac*gutters.length;
+  return crossed<=maxCrossedFrac*gutters.length;
 }
-/* a run is compatible when at least 70 % of its rows are */
-function compatibleRun(rows,gutters){
+function runRespectsGutters(rows,gutters){
   if(!gutters.length) return true;
-  let ok=0; for(const r of rows) if(rowOk(r,gutters)) ok++;
+  let ok=0; for(const r of rows) if(rowRespectsGutters(r,gutters)) ok++;
   return ok>=0.7*rows.length;
 }
 
-/* TL    : the text-line clean result (S.textLines)
-   p     : {clMinPieces, clGutterW, clGutterCov, clRowGap, clMergeGap}
-   prior : optional border layout (section 02a): {table:{x0,y0,x1,y1}|null,
-           colsX:[{x,y0,y1}]} in image space. A table box forces the band
-           (rows whose de-skewed centre lies inside it); column boundaries
-           are added as gutters where the glyph coverage allows.        */
-export function detectColumns(TL,p,prior=null){
-  const slope=(TL.rows&&TL.rows.slope)||0, rows=(TL.rows&&TL.rows.rows)||[], hMed=TL.stats.hMed||10;
-  const toX=(x,y)=>x+slope*y;                        // de-skewed x'
-  const toY=(x,y)=>y-slope*x;                        // de-skewed y'
-  const back=(xp,yp)=>({x:xp-slope*yp, y:yp+slope*xp}); // (x',y') → image
-  const out={slope, hMed, toX, back, rowsInfo:[], band:null, profile:null,
-             gutters:[], columns:[], cells:[], reason:'', prior:prior?prior.kind:'none'};
+/* textLines : the text-line stage result (S.textLines)
+   params    : {minPieces, rowGap, mergeGap, minGutterWidth, maxGutterCoverage}
+   prior     : optional border layout (section 02): {kind, table:{x0,y0,x1,y1}|null,
+               colsX:[{x,y0,y1}]} in image space. A table box seeds the band;
+               column boundaries are added as gutters where the coverage allows. */
+/* Column direction. The rows' slope de-skews y; the COLUMNS' slope
+   de-skews x, and on a rectified photo the two differ: a residual shear
+   leaves the text rows tilted while the columns stand nearly upright.
+   De-skewing x with the rows' slope shears every column and fills the
+   narrow gaps (TP | VAT) so that columns merge and slivers appear. The
+   column slope is the one under which the given rows show the most clear
+   bins in their coverage profile, searched ±0.06 (±3.4°) around the rows'
+   slope; bins outside the rows' common extent do not count, so spreading
+   the rows apart cannot score.                                          */
+function estimateColumnSlope(rowSet,slope,clearFrac){
+  if(rowSet.length<3) return slope;
+  const rowsG=rowSet.map(r=>r.glyphs.map(g=>({x0:Math.min(g.bb.x0+1,g.bb.x1), x1:Math.max(g.bb.x1,g.bb.x0+1), cy:(g.bb.y0+g.bb.y1)/2}))).filter(g=>g.length);
+  const clearMax=clearFrac*rowsG.length;
+  const score=s=>{
+    const ext=rowsG.map(gl=>gl.map(g=>[g.x0+s*g.cy, g.x1+s*g.cy]));
+    const lo=median(ext.map(gl=>Math.min(...gl.map(a=>a[0])))), hi=median(ext.map(gl=>Math.max(...gl.map(a=>a[1]))));
+    const X0=Math.floor(lo), bins=Math.ceil(hi)-X0+1; if(bins<=0) return 0;
+    const cov=new Uint16Array(bins), mask=new Uint8Array(bins);
+    for(const gl of ext){ mask.fill(0);
+      for(const [a,b] of gl){ const p=Math.max(0,Math.floor(a)-X0), q=Math.min(bins-1,Math.ceil(b)-1-X0); for(let x=p;x<=q;x++) mask[x]=1; }
+      for(let x=0;x<bins;x++) cov[x]+=mask[x]; }
+    let clear=0; for(let x=0;x<bins;x++) if(cov[x]<=clearMax) clear++;
+    return clear;
+  };
+  let best=slope, bestScore=-1;
+  for(let k=-60;k<=60;k++){ const s=slope+k*0.001; const sc=score(s);
+    if(sc>bestScore || (sc===bestScore && Math.abs(s-slope)<Math.abs(best-slope))){ bestScore=sc; best=s; } }
+  return best;
+}
 
-  // 1 · rows
-  const info=rows.map((r,i)=>{
+export function detectColumns(textLines,params,prior=null,limits=null){
+  const full=textLines.fullLines||{}, slope=full.slope||0, fullRows=full.rows||[];
+  const glyphHeight=textLines.stats.reference||10;
+  let colSlope=slope;                                   // refined against the table's own gutters below
+  const toDeskewedX=(x,y)=>x+colSlope*y;
+  const toDeskewedY=(x,y)=>y-slope*x;
+  const toImage=(xp,yp)=>{ const x=xp-colSlope*yp; return {x, y:yp+slope*x}; };
+  const out={slope, columnSlope:slope, glyphHeight, toDeskewedX, toImage, rows:[], band:null, profile:null,
+             gutters:[], columns:[], cells:[], reason:'', priorKind:prior?prior.kind:'none', runs:[]};
+
+  /* --- 1 · rows -------------------------------------------------------- */
+  const rows=fullRows.map((row,index)=>{
     const glyphs=[];
-    for(const ln of r.lines) for(const m of ln.words){
+    for(const piece of row.lines) for(const m of piece.words){
       const cy=(m.bb.y0+m.bb.y1)/2;
       // glyph boxes come from the healed (1 px dilated) mask; take that
       // pixel back on each side so a word-space-sized gap keeps its width
       const x0=Math.min(m.bb.x0+1,m.bb.x1), x1=Math.max(m.bb.x1,m.bb.x0+1);
-      glyphs.push({bb:m.bb, x0:toX(x0,cy), x1:toX(x1,cy)});
+      glyphs.push({bb:m.bb, x0:toDeskewedX(x0,cy), x1:toDeskewedX(x1,cy)});
     }
-    return {i,row:r,pieces:r.lines.length,glyphs,kind:'other'};
+    return {index,row,pieces:row.lines.length,glyphs,kind:'other'};
   });
-  out.rowsInfo=info;
-  if(!info.length){ out.reason='no rows'; return out; }
+  out.rows=rows;
+  if(!rows.length){ out.reason='no rows'; return out; }
 
-  // tabular runs (rowGap-tolerant)
-  const tab=info.map(r=>r.pieces>=p.clMinPieces);
+  const isTabular=rows.map(r=>r.pieces>=params.minPieces);
   const runs=[];
-  for(let i=0;i<info.length;i++){
-    if(!tab[i]) continue;
+  for(let i=0;i<rows.length;i++){
+    if(!isTabular[i]) continue;
     let j=i,last=i,count=0;
-    while(j<info.length){
-      if(tab[j]){ last=j; count++; j++; continue; }
-      let k=j; while(k<info.length && !tab[k]) k++;
-      if(k<info.length && k-j<=p.clRowGap) j=k; else break;
+    while(j<rows.length){
+      if(isTabular[j]){ last=j; count++; j++; continue; }
+      let k=j; while(k<rows.length && !isTabular[k]) k++;
+      if(k<rows.length && k-j<=params.rowGap) j=k; else break;
     }
-    runs.push({r0:i,r1:last,count});
+    runs.push({first:i,last,count});
     i=last;
   }
   out.runs=runs;
-  if(!runs.length){ out.reason='no row has '+p.clMinPieces+'+ pieces'; return out; }
+  if(!runs.length){ out.reason='no row has '+params.minPieces+'+ pieces'; return out; }
 
-  /* --- structure discovery with a RELAXED coverage threshold ----------
-     Rows that do not belong to the table (a paragraph glued to its end,
-     a summary block) cross every gutter; with the strict threshold a few
-     of them wipe the gutters out and nothing can be judged. The relaxed
-     profile tolerates up to 35 % crossing rows, which is enough to see
-     the column structure, judge every row against it, trim the band's
-     ends and merge compatible runs. The final columns are then computed
-     with the strict threshold on the cleaned band.                      */
-  const relaxedP={...p, clGutterCov:Math.max(p.clGutterCov,0.35)};
-  const relaxed=rows=>gutterProfile(rows,relaxedP,hMed).gutters;
-  // seed = the run with the most column structure (gutters × rows), so a
-  // long paragraph block never outranks the item table
-  // (scored with the STRICT profile on purpose: a run that has swallowed
-  // a paragraph keeps, under the relaxed profile, exactly the gutters the
-  // paragraph does not cross and would pass every later test; under the
-  // strict profile those rows wipe its gutters out and a clean run wins)
-  for(const r of runs){ r.gutters=gutterProfile(info.slice(r.r0,r.r1+1),p,hMed).gutters.length; r.score=(r.gutters+1)*r.count; }
+  /* Structure discovery uses a RELAXED coverage threshold (up to 35 % of
+     rows may cross a gutter) so a few foreign rows cannot wipe the gutters
+     out before anything can be judged. Seeds are scored with the STRICT
+     profile on purpose: a run that has swallowed a paragraph keeps, under
+     the relaxed profile, exactly the gutters the paragraph does not cross
+     and would pass every later test; under the strict profile those rows
+     wipe its gutters out and a clean run wins.                            */
+  const relaxedParams={...params, maxGutterCoverage:Math.max(params.maxGutterCoverage,0.35)};
+  const relaxedGutters=rs=>gutterProfile(rs,relaxedParams,glyphHeight).gutters;
+  for(const r of runs){ r.gutters=gutterProfile(rows.slice(r.first,r.last+1),params,glyphHeight).gutters.length; r.score=(r.gutters+1)*r.count; }
   let seed=runs[0]; for(const r of runs) if(r.score>seed.score) seed=r;
-  let r0=seed.r0, r1=seed.r1, parts=1, fromBorders=false;
-  // a table box from the borders overrides the run search: the band is
-  // every row whose de-skewed centre lies inside the box
+  let first=seed.first, last=seed.last, parts=1, fromBorders=false;
+  // de-skew x along the COLUMNS, estimated on the seed rows; every glyph
+  // extent is recomputed under the refined slope
+  const reglyph=()=>{ for(const r of rows) for(const g of r.glyphs){ const cy=(g.bb.y0+g.bb.y1)/2;
+    g.x0=toDeskewedX(Math.min(g.bb.x0+1,g.bb.x1),cy); g.x1=toDeskewedX(Math.max(g.bb.x1,g.bb.x0+1),cy); } };
+  const setColumnSlope=cs=>{ if(cs===colSlope) return; colSlope=cs; out.columnSlope=cs; reglyph(); };
+  setColumnSlope(estimateColumnSlope(rows.slice(seed.first,seed.last+1).filter(r=>isTabular[r.index]),slope,params.maxGutterCoverage));
+  for(const r of runs){ r.gutters=gutterProfile(rows.slice(r.first,r.last+1),params,glyphHeight).gutters.length; r.score=(r.gutters+1)*r.count; }
+  // rows whose de-skewed centre lies inside the border stage's table box —
+  // a HINT that is folded into the band after the text-based search, never
+  // a replacement for it: a boxed header mistaken for the table, or a box
+  // that ends at a crease, must not hide the body rows
+  let boxRows=null;
   if(prior && prior.table){
     const bx=(prior.table.x0+prior.table.x1)/2;
-    const by0=toY(bx,prior.table.y0), by1=toY(bx,prior.table.y1);
+    const by0=toDeskewedY(bx,prior.table.y0), by1=toDeskewedY(bx,prior.table.y1);
     const inside=[];
-    info.forEach((r,i)=>{ const cy=(r.row.dy.y0+r.row.dy.y1)/2; if(cy>=by0 && cy<=by1) inside.push(i); });
-    if(inside.length>=2){ r0=inside[0]; r1=inside[inside.length-1]; fromBorders=true; }
+    rows.forEach((r,i)=>{ const cy=(r.row.dy.y0+r.row.dy.y1)/2; if(cy>=by0 && cy<=by1) inside.push(i); });
+    if(inside.length>=1) boxRows={first:inside[0], last:inside[inside.length-1]};
   }
-  let G=relaxed(info.slice(r0,r1+1));
-  const trim=(a,b)=>{ if(!G.length) return [a,b];
-    while(a<b && !rowOk(info[a],G,0.34)) a++;
-    while(b>a && !rowOk(info[b],G,0.34)) b--;
+  let gutters=relaxedGutters(rows.slice(first,last+1));
+  const trim=(a,b)=>{ if(!gutters.length) return [a,b];
+    while(a<b && !rowRespectsGutters(rows[a],gutters)) a++;
+    while(b>a && !rowRespectsGutters(rows[b],gutters)) b--;
     return [a,b]; };
-  for(let it=0;it<2;it++){ [r0,r1]=trim(r0,r1); G=relaxed(info.slice(r0,r1+1)); }
-  /* --- extension: the band grows through every adjacent row that is
-     tabular and column-compatible, tolerating rowGap non-tabular rows in
-     between. This is what makes the band self-correcting: a border box
-     that ends early (a crease or pen line taken for the bottom rule) or
-     a seed run that stopped at a damaged row is completed here, and a
-     footer block that does not share the columns stops it.             */
+  for(let it=0;it<2;it++){ [first,last]=trim(first,last); gutters=relaxedGutters(rows.slice(first,last+1)); }
   const extend=()=>{
     for(const dir of [1,-1]){
-      let k=dir>0?r1+1:r0-1, gap=0;
-      while(k>=0 && k<info.length){
-        const okRow=rowOk(info[k],G,0.34);
-        if(tab[k] && okRow){ if(dir>0) r1=k; else r0=k; gap=0; }
-        else if(okRow && gap<p.clRowGap){ gap++; }
+      let k=dir>0?last+1:first-1, gap=0;
+      while(k>=0 && k<rows.length){
+        const respects=rowRespectsGutters(rows[k],gutters);
+        if(isTabular[k] && respects){ if(dir>0) last=k; else first=k; gap=0; }
+        else if(respects && gap<params.rowGap){ gap++; }
         else break;
         k+=dir;
       }
     }
-    G=relaxed(info.slice(r0,r1+1));
+    gutters=relaxedGutters(rows.slice(first,last+1));
   };
   extend();
-  // merge column-compatible runs across damaged rows (watermark, pen
-  // line, paper fold) — one invoice, one item table
-  const mergeGap=p.clMergeGap!==undefined?p.clMergeGap:6;
   const used=new Set([seed]);
-  for(const r of runs) if(r.r1>=r0 && r.r0<=r1) used.add(r);   // runs already inside the band
+  for(const r of runs) if(r.last>=first && r.first<=last) used.add(r);
   let merged=true;
   while(merged){
     merged=false;
-    let above=null, below=null;                    // nearest unused runs
+    let above=null, below=null;
     for(const r of runs){ if(used.has(r)) continue;
-      if(r.r1<r0 && (!above || r.r1>above.r1)) above=r;
-      if(r.r0>r1 && (!below || r.r0<below.r0)) below=r; }
-    for(const cand of [above,below]){
-      if(!cand) continue;
-      used.add(cand);
-      const gap = cand.r1<r0 ? r0-cand.r1-1 : cand.r0-r1-1;
-      if(gap>mergeGap){ cand.rejected='too far'; continue; }
-      const [a,b]=trim(cand.r0,cand.r1);           // drop incompatible edge rows
-      if(!compatibleRun(info.slice(a,b+1),G)){ cand.rejected='columns differ'; continue; }
-      r0=Math.min(r0,a); r1=Math.max(r1,b); parts++; cand.mergedIn=true;
+      if(r.last<first && (!above || r.last>above.last)) above=r;
+      if(r.first>last && (!below || r.first<below.first)) below=r; }
+    for(const candidate of [above,below]){
+      if(!candidate) continue;
+      used.add(candidate);
+      const gap = candidate.last<first ? first-candidate.last-1 : candidate.first-last-1;
+      if(gap>params.mergeGap){ candidate.rejected='too far'; continue; }
+      const [a,b]=trim(candidate.first,candidate.last);
+      if(!runRespectsGutters(rows.slice(a,b+1),gutters)){ candidate.rejected='columns differ'; continue; }
+      first=Math.min(first,a); last=Math.max(last,b); parts++; candidate.mergedIn=true;
       extend();
-      for(const r of runs) if(r.r1>=r0 && r.r0<=r1) used.add(r);
+      for(const r of runs) if(r.last>=first && r.first<=last) used.add(r);
       merged=true;
     }
   }
-  for(let k=0;k<info.length;k++) info[k].kind = k<r0?'header':k>r1?'footer':'table';
-  const band=info.slice(r0,r1+1);
-  const yTop=Math.min(...band.map(r=>r.row.dy.y0)), yBot=Math.max(...band.map(r=>r.row.dy.y1));
-  out.band={r0,r1,rows:band,yTop,yBot,parts,seed:{r0:seed.r0,r1:seed.r1},fromBorders};
-
-  // 2–3 · coverage profile and gutters of the whole table (strict)
-  const {X0,X1,cov,nRows:nR,thr,minW,gutters}=gutterProfile(band,p,hMed);
-  out.profile={X0,X1,cov,nRows:nR,thr,minW};
-  // border column boundaries become gutters where the glyph coverage
-  // does not contradict them (≤ 35 % of rows crossing)
-  let addedFromBorders=0;
-  if(prior && prior.colsX && prior.colsX.length){
-    const w=Math.max(2,Math.round(minW)), half=w/2;
-    for(const c of prior.colsX){
-      const xp=toX(c.x,(c.y0+c.y1)/2);
-      if(xp<=X0+half || xp>=X1-half) continue;                // page/table edge, not a gutter
-      if(gutters.some(g=>xp>=g.x0-half && xp<=g.x1+half)) continue;
-      let s=0,n=0; for(let x=Math.floor(xp-half);x<=Math.ceil(xp+half);x++){ const i=x-X0; if(i>=0&&i<cov.length){ s+=cov[i]; n++; } }
-      if(n && s/n<=0.35*nR){ gutters.push({x0:xp-half,x1:xp+half,w,fromBorder:true}); addedFromBorders++; }
+  // fold the border box in: its rows join the band when they touch it or
+  // lie within the merge gap of it (then the rows between join as well)
+  if(boxRows){
+    const gap = boxRows.last<first ? first-boxRows.last-1 : boxRows.first>last ? boxRows.first-last-1 : 0;
+    if(gap<=params.mergeGap){
+      const f=Math.min(first,boxRows.first), l=Math.max(last,boxRows.last);
+      if(f!==first || l!==last){ first=f; last=l; fromBorders=true; extend(); }
     }
-    gutters.sort((a,b)=>a.x0-b.x0);
   }
-  out.gutters=gutters; out.guttersFromBorders=addedFromBorders;
+  /* --- keep the largest gutter-respecting block --------------------------
+     Trimming only peels rows off the band's ends, so a key-value block
+     glued to the table (Client Name / Bill No. … whose long values run
+     across the item columns) survives whenever its row nearest the table
+     happens to respect the gutters while the rows inside it do not. Inside
+     the band a TABULAR row that does not respect the gutters is foreign;
+     the table is the block between such rows holding the most tabular
+     rows. Non-tabular rows (a wrapped name, a section title, a row a fold
+     merged into one piece) never break a block, so a damaged table stays
+     whole.                                                               */
+  let foreignRows=0;
+  for(let it=0;it<2;it++){
+    gutters=relaxedGutters(rows.slice(first,last+1));
+    if(!gutters.length) break;
+    // a row that fails the gutter test is foreign only when it is also
+    // piece-poor: an item row whose name ran into the next column still
+    // has nearly as many pieces as its neighbours, a Client Name /
+    // Bill No. row has a third of them
+    const respecting=[]; for(let k=first;k<=last;k++) if(isTabular[k] && rowRespectsGutters(rows[k],gutters)) respecting.push(rows[k].pieces);
+    const itemPieces=respecting.length?median(respecting):0;
+    const foreign=k=>isTabular[k] && !rowRespectsGutters(rows[k],gutters) && rows[k].pieces<0.6*itemPieces;
+    const blocks=[]; let cur=null;
+    for(let k=first;k<=last;k++){
+      if(foreign(k)){ cur=null; continue; }
+      if(!cur){ cur={first:k,last:k,count:0}; blocks.push(cur); }
+      cur.last=k; if(isTabular[k]) cur.count++;
+    }
+    let best=null; for(const b of blocks) if(b.count && (!best || b.count>best.count)) best=b;
+    if(!best) break;
+    while(best.first<best.last && !isTabular[best.first]) best.first++;
+    while(best.last>best.first && !isTabular[best.last]) best.last--;
+    if(best.first===first && best.last===last) break;
+    foreignRows+=(best.first-first)+(last-best.last);
+    first=best.first; last=best.last;
+  }
 
-  // 4 · columns between gutters, trimmed to content
-  const bounds=[X0]; for(const g of gutters) bounds.push(g.x0-1, g.x1+1); bounds.push(X1);
+  /* --- footer split ------------------------------------------------------
+     An invoice is header, item table, footer. Totals rows ("Sub Total",
+     "Grand Total"), the amount in words and a free-product block sit
+     under the item columns and have enough pieces to look tabular, so
+     the band would run through them. Two cuts:
+       · structural: item rows carry content in the table's FIRST column
+         (code / serial). Once three item rows are established, the first
+         tabular row whose first column is empty — with fewer first-column
+         rows after it than before it — is a totals row and the table ends
+         before it (a wrapped product-name line is not tabular and cannot
+         trigger this; the top line of a two-line column title is followed
+         by the whole table and cannot either).
+       · keywords: after recognition the pipeline passes the rows whose
+         text reads Sub Total / Grand Total / Amount in words / Free
+         Product (limits.footerRows); such a row ends the table too.
+     Either way a totals row that is immediately followed by a run of
+     item rows is a SUB-total inside the table and does not end it.      */
+  let footerCut='';
+  const keywordRows=new Set((limits&&limits.footerRows)||[]);   // rows the recognised text names as totals
+
+  /* --- rescue (a): thin rows folded into the proper row they sit on ------
+     A piece that failed to join its row (a curl, a tiny offset, a broken
+     number) becomes a one-piece row of its own: not tabular, so its glyphs
+     never reach a cell although the text plainly sits in the table. A band
+     row with fewer than minPieces pieces whose centre lies on a proper band
+     row (within 0.6 glyph height) is merged into it. This runs BEFORE the
+     footer test so an item row whose code drifted into a thin row of its
+     own is not mistaken for a totals row.                                */
+  const glyphOf=m=>{ const cy=(m.bb.y0+m.bb.y1)/2;
+    const x0=Math.min(m.bb.x0+1,m.bb.x1), x1=Math.max(m.bb.x1,m.bb.x0+1);
+    return {bb:m.bb, x0:toDeskewedX(x0,cy), x1:toDeskewedX(x1,cy)}; };
+  let mergedRows=0, rescuedPieces=0;
+  {
+    const candidates=rows.slice(first,last+1), proper=candidates.filter(r=>isTabular[r.index]);
+    for(const r of candidates){
+      if(isTabular[r.index]) continue;
+      // nearest proper row by the thin row's de-skewed centre (an offset of
+      // half a glyph is a curl or a broken number, not another row)
+      const cy=(r.row.dy.y0+r.row.dy.y1)/2;
+      let host=null, bestDist=1/0;
+      for(const h of proper){ const d=h.row.dy; const dist=cy<d.y0?d.y0-cy:cy>d.y1?cy-d.y1:0; if(dist<bestDist){ bestDist=dist; host=h; } }
+      if(!host || bestDist>0.6*glyphHeight) continue;
+      host.glyphs.push(...r.glyphs); host.row.lines.push(...r.row.lines); host.pieces+=r.pieces; r.kind='merged'; mergedRows++;
+    }
+  }
+
+  /* --- structural footer cut -------------------------------------------- */
+  {
+    const bandNow=rows.slice(first,last+1).filter(r=>r.kind!=='merged');
+    const g=relaxedGutters(bandNow);
+    if(g.length){
+      const firstGutter=g[0].x0;
+      const hasFirst=r=>r.glyphs.some(gl=>(gl.x0+gl.x1)/2<firstGutter);
+      // number of column slots (the stretches between gutters) a row fills
+      const slots=[]; for(let i=0;i<=g.length;i++) slots.push({x0:i?g[i-1].x1+1:-1/0, x1:i<g.length?g[i].x0-1:1/0});
+      const filled=r=>slots.filter(sl=>r.glyphs.some(gl=>{ const c=(gl.x0+gl.x1)/2; return c>=sl.x0 && c<=sl.x1; })).length;
+      const tabularRows=bandNow.filter(r=>isTabular[r.index]);
+      if(tabularRows.filter(hasFirst).length>=0.7*tabularRows.length){
+        const itemFill=median(tabularRows.filter(hasFirst).map(filled));
+        // the first tabular row without a first-column entry, once three
+        // item rows are established, is a totals row and the table ends
+        // before it — provided fewer first-column rows follow it than
+        // precede it (the top line of a two-line column title has no
+        // first-column entry either, but the whole table follows it) and
+        // it fills clearly fewer columns than an item row (an item row
+        // whose code was lost fills them all; a totals row fills a few).
+        // A totals row immediately followed by a run of three item rows
+        // (first-column entries, wrapped names allowed between) is a
+        // SUB-total inside the table, not its end: the table continues.
+        const continues=k=>{
+          let j=k+1, skipped=0;
+          while(j<=last && (!isTabular[j] || rows[j].kind==='merged')){ j++; if(++skipped>1) return false; }
+          let n=0;
+          for(;j<=last;j++){ if(rows[j].kind==='merged' || !isTabular[j]) continue;
+            if(hasFirst(rows[j])){ if(++n>=3) return true; } else break; }
+          return false;
+        };
+        let established=0;
+        for(let k=first;k<=last;k++){
+          if(!isTabular[k] || rows[k].kind==='merged') continue;
+          const keyword=keywordRows.has(k);
+          if(hasFirst(rows[k]) && !keyword){ established++; continue; }
+          if(established<3) continue;
+          let following=0; for(let j=k+1;j<=last;j++) if(isTabular[j] && rows[j].kind!=='merged' && hasFirst(rows[j])) following++;
+          const totalsLike = keyword || (following<established && filled(rows[k])<0.7*itemFill);
+          if(!totalsLike || continues(k)) continue;
+          last=k-1; footerCut=keyword?'keywords':'structure'; break;
+        }
+      }
+    }
+  }
+  for(let k=0;k<rows.length;k++) if(rows[k].kind!=='merged') rows[k].kind = k<first?'header':k>last?'footer':'table';
+  let band=rows.slice(first,last+1).filter(r=>r.kind!=='merged');
+
+  /* --- rescue (b): accepted pieces outside the band rows whose de-skewed
+     centre lies on a band row (within 0.6 glyph height) are added to it. */
+  const inBand=new Set(); for(const r of band) for(const piece of r.row.lines) inBand.add(piece);
+  for(const piece of textLines.accepted||[]){
+    if(inBand.has(piece) || !piece.words || !piece.words.length) continue;
+    const cx=(piece.ink.x0+piece.ink.x1)/2, cy=(piece.ink.y0+piece.ink.y1)/2, yp=toDeskewedY(cx,cy);
+    let host=null, bestDist=1/0;
+    for(const r of band){ const d=r.row.dy; const dist=yp<d.y0?d.y0-yp:yp>d.y1?yp-d.y1:0; if(dist<bestDist){ bestDist=dist; host=r; } }
+    if(!host || bestDist>0.6*glyphHeight) continue;
+    host.glyphs.push(...piece.words.map(glyphOf)); host.row.lines.push(piece); host.pieces++; inBand.add(piece); rescuedPieces++;
+  }
+  // rows that took pieces in get their extents and outline recomputed, so
+  // recognition crops and the Full Lines drawing include the new pieces
+  for(const r of band) if(r.pieces!==r.row.lines.length || mergedRows || rescuedPieces) rebuildRow(r.row,slope);
+
+  const yTop=Math.min(...band.map(r=>r.row.dy.y0)), yBottom=Math.max(...band.map(r=>r.row.dy.y1));
+  out.band={first,last,rows:band,yTop,yBottom,parts,seed:{first:seed.first,last:seed.last},fromBorders,mergedRows,rescuedPieces,foreignRows,footerCut};
+
+  /* --- 2–3 · coverage profile and gutters of the whole table (strict) -- */
+  setColumnSlope(estimateColumnSlope(band.filter(r=>isTabular[r.index]),slope,params.maxGutterCoverage));   // the whole table now, not just the seed
+  const profile=gutterProfile(band,params,glyphHeight);
+  const {X0,X1,coverage,rowCount,clearMax,minWidth}=profile;
+  const finalGutters=profile.gutters;
+  out.profile={X0,X1,coverage,rowCount,clearMax,minWidth};
+  let guttersFromBorders=0;
+  if(prior && prior.colsX && prior.colsX.length){
+    const w=Math.max(2,Math.round(minWidth)), half=w/2;
+    for(const c of prior.colsX){
+      const xp=toDeskewedX(c.x,(c.y0+c.y1)/2);
+      if(xp<=X0+half || xp>=X1-half) continue;                // page / table edge, not a gutter
+      if(finalGutters.some(g=>xp>=g.x0-half && xp<=g.x1+half)) continue;
+      let sum=0,n=0; for(let x=Math.floor(xp-half);x<=Math.ceil(xp+half);x++){ const i=x-X0; if(i>=0&&i<coverage.length){ sum+=coverage[i]; n++; } }
+      if(n && sum/n<=0.35*rowCount){ finalGutters.push({x0:xp-half,x1:xp+half,width:w,fromBorder:true}); guttersFromBorders++; }
+    }
+    finalGutters.sort((a,b)=>a.x0-b.x0);
+  }
+  out.gutters=finalGutters; out.guttersFromBorders=guttersFromBorders;
+
+  /* --- 4 · columns between gutters, trimmed to content ----------------- */
+  const bounds=[X0]; for(const g of finalGutters) bounds.push(g.x0-1, g.x1+1); bounds.push(X1);
   const columns=[];
   for(let c=0;c<bounds.length;c+=2){
     const a=bounds[c], b=bounds[c+1];
@@ -290,42 +463,38 @@ export function detectColumns(TL,p,prior=null){
       const m=(g.x0+g.x1)/2;
       if(m>=a && m<=b+1){ n++; if(g.x0<cx0)cx0=g.x0; if(g.x1>cx1)cx1=g.x1; }
     }
-    if(!n) continue;
-    columns.push({x0:cx0,x1:cx1,gx0:a,gx1:b,glyphs:n});
+    if(n) columns.push({x0:cx0,x1:cx1,gutterX0:a,gutterX1:b,glyphs:n});
   }
   out.columns=columns;
 
-  // 5 · cells (row × column)
+  /* --- 5 · cells (row × column) ----------------------------------------- */
   const cells=band.map(()=>columns.map(()=>null));
   band.forEach((r,ri)=>{
     columns.forEach((c,ci)=>{
       let x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;
       for(const g of r.glyphs){
         const m=(g.x0+g.x1)/2;
-        if(m<c.gx0 || m>c.gx1+1) continue;
+        if(m<c.gutterX0 || m>c.gutterX1+1) continue;
         n++; const b=g.bb;
         if(b.x0<x0)x0=b.x0; if(b.y0<y0)y0=b.y0; if(b.x1>x1)x1=b.x1; if(b.y1>y1)y1=b.y1;
       }
       if(n){ const cy=(y0+y1)/2;
-        cells[ri][ci]={bb:{x0,y0,x1,y1},glyphs:n,xp0:toX(x0,cy),xp1:toX(x1+1,cy)}; }
+        cells[ri][ci]={bb:{x0,y0,x1,y1},glyphs:n,xp0:toDeskewedX(x0,cy),xp1:toDeskewedX(x1+1,cy)}; }
     });
   });
   out.cells=cells;
-
-  // alignment per column from the spread of cell edges
-  columns.forEach((c,ci)=>{
+  columns.forEach((c,ci)=>{                       // alignment from the spread of the cell edges
     const L=[],R=[],C=[];
-    for(let ri=0;ri<band.length;ri++){ const cl=cells[ri][ci]; if(!cl) continue;
-      L.push(cl.xp0); R.push(cl.xp1); C.push((cl.xp0+cl.xp1)/2); }
-    const sl=sd(L),sr=sd(R),sc=sd(C), mn=Math.min(sl,sr,sc);
-    c.cells=L.length; c.sd={l:sl,r:sr,c:sc};
-    c.align = L.length<2 ? 'single' : mn===sl ? 'left' : mn===sr ? 'right' : 'center';
+    for(let ri=0;ri<band.length;ri++){ const cell=cells[ri][ci]; if(!cell) continue;
+      L.push(cell.xp0); R.push(cell.xp1); C.push((cell.xp0+cell.xp1)/2); }
+    const sl=stdDev(L),sr=stdDev(R),sc=stdDev(C), lowest=Math.min(sl,sr,sc);
+    c.cells=L.length;
+    c.align = L.length<2 ? 'single' : lowest===sl ? 'left' : lowest===sr ? 'right' : 'center';
   });
-  // pieces that were split across columns (chained cells)
-  let spanning=0;
-  for(const r of band) for(const ln of r.row.lines){
-    const cy=(ln.ink.y0+ln.ink.y1)/2, a=toX(ln.ink.x0,cy), b=toX(ln.ink.x1+1,cy);
-    let n=0; for(const c of columns) if(Math.min(b,c.gx1+1)-Math.max(a,c.gx0)>0) n++;
+  let spanning=0;                                  // pieces that chained two columns
+  for(const r of band) for(const piece of r.row.lines){
+    const cy=(piece.ink.y0+piece.ink.y1)/2, a=toDeskewedX(piece.ink.x0,cy), b=toDeskewedX(piece.ink.x1+1,cy);
+    let n=0; for(const c of columns) if(Math.min(b,c.gutterX1+1)-Math.max(a,c.gutterX0)>0) n++;
     if(n>1) spanning++;
   }
   out.spanningPieces=spanning;
@@ -335,16 +504,15 @@ export function detectColumns(TL,p,prior=null){
 /* JSON-friendly summary */
 export function columnsToJson(C){
   if(!C||!C.band) return {detected:false, reason:C?C.reason:'disabled'};
-  const ib=b=>({x0:Math.round(b.x0),y0:Math.round(b.y0),x1:Math.round(b.x1),y1:Math.round(b.y1)});
+  const box=b=>({x0:Math.round(b.x0),y0:Math.round(b.y0),x1:Math.round(b.x1),y1:Math.round(b.y1)});
   return {
-    detected:true, space:'rectified image', pageTiltDeg:+(Math.atan(C.slope)*180/Math.PI).toFixed(3),
-    tableRows:{first:C.band.r0, last:C.band.r1, count:C.band.rows.length, mergedParts:C.band.parts, fromBorders:!!C.band.fromBorders},
+    detected:true, pageTiltDeg:+(Math.atan(C.slope)*180/Math.PI).toFixed(3), columnTiltDeg:+(Math.atan(C.columnSlope)*180/Math.PI).toFixed(3),
+    tableRows:{first:C.band.first, last:C.band.last, count:C.band.rows.length, mergedParts:C.band.parts, fromBorders:!!C.band.fromBorders},
+    headerRows:C.rows.filter(r=>r.kind==='header').length,
+    footerRows:C.rows.filter(r=>r.kind==='footer').length,
     guttersFromBorders:C.guttersFromBorders||0,
-    headerRows:C.rowsInfo.filter(r=>r.kind==='header').length,
-    footerRows:C.rowsInfo.filter(r=>r.kind==='footer').length,
-    gutters:C.gutters.map(g=>({xDeskewed0:Math.round(g.x0), xDeskewed1:Math.round(g.x1), width:g.w})),
-    columns:C.columns.map((c,i)=>({index:i+1, xDeskewed0:Math.round(c.x0), xDeskewed1:Math.round(c.x1),
-      align:c.align, cells:c.cells})),
-    cells:C.cells.map((row,ri)=>row.map((cl,ci)=>cl?{row:ri+1,col:ci+1,bbox:ib(cl.bb),glyphs:cl.glyphs}:null).filter(Boolean))
+    gutters:C.gutters.map(g=>({xDeskewed0:Math.round(g.x0), xDeskewed1:Math.round(g.x1), width:g.width})),
+    columns:C.columns.map((c,i)=>({index:i+1, xDeskewed0:Math.round(c.x0), xDeskewed1:Math.round(c.x1), align:c.align, cells:c.cells})),
+    cells:C.cells.map((row,ri)=>row.map((cell,ci)=>cell?{row:ri+1,col:ci+1,bbox:box(cell.bb),glyphs:cell.glyphs}:null).filter(Boolean))
   };
 }

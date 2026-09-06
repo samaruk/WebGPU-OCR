@@ -9,7 +9,7 @@ import { $ } from '../dom/dom.js';
 import { S } from '../state/state.js';
 import { STAGES } from '../config/config.js';
 import { getStageCanvas, renderStage, renderStageInto } from '../render/render.js';
-import { raf } from '../pipeline/pipeline.js';
+import { nextFrame } from '../pipeline/pipeline.js';
 import { drawView } from '../viewport/viewport.js';
 import { setStageCap } from '../ui/ui.js';
 
@@ -44,7 +44,7 @@ export async function buildGallery(){
     item.onclick=()=>showStage(i);
     gal.appendChild(item);
     S.thumbs.push(im);
-    if((i&3)===3) await raf();        // yield so the encode loop doesn't jank
+    if((i&3)===3) await nextFrame();        // yield so the encode loop doesn't jank
   }
 }
 

@@ -1,18 +1,15 @@
 /* ======================================================================
    STAGE RENDERING
-   Why: each of the 21 pipeline stages is drawn here, by one descriptor-driven
-   routine, into an offscreen full-resolution canvas. Centralising it means
-   the viewport blitter and the gallery show identical pixels and every
-   export is full size.
+   Why: every gallery stage is drawn here, by one descriptor-driven routine,
+   into an offscreen full-resolution canvas. Centralising it means the
+   viewport and the gallery show identical pixels and every export is full
+   size. Each `kind` in config.js maps to one block below.
    ====================================================================== */
-import { $ } from '../dom/dom.js';
 import { S } from '../state/state.js';
 import { STAGES } from '../config/config.js';
 import { HF_KEPT, HF_TALL, HF_SMALL, HF_RULE, HF_SPLIT, HF_PARENT } from '../heightfilter/heightfilter.js';
 
-/* =====================================================================
-   RENDERING  —  draw the active stage to an offscreen canvas
-   ===================================================================== */
+/* ---- colour helpers --------------------------------------------------- */
 export function hsl(h,s,l){
   s/=100;l/=100;
   const c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h/60)%2-1)), m=l-c/2;
@@ -22,8 +19,9 @@ export function hsl(h,s,l){
   else if(h<300){r=x;g=0;b=c;}else{r=c;g=0;b=x;}
   return [(r+m)*255|0,(g+m)*255|0,(b+m)*255|0];
 }
-export const labColor=l=>hsl((l*137.508)%360,68,58);
+export const labelColor=i=>hsl((i*137.508)%360,68,58);   // one distinct hue per index
 
+/* ---- offscreen target -------------------------------------------------- */
 export function getStageCanvas(){
   if(!S.stageCv || S.stageCv.width!==S.W || S.stageCv.height!==S.H){
     S.stageCv=document.createElement('canvas');
@@ -31,46 +29,131 @@ export function getStageCanvas(){
   }
   return S.stageCv;
 }
-
-export function renderStage(idx){
-  S.stage=idx;
-  const cv=getStageCanvas();
-  renderStageInto(STAGES[idx], cv.getContext('2d'), S.W, S.H);
+export function renderStage(index){
+  S.stage=index;
+  renderStageInto(STAGES[index], getStageCanvas().getContext('2d'), S.W, S.H);
 }
 
-/* ---- BORDERS group: rules interpreted -------------------------------- */
-function renderBorderLayout(B,ctx,W,H,base,sw){
-  if(base) ctx.drawImage(base,0,0);
-  ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-  const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
-  ctx.font=`600 ${fs}px "JetBrains Mono", monospace`; ctx.lineJoin='round'; ctx.lineCap='round';
-  const L=B.layout;
-  const stroke=(poly,fallback)=>{ ctx.beginPath();
-    if(poly&&poly.length){ ctx.moveTo(poly[0].x+.5,poly[0].y+.5); for(let i=1;i<poly.length;i++) ctx.lineTo(poly[i].x+.5,poly[i].y+.5); }
-    else { ctx.moveTo(fallback[0],fallback[1]); ctx.lineTo(fallback[2],fallback[3]); }
-    ctx.stroke(); };
-  const tag=(x,y,t,col)=>{ const tp=fs*0.3, tw=ctx.measureText(t).width; y=Math.max(fs,y);
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(x,y-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
-    ctx.fillStyle=col; ctx.fillText(t,x+tp,y); };
+/* ---- small drawing helpers shared by the stage blocks ------------------ */
+function makeTools(ctx,W,H,strokeW){
+  const fontSize=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fontSize*0.5;
+  ctx.font=`600 ${fontSize}px "JetBrains Mono", monospace`; ctx.lineJoin='round';
+  return {
+    fontSize, pad, strokeW,
+    darken(base,alpha){ if(base) ctx.drawImage(base,0,0); ctx.fillStyle=`rgba(8,11,12,${alpha})`; ctx.fillRect(0,0,W,H); },
+    message(text){ ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center'; ctx.fillText(text,W/2,H/2); ctx.textAlign='left'; },
+    badge(text){ const tw=ctx.measureText(text).width;
+      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fontSize+pad*1.2);
+      ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(text,pad+pad*0.8,pad+fontSize*0.7+pad*0.1); },
+    tag(x,y,text,color){ const tp=fontSize*0.3, tw=ctx.measureText(text).width; y=Math.max(fontSize,y);
+      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(x,y-fontSize*0.6-tp,tw+tp*2,fontSize+tp*1.6);
+      ctx.fillStyle=color; ctx.fillText(text,x+tp,y); },
+    poly(points){ ctx.beginPath(); ctx.moveTo(points[0].x,points[0].y); for(let i=1;i<points.length;i++) ctx.lineTo(points[i].x,points[i].y); ctx.closePath(); },
+    rect(b){ ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
+  };
+}
+
+/* 0/1 mask → dark-on-light raster */
+function drawMask(ctx,mask,W,H){
+  const img=ctx.createImageData(W,H), d=img.data;
+  for(let i=0,j=0;i<W*H;i++,j+=4){ const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255; }
+  ctx.putImageData(img,0,0);
+}
+
+/* draw any stage descriptor into a W×H 2D context */
+export function renderStageInto(stage,ctx,W,H){
+  const strokeW=Math.max(1.4,Math.round(Math.min(W,H)/520));
+  ctx.fillStyle='#0a0e0f'; ctx.fillRect(0,0,W,H);
+  const kind=stage.kind;
+
+  /* ---- source images ---------------------------------------------------- */
+  if(kind==='source'){ if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
+  if(kind==='lens'){ ctx.drawImage(S.lensCanvas||S.origCanvas,0,0); return; }
+  if(kind==='rectified'){ ctx.drawImage(S.workCanvas||S.origCanvas,0,0); return; }
+
+  const result = stage.pass==='BR' ? S.borders : stage.pass==='TL' ? S.textLines : stage.pass==='CL' ? S.columns
+               : stage.pass==='CH' ? S.characters : S.recognition;
+  const base = S.workCanvas || S.origCanvas;                 // every result lives in the working-image frame
+  const T=makeTools(ctx,W,H,strokeW);
+  if(!result){
+    T.message(stage.pass==='BR' ? 'border stage disabled (section 02)'
+            : stage.pass==='TL' ? 'text-line clean disabled (section 03)'
+            : stage.pass==='CL' ? 'columns disabled (section 04) or text-line clean off'
+            : stage.pass==='CH' ? 'characters disabled (section 05) or text-line clean off'
+            : 'recognition disabled (section 06) or characters off');
+    return;
+  }
+  if(stage.pass==='RC' && !result.available){ T.message('recognition unavailable: '+result.error); return; }
   ctx.textBaseline='middle';
-  // every rule faint; long ones brighter
-  for(const h of B.hAll){ ctx.lineWidth=h.long?sw*1.2:sw*0.7; ctx.strokeStyle=h.long?'rgba(110,200,255,.55)':'rgba(110,200,255,.25)'; stroke(h.polyline,[h.x0,h.y,h.x1,h.y]); }
-  for(const v of B.vAll){ ctx.lineWidth=v.long?sw*1.2:sw*0.7; ctx.strokeStyle=v.long?'rgba(166,255,63,.55)':'rgba(166,255,63,.25)'; stroke(v.polyline,[v.x,v.y0,v.x,v.y1]); }
-  // section separators
+  switch(kind){
+    case 'border-binary':   drawMask(ctx, result.binary||result.rawBinary, W,H); break;
+    case 'clean-binary':    drawMask(ctx, result.cleanBinary, W,H); break;
+    case 'border-h-opened': drawMask(ctx, result.rules.debug.hOpened, W,H); break;
+    case 'border-v-opened': drawMask(ctx, result.rules.debug.vOpened, W,H); break;
+    case 'rules':           renderRules(result,ctx,W,H,base,T); break;
+    case 'rules-erased':    if(result.cleanCanvas) ctx.drawImage(result.cleanCanvas,0,0);
+                            else { T.darken(base,0); T.badge('erase is off (section 02) — original shown'); } break;
+    case 'border-layout':   renderBorderLayout(result,ctx,W,H,base,T); break;
+    case 'glyph-filter':    renderGlyphFilter(result,ctx,W,H,T); break;
+    case 'text-lines':      renderTextLines(result,ctx,W,H,base,T); break;
+    case 'full-lines':      renderFullLines(result,ctx,W,H,base,T); break;
+    case 'row-bands': case 'coverage': case 'columns': case 'cells': case 'table':
+                            renderColumns(kind,result,ctx,W,H,base,T); break;
+    case 'characters':      renderCharacters(result,ctx,W,H,base,T); break;
+    case 'char-splits':     renderSplits(result,ctx,W,H,base,T); break;
+    case 'char-sheet':      renderContactSheet(result,ctx,W,H,T); break;
+    case 'rec-characters':  renderRecognisedCharacters(result,ctx,W,H,base,T); break;
+    case 'rec-lines':       renderLineText(result,ctx,W,H,base,T); break;
+    case 'rec-table':       renderTableText(result,ctx,W,H,base,T); break;
+  }
+  ctx.textBaseline='alphabetic';
+}
+
+/* ======================================================================
+   BORDERS · rules
+   ====================================================================== */
+function strokeRule(ctx,poly,fallback){
+  ctx.beginPath();
+  if(poly&&poly.length){ ctx.moveTo(poly[0].x+.5,poly[0].y+.5); for(let i=1;i<poly.length;i++) ctx.lineTo(poly[i].x+.5,poly[i].y+.5); }
+  else { ctx.moveTo(fallback[0],fallback[1]); ctx.lineTo(fallback[2],fallback[3]); }
+  ctx.stroke();
+}
+function renderRules(B,ctx,W,H,base,T){
+  T.darken(base,0.45);
+  ctx.lineCap='round';
+  const dots=(poly,fill)=>{ if(!poly) return; ctx.fillStyle=fill; const r=Math.max(2.5,T.strokeW*1.4);
+    for(const p of poly){ ctx.beginPath(); ctx.arc(p.x+.5,p.y+.5,r,0,Math.PI*2); ctx.fill(); } };
+  for(const h of B.rules.hLines){
+    ctx.lineWidth=h.isDashed?Math.max(1,T.strokeW*0.8):Math.max(2,T.strokeW*1.6);
+    ctx.strokeStyle=h.isDashed?'rgba(110,200,255,.45)':'rgba(110,200,255,.95)';
+    strokeRule(ctx,h.polyline,[h.x0,h.y+.5,h.x1,h.y+.5]);
+    if(h.isDashed) dots(h.polyline,'rgba(110,200,255,.95)');
+  }
+  for(const v of B.rules.vLines){
+    ctx.lineWidth=v.isDashed?Math.max(1,T.strokeW*0.8):Math.max(2,T.strokeW*1.6);
+    ctx.strokeStyle=v.isDashed?'rgba(166,255,63,.45)':'rgba(166,255,63,.95)';
+    strokeRule(ctx,v.polyline,[v.x+.5,v.y0,v.x+.5,v.y1]);
+    if(v.isDashed) dots(v.polyline,'rgba(166,255,63,.95)');
+  }
+  ctx.textBaseline='alphabetic';
+  T.badge('H: '+B.rules.hLines.length+'   V: '+B.rules.vLines.length+'   (dashed: '+B.rules.dashedHCount+' h, '+B.rules.dashedVCount+' v)');
+}
+function renderBorderLayout(B,ctx,W,H,base,T){
+  T.darken(base,0.55); ctx.lineCap='round';
+  const L=B.layout, fs=T.fontSize, sw=T.strokeW;
+  for(const h of B.horizontalRules){ ctx.lineWidth=h.long?sw*1.2:sw*0.7; ctx.strokeStyle=h.long?'rgba(110,200,255,.55)':'rgba(110,200,255,.25)'; strokeRule(ctx,h.polyline,[h.x0,h.y,h.x1,h.y]); }
+  for(const v of B.verticalRules){ ctx.lineWidth=v.long?sw*1.2:sw*0.7; ctx.strokeStyle=v.long?'rgba(166,255,63,.55)':'rgba(166,255,63,.25)'; strokeRule(ctx,v.polyline,[v.x,v.y0,v.x,v.y1]); }
   for(const s of L.sections){ ctx.lineWidth=sw*1.6; ctx.strokeStyle='rgba(255,170,70,.9)';
-    ctx.beginPath(); ctx.moveTo(s.x0,s.y+.5); ctx.lineTo(s.x1,s.y+.5); ctx.stroke(); tag(s.x0+sw*2,s.y-fs,'SECTION','rgba(255,193,115,.97)'); }
-  // grid rules
+    ctx.beginPath(); ctx.moveTo(s.x0,s.y+.5); ctx.lineTo(s.x1,s.y+.5); ctx.stroke(); T.tag(s.x0+sw*2,s.y-fs,'SECTION','rgba(255,193,115,.97)'); }
   if(L.grid){ ctx.lineWidth=sw*1.8;
-    for(const h of L.grid.hs){ ctx.strokeStyle='rgba(84,221,126,.95)'; stroke(h.polyline,[h.x0,h.y,h.x1,h.y]); }
-    for(const v of L.grid.vs){ ctx.strokeStyle='rgba(110,220,255,.95)'; stroke(v.polyline,[v.x,v.y0,v.x,v.y1]); }
-    ctx.fillStyle='rgba(255,220,120,.9)'; for(const q of L.grid.hits){ ctx.beginPath(); ctx.arc(q.x,q.y,Math.max(2,sw*1.4),0,7); ctx.fill(); } }
-  // table region / header box / extended column boundaries
-  const box=(b,st,fl)=>{ ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0,b.y1-b.y0); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw*1.9; ctx.strokeStyle=st; ctx.stroke(); };
+    for(const h of L.grid.hs){ ctx.strokeStyle='rgba(84,221,126,.95)'; strokeRule(ctx,h.polyline,[h.x0,h.y,h.x1,h.y]); }
+    for(const v of L.grid.vs){ ctx.strokeStyle='rgba(110,220,255,.95)'; strokeRule(ctx,v.polyline,[v.x,v.y0,v.x,v.y1]); }
+    ctx.fillStyle='rgba(255,220,120,.9)'; for(const q of L.grid.intersections){ ctx.beginPath(); ctx.arc(q.x,q.y,Math.max(2,sw*1.4),0,7); ctx.fill(); } }
+  const box=(b,stroke,fill)=>{ ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0,b.y1-b.y0); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=sw*1.9; ctx.strokeStyle=stroke; ctx.stroke(); };
   if(L.table){ box(L.table,'rgba(84,221,126,.97)','rgba(84,221,126,.08)');
-    tag(L.table.x0+sw*2,L.table.y0+fs,'TABLE FROM BORDERS · '+L.kind+(L.rowsY.length?' · '+Math.max(0,L.rowsY.length-1)+' row bands':'')+(L.colsX.length?' · '+Math.max(0,L.colsX.length-1)+' columns':''),'rgba(84,221,126,.98)'); }
+    T.tag(L.table.x0+sw*2,L.table.y0+fs,'TABLE FROM BORDERS · '+L.kind+(L.rowsY.length?' · '+Math.max(0,L.rowsY.length-1)+' row bands':'')+(L.colsX.length?' · '+Math.max(0,L.colsX.length-1)+' columns':''),'rgba(84,221,126,.98)'); }
   if(L.headerBox){ box(L.headerBox,'rgba(110,160,255,.95)','rgba(110,160,255,.14)');
-    tag(L.headerBox.x0+sw*2,L.headerBox.y0-fs,'HEADER BOX · '+Math.max(0,L.colsX.length-1)+' columns','rgba(155,190,255,.97)');
-    // extend its separators down over the body (to the table bottom or the next section)
+    T.tag(L.headerBox.x0+sw*2,L.headerBox.y0-fs,'HEADER BOX · '+Math.max(0,L.colsX.length-1)+' columns','rgba(155,190,255,.97)');
     let yEnd=L.table?L.table.y1:H; for(const s of L.sections) if(s.y>L.headerBox.y1 && s.y<yEnd) yEnd=s.y;
     ctx.setLineDash([sw*4,sw*3]); ctx.lineWidth=sw*1.2; ctx.strokeStyle='rgba(110,220,255,.8)';
     for(const c of L.colsX){ ctx.beginPath(); ctx.moveTo(c.x+.5,L.headerBox.y1); ctx.lineTo(c.x+.5,yEnd); ctx.stroke(); }
@@ -78,864 +161,283 @@ function renderBorderLayout(B,ctx,W,H,base,sw){
   if(L.kind==='row-rules'){ ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.8)';
     for(const r of L.rowsY){ ctx.beginPath(); ctx.moveTo(r.x0,r.y+.5); ctx.lineTo(r.x1,r.y+.5); ctx.stroke(); } }
   ctx.textBaseline='alphabetic';
-  const txt='rules: '+B.hAll.length+' h / '+B.vAll.length+' v   long: '+B.long.h+' h / '+B.long.v+' v   layout: '+L.kind+'   sections: '+L.sections.length+'   erased: '+B.erased.toLocaleString()+' px';
-  const tw=ctx.measureText(txt).width;
-  ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-  ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
+  T.badge('rules: '+B.horizontalRules.length+' h / '+B.verticalRules.length+' v   long: '+B.longCounts.h+' h / '+B.longCounts.v+' v   layout: '+L.kind+'   sections: '+L.sections.length+'   erased: '+B.erasedPixels.toLocaleString()+' px');
 }
 
-/* ---- COLUMNS group (pre-pass-A column detection) ---------------------- */
-function renderColumns(k,C,ctx,W,H,base,sw){
-  if(base) ctx.drawImage(base,0,0);
-  ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-  const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
-  ctx.font=`600 ${fs}px "JetBrains Mono", monospace`; ctx.lineJoin='round';
-  const msg=t=>{ ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center'; ctx.fillText(t,W/2,H/2); ctx.textAlign='left'; };
-  const badge=txt=>{ const tw=ctx.measureText(txt).width;
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1); };
-  const tag=(x,y,t,col)=>{ const tp=fs*0.3, tw=ctx.measureText(t).width; y=Math.max(fs,y);
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(x,y-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
-    ctx.fillStyle=col; ctx.fillText(t,x+tp,y); };
-  const poly=P=>{ ctx.beginPath(); ctx.moveTo(P[0].x,P[0].y); for(let i=1;i<P.length;i++) ctx.lineTo(P[i].x,P[i].y); ctx.closePath(); };
-  // slanted quad for a de-skewed x' range over a de-skewed y' range
-  const quad=(xa,xb,ya,yb)=>[C.back(xa,ya),C.back(xb,ya),C.back(xb,yb),C.back(xa,yb)];
-  const rowCol={table:['rgba(84,221,126,.95)','rgba(84,221,126,.12)'],
-                header:['rgba(110,160,255,.9)','rgba(110,160,255,.12)'],
-                footer:['rgba(255,170,70,.9)','rgba(255,170,70,.12)'],
-                other:['rgba(150,165,170,.6)','rgba(150,165,170,.08)']};
-  ctx.textBaseline='middle';
-
-  if(k==='clrows'){
-    C.rowsInfo.forEach((r,i)=>{ const P=r.row.poly; if(!P||!P.length) return;
-      const [st,fl]=rowCol[r.kind]||rowCol.other;
-      poly(P); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=st; ctx.stroke();
-      const f=r.row.lines[0].ink;
-      tag(Math.max(0,f.x0-fs*4.2),(f.y0+f.y1)/2,(r.kind==='table'?'T':r.kind==='header'?'H':'F')+(i+1)+'·'+r.pieces+'p',st); });
-    ctx.textBaseline='alphabetic';
-    if(!C.band){ badge('no table band — '+C.reason); return; }
-    badge('table band: rows '+(C.band.r0+1)+'–'+(C.band.r1+1)+' ('+C.band.rows.length+', '+(C.band.fromBorders?'from borders':C.band.parts+(C.band.parts>1?' parts merged':' part'))+')   header rows: '+C.band.r0+'   footer rows: '+(C.rowsInfo.length-1-C.band.r1)+'   page tilt: '+(Math.atan(C.slope)*180/Math.PI).toFixed(2)+'°');
-    return;
+/* ======================================================================
+   TEXT LINES · clean
+   ====================================================================== */
+function renderGlyphFilter(TL,ctx,W,H,T){
+  // raster colour per label status: kept green, split child cyan, too-tall
+  // red, too-short grey, rule-shaped orange, dropped bridge rows dark grey
+  const PAL={[HF_KEPT]:[84,221,126],[HF_SPLIT]:[110,220,255],[HF_TALL]:[255,93,108],
+             [HF_SMALL]:[150,150,150],[HF_RULE]:[255,160,40],[HF_PARENT]:[70,70,70]};
+  const STROKE={[HF_KEPT]:'rgba(84,221,126,.55)',[HF_SPLIT]:'rgba(110,220,255,.95)',[HF_TALL]:'rgba(255,93,108,.9)',
+                [HF_SMALL]:'rgba(170,170,170,.6)',[HF_RULE]:'rgba(255,160,40,.9)',[HF_PARENT]:'rgba(255,255,255,.35)'};
+  const hf=TL.heightFilter, status=hf.labelStatus, labelToComponent=TL.labelToComponent, labels=TL.labels;
+  const img=ctx.createImageData(W,H), d=img.data;
+  for(let i=0,j=0;i<W*H;i++,j+=4){
+    const l=labels[i];
+    if(l<0 || labelToComponent[l]<0){ d[j]=8;d[j+1]=12;d[j+2]=13; }
+    else { const c=PAL[status[l]]||PAL[HF_KEPT]; d[j]=c[0];d[j+1]=c[1];d[j+2]=c[2]; }
+    d[j+3]=255;
   }
-  if(!C.band){ ctx.textBaseline='alphabetic'; msg('no table band — '+C.reason); return; }
+  ctx.putImageData(img,0,0);
+  ctx.lineWidth=T.strokeW;
+  for(const it of hf.items){ if(it.status!==HF_PARENT) continue;           // parents first (dashed) so children draw on top
+    ctx.setLineDash([T.strokeW*4,T.strokeW*3]); ctx.strokeStyle=STROKE[HF_PARENT]; T.rect(it.bb); }
+  ctx.setLineDash([]);
+  for(const it of hf.items){ if(it.status===HF_PARENT) continue; ctx.strokeStyle=STROKE[it.status]||STROKE[HF_KEPT]; T.rect(it.bb); }
+  ctx.textBaseline='alphabetic';
+  const lines=['reference h: '+Math.round(hf.reference)+' px   one glyph = ['+Math.round(hf.minHeight)+', '+Math.round(hf.maxHeight)+'] px',
+               'kept: '+hf.kept+' / '+hf.total+'   split: '+hf.splitParents+' components → '+hf.splitChildren+' pieces (cyan)',
+               'dropped: '+hf.small+' short (grey)   '+hf.tall+' multi-line, not cuttable (red)   '+hf.rule+' rule-shaped (orange)'];
+  const lh=T.fontSize*1.35, boxW=Math.max(...lines.map(t=>ctx.measureText(t).width))+T.pad*2;
+  ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(T.pad,T.pad,boxW,lines.length*lh+T.pad*0.6);
+  ctx.fillStyle='rgba(220,235,240,.97)'; lines.forEach((t,i)=>ctx.fillText(t,T.pad*1.4,T.pad+T.fontSize*0.8+i*lh));
+}
+function renderTextLines(TL,ctx,W,H,base,T){
+  T.darken(base,0.55);
+  let acceptedIndex=0, rejected=0, labelled=0;
+  for(const chain of TL.chains){
+    if(chain.accepted){
+      const c=labelColor(acceptedIndex++), rgb=c[0]+','+c[1]+','+c[2];
+      ctx.lineWidth=T.strokeW*0.7; ctx.strokeStyle=`rgba(${rgb},.55)`; ctx.fillStyle=`rgba(${rgb},.18)`;
+      for(const m of chain.members){ const b=m.bb; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1); T.rect(b); }
+      ctx.lineWidth=T.strokeW*1.3; ctx.strokeStyle=`rgba(${rgb},.95)`; T.rect(chain.bb);
+    } else {
+      rejected++;
+      const b=chain.bb; ctx.lineWidth=T.strokeW; ctx.strokeStyle='rgba(255,93,108,.9)'; ctx.fillStyle='rgba(255,93,108,.10)';
+      ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1); T.rect(b);
+      if(labelled<40){ labelled++; const tp=T.fontSize*0.3, tw=ctx.measureText(chain.reason).width;
+        ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(b.x1+tp,(b.y0+b.y1)/2-T.fontSize*0.6-tp,tw+tp*2,T.fontSize+tp*1.6);
+        ctx.fillStyle='rgba(255,160,160,.97)'; ctx.fillText(chain.reason,b.x1+tp*2,(b.y0+b.y1)/2); }
+    }
+  }
+  ctx.textBaseline='alphabetic';
+  const s=TL.stats;
+  T.badge('glyphs: '+s.glyphs+' / '+s.components+'   lines: '+s.accepted+' accepted, '+rejected+' rejected   reference glyph h: '+Math.round(s.reference)+' px');
+}
+function renderFullLines(TL,ctx,W,H,base,T){
+  T.darken(base,0.55);
+  const F=TL.fullLines, fs=T.fontSize, sw=T.strokeW;
+  let words=0, pieces=0;
+  F.rows.forEach((row,i)=>{
+    ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(110,200,255,.35)';
+    for(const piece of row.lines) T.rect(piece.ink);
+    words+=row.words; pieces+=row.lines.length;
+    if(row.poly&&row.poly.length){ T.poly(row.poly);
+      ctx.fillStyle=i%2?'rgba(84,221,126,.14)':'rgba(166,255,63,.12)'; ctx.fill();
+      ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.95)'; ctx.stroke(); }
+    if(row.centerline&&row.centerline.length){ const C=row.centerline;
+      ctx.beginPath(); ctx.moveTo(C[0].x,C[0].y); for(let k=1;k<C.length;k++) ctx.lineTo(C[k].x,C[k].y);
+      ctx.lineWidth=Math.max(1,sw*0.6); ctx.strokeStyle='rgba(255,255,255,.45)'; ctx.stroke(); }
+    const first=row.lines[0].ink, text='R'+(i+1)+' · '+row.lines.length+'p · '+row.words+'w';
+    const tw=ctx.measureText(text).width, tp=fs*0.3;
+    T.tag(Math.max(0,first.x0-tw-tp*3),(first.y0+first.y1)/2,text,'rgba(166,255,63,.97)');
+  });
+  ctx.textBaseline='alphabetic';
+  T.badge('full lines: '+F.rows.length+'   pieces: '+pieces+'   words: '+words+'   max line h: '+Math.round(F.maxHeight)+' px   page tilt: '+(Math.atan(F.slope)*180/Math.PI).toFixed(2)+'°');
+}
+
+/* ======================================================================
+   CHARACTERS
+   ====================================================================== */
+const KIND_COLOR={single:'rgba(84,221,126,.95)', joined:'rgba(255,110,220,.95)', split:'rgba(110,220,255,.95)',
+                  'engine-split':'rgba(255,220,120,.95)', 'engine-merged':'rgba(255,160,60,.95)', 'engine-resegmented':'rgba(255,220,120,.95)'};
+function renderCharacters(CH,ctx,W,H,base,T){
+  T.darken(base,0.55);
+  ctx.lineWidth=T.strokeW;
+  for(const ch of CH.characters){ ctx.strokeStyle=KIND_COLOR[ch.kind]||KIND_COLOR.single; T.rect(ch.bb); }
+  for(const line of CH.lines){ const first=line.characters[0]; if(!first) continue;
+    T.tag(Math.max(0,first.bb.x0-T.fontSize*4.5),(first.bb.y0+first.bb.y1)/2,'cw '+Math.round(line.charWidth)+'px','rgba(220,235,240,.9)'); }
+  ctx.textBaseline='alphabetic';
+  const s=CH.stats;
+  T.badge('characters: '+s.characters+'   lines: '+s.lines+'   joined parts: '+s.joined+' (magenta)   merged components cut: '+s.split+' (cyan)'+(s.engineSplit!==undefined?'   reconciled with the engine: '+(s.engineResegmented||0)+' words re-segmented, '+s.engineSplit+' split (yellow), '+s.engineMerged+' merged (orange)':'')+'   in table cells: '+s.inCells);
+}
+function renderSplits(CH,ctx,W,H,base,T){
+  T.darken(base,0.55);
+  const sw=T.strokeW;
+  for(const sp of CH.splits){
+    const b=sp.bb, w=b.x1-b.x0+1, h=b.y1-b.y0+1, barH=Math.max(8,h*0.8);
+    ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,220,255,.9)'; T.rect(b);
+    // profile under the component
+    let peak=1; for(const v of sp.profile) if(v>peak) peak=v;
+    ctx.fillStyle='rgba(8,11,12,.8)'; ctx.fillRect(b.x0,b.y1+2,w,barH+2);
+    ctx.fillStyle='rgba(110,200,255,.9)';
+    for(let i=0;i<w;i++){ const hh=sp.profile[i]/peak*barH; ctx.fillRect(b.x0+i,b.y1+2+barH-hh,1,hh); }
+    const yMean=b.y1+2+barH-sp.mean/peak*barH;
+    ctx.strokeStyle='rgba(255,220,120,.9)'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(b.x0,yMean+.5); ctx.lineTo(b.x1+1,yMean+.5); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle='rgba(255,93,108,.95)'; ctx.lineWidth=Math.max(1,sw);
+    for(const cx of sp.cuts){ ctx.beginPath(); ctx.moveTo(cx+.5,b.y0); ctx.lineTo(cx+.5,b.y1+2+barH); ctx.stroke(); }
+  }
+  ctx.textBaseline='alphabetic';
+  T.badge('merged components cut: '+CH.splits.length+'   pieces: '+CH.splits.reduce((n,s)=>n+s.pieces,0));
+}
+function renderContactSheet(CH,ctx,W,H,T){
+  const ink=S.textLines.cleanBinary, labels=S.textLines.labels;
+  const cell=Math.max(24,Math.min(64,Math.round(W/60))), perRow=Math.max(1,Math.floor(W/cell));
+  let col=0, row=0;
+  const place=()=>{ const x=col*cell, y=row*cell; col++; if(col>=perRow){ col=0; row++; } return {x,y}; };
+  for(const line of CH.lines){
+    if(col>0){ col=0; row++; }                     // new sheet row per text line
+    for(const ch of line.characters){
+      const {x,y}=place(); if(y+cell>H) break;
+      ctx.fillStyle='#f2f2ee'; ctx.fillRect(x+1,y+1,cell-2,cell-2);
+      const b=ch.bb, bw=b.x1-b.x0+1, bh=b.y1-b.y0+1, s=Math.min((cell-6)/bw,(cell-6)/bh);
+      const ox=x+3+((cell-6)-bw*s)/2, oy=y+3+((cell-6)-bh*s)/2;
+      const members=new Set(ch.members.map(m=>m.label));
+      ctx.fillStyle='#111';
+      for(let yy=b.y0;yy<=b.y1;yy++) for(let xx=b.x0;xx<=b.x1;xx++){ const i=yy*W+xx; if(ink[i] && members.has(labels[i])) ctx.fillRect(ox+(xx-b.x0)*s,oy+(yy-b.y0)*s,Math.max(1,s),Math.max(1,s)); }
+      ctx.lineWidth=1.5; ctx.strokeStyle=KIND_COLOR[ch.kind]||KIND_COLOR.single; ctx.strokeRect(x+1.5,y+1.5,cell-3,cell-3);
+    }
+  }
+  ctx.textBaseline='alphabetic';
+  T.badge('contact sheet: '+CH.characters.length+' characters, one sheet row per text line');
+}
+
+/* ======================================================================
+   RECOGNITION
+   ====================================================================== */
+const confidenceColor=c=>c>=80?'rgba(84,221,126,.97)':c>=50?'rgba(255,190,60,.97)':'rgba(255,93,108,.97)';
+function renderRecognisedCharacters(RC,ctx,W,H,base,T){
+  T.darken(base,0.6);
+  const CH=S.characters; if(!CH) return;
+  ctx.lineWidth=T.strokeW*0.7;
+  for(const ch of CH.characters){
+    const b=ch.bb, h=b.y1-b.y0+1;
+    if(ch.text){ const col=confidenceColor(ch.confidence);
+      ctx.strokeStyle=col; T.rect(b);
+      ctx.font=`700 ${Math.max(8,Math.round(h*0.9))}px "JetBrains Mono", monospace`; ctx.fillStyle=col; ctx.textAlign='center';
+      ctx.fillText(ch.text,(b.x0+b.x1)/2,(b.y0+b.y1)/2); ctx.textAlign='left'; }
+    else { ctx.strokeStyle='rgba(170,170,170,.6)'; T.rect(b); }
+  }
+  ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; ctx.textBaseline='alphabetic';
+  T.badge('recognised: '+RC.recognised+' / '+RC.characters+' characters   language: '+RC.language+'   grayscale crops, no dictionary, upscale ×'+RC.scale+'   green ≥ 80, amber ≥ 50, red < 50 confidence');
+}
+function renderLineText(RC,ctx,W,H,base,T){
+  T.darken(base,0.65);
+  const rows=S.textLines.fullLines.rows, glyph=S.textLines.stats.reference||20;
+  const rowOf=res=>res.rowIndex>=0?rows[res.rowIndex]:null;
+  // every recognised WORD is drawn inside the engine's own box for it —
+  // same place and same size as the original word, squeezed to the box
+  // width — so the overlay reads against the source glyph by glyph
+  // the engine's word box sometimes spans the whole line (ascender to
+  // descender); cap the font by the glyph height so the overlay never
+  // grows past the original text
+  const drawFitted=(text,b,color)=>{ const h=b.y1-b.y0, w=b.x1-b.x0; if(h<3||w<2) return;
+    ctx.font=`600 ${Math.max(6,Math.round(Math.min(h,1.15*glyph)*0.95))}px "JetBrains Mono", monospace`;
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(b.x0,b.y0,w,h);
+    ctx.fillStyle=color; ctx.fillText(text,b.x0,(b.y0+b.y1)/2,w); };
+  let words=0;
+  for(const res of RC.lines){ const row=rowOf(res);
+    if(row&&row.poly&&row.poly.length){ T.poly(row.poly); ctx.lineWidth=T.strokeW*0.7; ctx.strokeStyle='rgba(110,200,255,.35)'; ctx.stroke(); }
+    if(res.words&&res.words.length){ for(const wd of res.words){ drawFitted(wd.text,wd.bb,confidenceColor(wd.confidence)); words++; } }
+    else if(res.text && row){ const first=row.lines[0].ink;                // no word boxes: fall back to the line string at the row start
+      ctx.font=`600 ${Math.max(9,Math.round(glyph*0.85))}px "JetBrains Mono", monospace`; ctx.fillStyle=confidenceColor(res.confidence);
+      ctx.fillText(res.text, first.x0, (first.y0+first.y1)/2); }
+  }
+  ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; ctx.textBaseline='alphabetic';
+  const mean=RC.lines.length?RC.lines.reduce((s,l)=>s+l.confidence,0)/RC.lines.length:0;
+  T.badge('lines recognised: '+RC.lines.length+(RC.loosePieces?' (incl. '+RC.loosePieces+' loose pieces)':'')+'   words placed: '+words+'   mean line confidence: '+mean.toFixed(1)+'   whole page; each word drawn in its own box, at the original size');
+}
+function renderTableText(RC,ctx,W,H,base,T){
+  T.darken(base,0.65);
+  const C=S.columns;
+  if(!RC.cells || !C || !C.band){ ctx.textBaseline='alphabetic'; return T.message('no table to fill'); }
+  C.band.rows.forEach((r,ri)=>{ C.columns.forEach((c,ci)=>{
+    const cell=C.cells[ri][ci]; const text=RC.cells[ri][ci]; if(!cell) return;
+    const b=cell.bb, h=b.y1-b.y0+1;
+    ctx.lineWidth=T.strokeW*0.7; ctx.strokeStyle='rgba(110,200,255,.5)'; T.rect(b);
+    ctx.font=`700 ${Math.max(9,Math.round(h*0.85))}px "JetBrains Mono", monospace`; ctx.fillStyle='rgba(166,255,63,.97)';
+    ctx.fillText(text, b.x0, (b.y0+b.y1)/2);
+  }); });
+  ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; ctx.textBaseline='alphabetic';
+  T.badge('table text: '+C.band.rows.length+' rows × '+C.columns.length+' columns');
+}
+
+/* ======================================================================
+   COLUMNS
+   ====================================================================== */
+function renderColumns(kind,C,ctx,W,H,base,T){
+  T.darken(base,0.55);
+  const fs=T.fontSize, sw=T.strokeW;
+  const quad=(xa,xb,ya,yb)=>[C.toImage(xa,ya),C.toImage(xb,ya),C.toImage(xb,yb),C.toImage(xa,yb)];   // slanted quad in de-skewed coords
+  const rowColor={table:['rgba(84,221,126,.95)','rgba(84,221,126,.12)'], header:['rgba(110,160,255,.9)','rgba(110,160,255,.12)'],
+                  footer:['rgba(255,170,70,.9)','rgba(255,170,70,.12)'], other:['rgba(150,165,170,.6)','rgba(150,165,170,.08)']};
+  const tilt=(Math.atan(C.slope)*180/Math.PI).toFixed(2)+'° rows, '+(Math.atan(C.columnSlope)*180/Math.PI).toFixed(2)+'° columns';
+  const finish=text=>{ ctx.textBaseline='alphabetic'; T.badge(text); };
+
+  if(kind==='row-bands'){
+    C.rows.forEach((r,i)=>{ const P=r.row.poly; if(!P||!P.length) return;
+      const [stroke,fill]=rowColor[r.kind]||rowColor.other;
+      T.poly(P); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=stroke; ctx.stroke();
+      const f=r.row.lines[0].ink;
+      T.tag(Math.max(0,f.x0-fs*4.2),(f.y0+f.y1)/2,(r.kind==='table'?'T':r.kind==='header'?'H':'F')+(i+1)+'·'+r.pieces+'p',stroke); });
+    if(!C.band) return finish('no table band — '+C.reason);
+    return finish('table band: rows '+(C.band.first+1)+'–'+(C.band.last+1)+' ('+C.band.rows.length+', '+C.band.parts+(C.band.parts>1?' parts merged':' part')+(C.band.fromBorders?', border box folded in':'')+(C.band.foreignRows?', '+C.band.foreignRows+' foreign rows dropped':'')+(C.band.footerCut?', footer cut by '+C.band.footerCut:'')+')   header rows: '+C.band.first+'   footer rows: '+(C.rows.length-1-C.band.last)+'   page tilt: '+tilt);
+  }
+  if(!C.band){ ctx.textBaseline='alphabetic'; return T.message('no table band — '+C.reason); }
   const B=C.band, P=C.profile;
 
-  if(k==='clprofile'){
-    // gutters as slanted shaded bands over the table
-    for(const g of C.gutters){ poly(quad(g.x0,g.x1+1,B.yTop,B.yBot));
-      // red = almost no row crosses; amber = a deep valley between two dense
-      // columns (word-space-sized gap that lines up in every row)
-      ctx.fillStyle=g.rel?'rgba(255,190,60,.20)':'rgba(255,93,108,.18)'; ctx.fill();
-      ctx.lineWidth=sw*0.8; ctx.strokeStyle=g.rel?'rgba(255,190,60,.85)':'rgba(255,93,108,.8)'; ctx.stroke(); }
-    // histogram strip along the bottom of the band (in image x at the band bottom)
-    const barH=Math.max(30,Math.min(H*0.12,160)), yBase=Math.min(H-2, C.back(P.X0,B.yBot).y+barH+fs);
+  if(kind==='coverage'){
+    for(const g of C.gutters){ T.poly(quad(g.x0,g.x1+1,B.yTop,B.yBottom));
+      ctx.fillStyle=g.relative?'rgba(255,190,60,.20)':'rgba(255,93,108,.18)'; ctx.fill();
+      ctx.lineWidth=sw*0.8; ctx.strokeStyle=g.relative?'rgba(255,190,60,.85)':'rgba(255,93,108,.8)'; ctx.stroke(); }
+    const barH=Math.max(30,Math.min(H*0.12,160)), yBase=Math.min(H-2, C.toImage(P.X0,B.yBottom).y+barH+fs);
     ctx.fillStyle='rgba(8,11,12,.7)'; ctx.fillRect(0,yBase-barH-fs*0.4,W,barH+fs*0.8);
-    const nb=P.X1-P.X0+1;
-    for(let i=0;i<nb;i++){ const v=P.cov[i]; if(!v) continue;
-      const x=C.back(P.X0+i,B.yBot).x, h=v/P.nRows*barH;
-      ctx.fillStyle = v<=P.thr ? 'rgba(255,93,108,.9)' : 'rgba(110,200,255,.85)';
+    for(let i=0;i<P.X1-P.X0+1;i++){ const v=P.coverage[i]; if(!v) continue;
+      const x=C.toImage(P.X0+i,B.yBottom).x, h=v/P.rowCount*barH;
+      ctx.fillStyle = v<=P.clearMax ? 'rgba(255,93,108,.9)' : 'rgba(110,200,255,.85)';
       ctx.fillRect(x,yBase-h,1,h); }
-    const yThr=yBase-(P.thr/P.nRows)*barH;
+    const yThr=yBase-(P.clearMax/P.rowCount)*barH;
     ctx.strokeStyle='rgba(255,220,120,.9)'; ctx.lineWidth=1; ctx.setLineDash([sw*3,sw*3]);
     ctx.beginPath(); ctx.moveTo(0,yThr+.5); ctx.lineTo(W,yThr+.5); ctx.stroke(); ctx.setLineDash([]);
-    ctx.textBaseline='alphabetic';
-    badge('band rows: '+P.nRows+'   gutters: '+C.gutters.length+' ('+C.gutters.filter(g=>!g.rel).length+' clear, '+C.gutters.filter(g=>g.rel).length+' deep valleys; min width '+Math.round(P.minW)+' px, clear ≤ '+P.thr.toFixed(1)+' rows, valley ≤ 42 % of its peaks)   glyph h: '+Math.round(C.hMed)+' px');
-    return;
+    return finish('band rows: '+P.rowCount+'   gutters: '+C.gutters.length+' ('+C.gutters.filter(g=>!g.relative).length+' clear, '+C.gutters.filter(g=>g.relative).length+' deep valleys; min width '+Math.round(P.minWidth)+' px, clear ≤ '+P.clearMax.toFixed(1)+' rows, valley ≤ 42 % of its peaks)   glyph h: '+Math.round(C.glyphHeight)+' px');
   }
-
-  if(k==='clcols'){
-    C.gutters.forEach(g=>{ poly(quad(g.x0,g.x1+1,B.yTop,B.yBot)); ctx.setLineDash([sw*3,sw*3]);
-      ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(255,93,108,.6)'; ctx.stroke(); ctx.setLineDash([]); });
-    C.columns.forEach((c,i)=>{ poly(quad(c.x0,c.x1,B.yTop,B.yBot));
+  if(kind==='columns'){
+    for(const g of C.gutters){ T.poly(quad(g.x0,g.x1+1,B.yTop,B.yBottom)); ctx.setLineDash([sw*3,sw*3]);
+      ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(255,93,108,.6)'; ctx.stroke(); ctx.setLineDash([]); }
+    C.columns.forEach((c,i)=>{ T.poly(quad(c.x0,c.x1,B.yTop,B.yBottom));
       ctx.fillStyle=i%2?'rgba(110,200,255,.15)':'rgba(166,255,63,.12)'; ctx.fill();
       ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,200,255,.9)'; ctx.stroke();
-      const q=C.back((c.x0+c.x1)/2,B.yTop);
-      tag(q.x-fs*1.5,q.y-fs*0.9,'C'+(i+1)+' '+c.align+' '+c.cells+'c','rgba(120,205,255,.97)'); });
-    ctx.textBaseline='alphabetic';
-    badge('columns: '+C.columns.length+'   gutters: '+C.gutters.length+(C.guttersFromBorders?' ('+C.guttersFromBorders+' from borders)':'')+'   pieces split across columns: '+C.spanningPieces);
-    return;
+      const q=C.toImage((c.x0+c.x1)/2,B.yTop);
+      T.tag(q.x-fs*1.5,q.y-fs*0.9,'C'+(i+1)+' '+c.align+' '+c.cells+'c','rgba(120,205,255,.97)'); });
+    return finish('columns: '+C.columns.length+'   gutters: '+C.gutters.length+(C.guttersFromBorders?' ('+C.guttersFromBorders+' from borders)':'')+'   pieces split across columns: '+C.spanningPieces);
   }
-
-  if(k==='clcells'){
+  if(kind==='cells'){
     let filled=0, empty=0;
     B.rows.forEach((r,ri)=>{ C.columns.forEach((c,ci)=>{
-      const cl=C.cells[ri][ci];
-      if(cl){ filled++; const b=cl.bb; const col=labColor(ci);
+      const cell=C.cells[ri][ci];
+      if(cell){ filled++; const b=cell.bb, col=labelColor(ci);
         ctx.fillStyle=`rgba(${col[0]},${col[1]},${col[2]},.22)`; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
-        ctx.lineWidth=sw; ctx.strokeStyle=`rgba(${col[0]},${col[1]},${col[2]},.95)`; ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
-      } else { empty++;
-        poly(quad(c.x0,c.x1,r.row.dy.y0,r.row.dy.y1)); ctx.setLineDash([sw*2,sw*2]);
+        ctx.lineWidth=sw; ctx.strokeStyle=`rgba(${col[0]},${col[1]},${col[2]},.95)`; T.rect(b); }
+      else { empty++; T.poly(quad(c.x0,c.x1,r.row.dy.y0,r.row.dy.y1)); ctx.setLineDash([sw*2,sw*2]);
         ctx.lineWidth=sw*0.6; ctx.strokeStyle='rgba(170,170,170,.45)'; ctx.stroke(); ctx.setLineDash([]); }
     }); });
-    ctx.textBaseline='alphabetic';
-    badge('grid: '+B.rows.length+' rows × '+C.columns.length+' columns   filled cells: '+filled+'   empty: '+empty);
-    return;
+    return finish('grid: '+B.rows.length+' rows × '+C.columns.length+' columns   filled cells: '+filled+'   empty: '+empty+(B.rescuedPieces||B.mergedRows?'   rescued: '+(B.rescuedPieces||0)+' pieces, '+(B.mergedRows||0)+' thin rows merged':''));
   }
-
-  if(k==='cltable'){
-    // header / footer regions
-    const hdr=C.rowsInfo.filter(r=>r.kind==='header'), ftr=C.rowsInfo.filter(r=>r.kind==='footer');
-    const region=(rs,st,fl,label)=>{ if(!rs.length) return;
-      let x0=1/0,x1=-1/0; for(const r of rs){ for(const ln of r.row.lines){ const cy=(ln.ink.y0+ln.ink.y1)/2;
-        x0=Math.min(x0,C.toX(ln.ink.x0,cy)); x1=Math.max(x1,C.toX(ln.ink.x1+1,cy)); } }
+  if(kind==='table'){
+    const header=C.rows.filter(r=>r.kind==='header'), footer=C.rows.filter(r=>r.kind==='footer');
+    const region=(rs,stroke,fill,label)=>{ if(!rs.length) return;
+      let x0=1/0,x1=-1/0; for(const r of rs) for(const piece of r.row.lines){ const cy=(piece.ink.y0+piece.ink.y1)/2;
+        x0=Math.min(x0,C.toDeskewedX(piece.ink.x0,cy)); x1=Math.max(x1,C.toDeskewedX(piece.ink.x1+1,cy)); }
       const ya=Math.min(...rs.map(r=>r.row.dy.y0)), yb=Math.max(...rs.map(r=>r.row.dy.y1));
-      poly(quad(x0,x1,ya,yb)); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=st; ctx.stroke();
-      const q=C.back(x0,ya); tag(q.x+sw*2,q.y+fs,label,st); };
-    region(hdr,'rgba(110,160,255,.8)','rgba(110,160,255,.12)','HEADER · '+hdr.length+' rows');
-    region(ftr,'rgba(255,170,70,.8)','rgba(255,170,70,.12)','FOOTER · '+ftr.length+' rows');
-    // table region
+      T.poly(quad(x0,x1,ya,yb)); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=stroke; ctx.stroke();
+      const q=C.toImage(x0,ya); T.tag(q.x+sw*2,q.y+fs,label,stroke); };
+    region(header,'rgba(110,160,255,.8)','rgba(110,160,255,.12)','HEADER · '+header.length+' rows');
+    region(footer,'rgba(255,170,70,.8)','rgba(255,170,70,.12)','FOOTER · '+footer.length+' rows');
     const tx0=Math.min(...C.columns.map(c=>c.x0)), tx1=Math.max(...C.columns.map(c=>c.x1));
-    poly(quad(tx0,tx1,B.yTop,B.yBot)); ctx.fillStyle='rgba(84,221,126,.08)'; ctx.fill();
-    // column separators at gutter centres, row separators between rows
+    T.poly(quad(tx0,tx1,B.yTop,B.yBottom)); ctx.fillStyle='rgba(84,221,126,.08)'; ctx.fill();
     ctx.lineWidth=sw*0.8; ctx.strokeStyle='rgba(166,255,63,.6)';
-    for(const g of C.gutters){ const xm=(g.x0+g.x1+1)/2, a=C.back(xm,B.yTop), b=C.back(xm,B.yBot);
+    for(const g of C.gutters){ const xm=(g.x0+g.x1+1)/2, a=C.toImage(xm,B.yTop), b=C.toImage(xm,B.yBottom);
       ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
     ctx.strokeStyle='rgba(84,221,126,.5)';
     for(let i=1;i<B.rows.length;i++){ const ym=(B.rows[i-1].row.dy.y1+B.rows[i].row.dy.y0)/2;
-      const a=C.back(tx0,ym), b=C.back(tx1,ym); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
-    ctx.lineWidth=sw*1.9; ctx.strokeStyle='rgba(84,221,126,.97)'; poly(quad(tx0,tx1,B.yTop,B.yBot)); ctx.stroke();
-    const q=C.back(tx0,B.yTop); tag(q.x+sw*2,q.y+fs,'TABLE · '+B.rows.length+'R × '+C.columns.length+'C','rgba(84,221,126,.98)');
-    ctx.textBaseline='alphabetic';
-    badge('table: '+B.rows.length+' rows × '+C.columns.length+' columns   header: '+hdr.length+'   footer: '+ftr.length+'   tilt: '+(Math.atan(C.slope)*180/Math.PI).toFixed(2)+'°');
-    return;
-  }
-  ctx.textBaseline='alphabetic';
-}
-
-/* draw any stage descriptor into a W×H 2D context */
-export function renderStageInto(st,ctx,W,H){
-  const sw=Math.max(1.4,Math.round(Math.min(W,H)/520));   // stroke width scaled to image
-  ctx.fillStyle='#0a0e0f'; ctx.fillRect(0,0,W,H);
-
-  if(st.kind==='source'){   if(S.origCanvas)   ctx.drawImage(S.origCanvas,0,0);   return; }
-  if(st.kind==='lens'){ if(S.lensCanvas) ctx.drawImage(S.lensCanvas,0,0); else if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
-  if(st.kind==='rectified'){ if(S.workCanvas) ctx.drawImage(S.workCanvas,0,0); else if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
-  if(st.kind==='deskewed'){ if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
-  if(st.kind==='dewarped'){ if(S.dewarpCanvas) ctx.drawImage(S.dewarpCanvas,0,0); else if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
-
-  const pass = st.pass==='A' ? S.passes.A : st.pass==='C' ? S.passes.C
-             : st.pass==='TL' ? S.textLines : st.pass==='CL' ? S.columns
-             : st.pass==='BR' ? S.borders : S.passes.B;
-  const k=st.kind, N=W*H;
-  if(!pass){
-    if(st.pass==='TL'||st.pass==='CL'||st.pass==='BR'){
-      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.font=`600 ${Math.max(11,Math.round(Math.min(W,H)/90))}px "JetBrains Mono", monospace`;
-      ctx.fillText(st.pass==='TL'?'text-line clean disabled (toggle 02b)':st.pass==='BR'?'border stage disabled (toggle 02a)':'columns disabled (toggle 02c) or text-line clean off',W/2,H/2); ctx.textAlign='left';
-    }
-    return;
-  }
-  // pass A, the border, text-line and column stages run on the lens- and
-  // perspective-corrected raster, so their boxes only line up with that image.
-  const base = (st.pass==='A'||st.pass==='TL'||st.pass==='CL'||st.pass==='BR') ? (S.workCanvas || S.origCanvas) : (S.dewarpCanvas || S.deskewCanvas);
-
-  if(st.pass==='CL'){ renderColumns(k,pass,ctx,W,H,base,sw); return; }
-  if(k==='brlayout'){ renderBorderLayout(pass,ctx,W,H,base,sw); return; }
-  if(k==='brclean'){
-    if(pass.cleanCanvas) ctx.drawImage(pass.cleanCanvas,0,0);
-    else { if(base) ctx.drawImage(base,0,0);
-      const fs=Math.max(11,Math.round(Math.min(W,H)/90)); ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(fs*0.5,fs*0.5,fs*22,fs*1.8);
-      ctx.fillStyle='rgba(255,200,140,.97)'; ctx.fillText('erase is off (section 02a) — original shown',fs*0.9,fs*1.7); }
-    return;
-  }
-
-  if(k==='binary' || k==='dilated' || k==='rawbinary'){   // ---- raster mask ----
-    const mask = k==='binary' ? pass.binary : k==='rawbinary' ? pass.binaryRaw : pass.dilated;
-    const id=ctx.createImageData(W,H), d=id.data;
-    for(let i=0,j=0;i<N;i++,j+=4){
-      const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255;
-    }
-    ctx.putImageData(id,0,0); return;
-  }
-
-  if(k==='borderbinary' || k==='borderhopened' || k==='bordervopened'){
-    // ---- border detector's binary masks ----
-    let mask = null;
-    if(k==='borderbinary')   mask = pass.binaryBorder;
-    if(k==='borderhopened')  mask = pass.borders && pass.borders.debug && pass.borders.debug.hOpened;
-    if(k==='bordervopened')  mask = pass.borders && pass.borders.debug && pass.borders.debug.vOpened;
-    if(!mask){
-      // No data — render a gray placeholder.
-      const id=ctx.createImageData(W,H), d=id.data;
-      for(let j=0;j<d.length;j+=4){ d[j]=d[j+1]=d[j+2]=200; d[j+3]=255; }
-      ctx.putImageData(id,0,0);
-      ctx.fillStyle='#333'; ctx.font='14px ui-monospace,Menlo,monospace';
-      ctx.fillText('(no data — re-run pipeline)', 20, 30);
-      return;
-    }
-    const id=ctx.createImageData(W,H), d=id.data;
-    for(let i=0,j=0;i<N;i++,j+=4){
-      const v=mask[i]?22:244; d[j]=d[j+1]=d[j+2]=v; d[j+3]=255;
-    }
-    ctx.putImageData(id,0,0);
-    return;
-  }
-
-  if(k==='borderdots'){
-    // ---- dashed-detector's dot candidates ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.globalAlpha=0.35;
-    ctx.fillStyle='#000';
-    ctx.fillRect(0,0,W,H);
-    ctx.globalAlpha=1;
-
-    const dbg = pass.borders && pass.borders.debug;
-    if(!dbg || !dbg.dots){
-      ctx.fillStyle='#fff'; ctx.font='14px ui-monospace,Menlo,monospace';
-      ctx.fillText('(no dot data)', 20, 30);
-      return;
-    }
-
-    // Mark each dot's status by location key: ACCEPTED (in detected line),
-    // REJECTED (in rejected chain), or UNCHAINED.
-    const dotKey = (d) => d.cx + ',' + d.cy;
-    const acceptedDot = new Map();        // key -> chain index
-    const rejectedDot = new Map();        // key -> {reason, metric, chainIndex}
-
-    let chainIdx = 0;
-    const acceptedChainColors = [];
-    const tagAccepted = (line) => {
-      if(!line.isDashed || !line.polyline) return;
-      const myIdx = chainIdx++;
-      acceptedChainColors[myIdx] = labColor(myIdx);
-      for(const p of line.polyline){
-        acceptedDot.set(p.x + ',' + p.y, myIdx);
-      }
-    };
-    for(const h of (pass.borders.hLines || [])) tagAccepted(h);
-    for(const v of (pass.borders.vLines || [])) tagAccepted(v);
-
-    let rejectedChainIdx = 0;
-    const rejectedSamples = [];           // chains we'll label
-    for(const rej of (dbg.rejectedChains || [])){
-      const myIdx = rejectedChainIdx++;
-      for(const d of rej.chain){
-        rejectedDot.set(dotKey(d), { reason: rej.reason, metric: rej.metric, idx: myIdx });
-      }
-      if(rejectedSamples.length < 10) rejectedSamples.push(rej);   // keep first 10 for labels
-    }
-
-    // Paint dots.
-    const pad = Math.max(1, sw * 0.5);
-    for(const dot of dbg.dots){
-      const key = dotKey(dot);
-      if(acceptedDot.has(key)){
-        const ci = acceptedDot.get(key);
-        const c = acceptedChainColors[ci];
-        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-      } else if(rejectedDot.has(key)){
-        ctx.fillStyle = 'rgba(255,140,40,0.95)';            // orange = rejected chain
-      } else {
-        ctx.fillStyle = 'rgba(140,140,140,0.55)';           // gray = unchained
-      }
-      ctx.fillRect(dot.x0 - pad, dot.y0 - pad,
-                   dot.x1 - dot.x0 + 1 + pad * 2,
-                   dot.y1 - dot.y0 + 1 + pad * 2);
-    }
-
-    // Annotate up to 10 rejected chains with their rejection reason.
-    ctx.font = (14 * sw) + 'px ui-monospace,Menlo,monospace';
-    ctx.fillStyle = 'rgba(255,200,140,0.95)';
-    for(const rej of rejectedSamples){
-      const first = rej.chain[0];
-      const last  = rej.chain[rej.chain.length - 1];
-      const cx = (first.cx + last.cx) / 2;
-      const cy = (first.cy + last.cy) / 2;
-      let tag = rej.reason + '=';
-      if(typeof rej.metric === 'number'){
-        tag += (rej.metric < 10 ? rej.metric.toFixed(2) : Math.round(rej.metric));
-      }
-      tag += ' (' + rej.chain.length + ' dots)';
-      ctx.fillText(tag, cx + 6, cy);
-    }
-
-    // Header legend.
-    ctx.fillStyle='#fff';
-    ctx.font = (15 * sw) + 'px ui-monospace,Menlo,monospace';
-    ctx.fillText(
-      `dots: ${dbg.dots.length}    accepted-chain dots: ${acceptedDot.size}    ` +
-      `rejected chains: ${(dbg.rejectedChains||[]).length}`,
-      8, 22);
-    ctx.fillStyle='rgba(255,140,40,0.95)';
-    ctx.fillText('orange = rejected chain   (reason shown next to chain)', 8, 42);
-    return;
-  }
-
-  if(k==='cca' || k==='blobs'){                   // ---- labelled raster ----
-    // Blob Pixels shows every blob that passed the min-area filter,
-    // i.e. the list BEFORE the pass-A height filter.
-    const l2b=pass.lab2blobAll||pass.lab2blob, blobs=pass.blobsAll||pass.blobs;
-    const id=ctx.createImageData(W,H), d=id.data;
-    for(let i=0,j=0;i<N;i++,j+=4){
-      const l=pass.labels[i];
-      const idx = k==='cca' ? l : (l>=0?l2b[l]:-1);
-      if(idx<0){d[j]=8;d[j+1]=12;d[j+2]=13;}
-      else{const c=labColor(idx);d[j]=c[0];d[j+1]=c[1];d[j+2]=c[2];}
-      d[j+3]=255;
-    }
-    ctx.putImageData(id,0,0);
-    if(k==='blobs'){
-      ctx.lineWidth=sw; ctx.strokeStyle='rgba(166,255,63,.55)';
-      for(const b of blobs)
-        ctx.strokeRect(b.bb.x0+.5,b.bb.y0+.5,b.bb.x1-b.bb.x0+1,b.bb.y1-b.bb.y0+1);
-    }
-    return;
-  }
-
-  if(k==='heightfilt'){                           // ---- pass-A height filter ----
-    // Raster colour per label status: kept green, split child cyan,
-    // too-tall red, too-short grey, rule-shaped orange.
-    const hf=pass.heightFilter;
-    // HF_PARENT pixels are the bridge rows dropped between two cut lines.
-    const PAL={[HF_KEPT]:[84,221,126],[HF_SPLIT]:[110,220,255],[HF_TALL]:[255,93,108],
-               [HF_SMALL]:[150,150,150],[HF_RULE]:[255,160,40],[HF_PARENT]:[70,70,70]};
-    const STROKE={[HF_KEPT]:'rgba(84,221,126,.55)',[HF_SPLIT]:'rgba(110,220,255,.95)',
-                  [HF_TALL]:'rgba(255,93,108,.9)',[HF_SMALL]:'rgba(170,170,170,.6)',
-                  [HF_RULE]:'rgba(255,160,40,.9)',[HF_PARENT]:'rgba(255,255,255,.35)'};
-    const ls=hf&&hf.labelStatus, l2bAll=pass.lab2blobAll||pass.lab2blob;
-    const id=ctx.createImageData(W,H), d=id.data;
-    for(let i=0,j=0;i<N;i++,j+=4){
-      const l=pass.labels[i];
-      if(l<0 || l2bAll[l]<0){d[j]=8;d[j+1]=12;d[j+2]=13;}      // background / sub-min-area
-      else{ const c=PAL[ls?ls[l]:HF_KEPT]||PAL[HF_KEPT]; d[j]=c[0];d[j+1]=c[1];d[j+2]=c[2]; }
-      d[j+3]=255;
-    }
-    ctx.putImageData(id,0,0);
-    ctx.lineWidth=sw;
-    const items = hf ? hf.items : (pass.blobsAll||pass.blobs).map(b=>({bb:b.bb,status:HF_KEPT}));
-    // parents first (dashed white) so the children's boxes draw on top
-    for(const it of items){ if(it.status!==HF_PARENT) continue;
-      ctx.setLineDash([sw*4,sw*3]); ctx.strokeStyle=STROKE[HF_PARENT];
-      ctx.strokeRect(it.bb.x0+.5,it.bb.y0+.5,it.bb.x1-it.bb.x0+1,it.bb.y1-it.bb.y0+1); }
-    ctx.setLineDash([]);
-    for(const it of items){ if(it.status===HF_PARENT) continue;
-      ctx.strokeStyle=STROKE[it.status]||STROKE[HF_KEPT];
-      ctx.strokeRect(it.bb.x0+.5,it.bb.y0+.5,it.bb.x1-it.bb.x0+1,it.bb.y1-it.bb.y0+1); }
-    // stats badge (top-left)
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5, lh=fs*1.35;
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    const lines = hf
-      ? ['median h: '+Math.round(hf.median)+' px   one line = ['+Math.round(hf.hMin)+', '+Math.round(hf.hMax)+'] px',
-         'kept: '+hf.kept+' / '+hf.total+'   split: '+hf.splitParents+' blobs → '+hf.splitChildren+' lines (cyan)',
-         'dropped: '+hf.small+' short (grey)   '+hf.tall+' multi-line, not cuttable (red)   '+hf.rule+' rule-shaped (orange)']
-      : ['height filter disabled (toggle '+(st.pass==='TL'?'02b':'05')+') — all '+(pass.blobsAll||pass.blobs).length+' blobs kept'];
-    const boxW=Math.max(...lines.map(t=>ctx.measureText(t).width))+pad*2;
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,boxW,lines.length*lh+pad*0.6);
-    ctx.fillStyle='rgba(220,235,240,.97)';
-    lines.forEach((t,i)=>ctx.fillText(t,pad*1.4,pad+fs*0.8+i*lh));
-    return;
-  }
-
-  if(k==='contours'){
-    ctx.lineWidth=sw; ctx.strokeStyle='rgba(166,255,63,.92)'; ctx.lineJoin='round';
-    for(const b of pass.blobs){
-      const ct=b.contour;
-      if(ct.length<2){
-        ctx.fillStyle='rgba(166,255,63,.92)';
-        ctx.fillRect(ct[0].x,ct[0].y,sw,sw); continue;
-      }
-      ctx.beginPath(); ctx.moveTo(ct[0].x+.5,ct[0].y+.5);
-      for(let i=1;i<ct.length;i++) ctx.lineTo(ct[i].x+.5,ct[i].y+.5);
-      ctx.closePath(); ctx.stroke();
-    }
-    return;
-  }
-
-  if(k==='hull'){
-    for(const b of pass.blobs){
-      const ct=b.contour;
-      if(ct.length>=2){
-        ctx.lineWidth=sw*.7; ctx.strokeStyle='rgba(70,215,232,.22)';
-        ctx.beginPath(); ctx.moveTo(ct[0].x+.5,ct[0].y+.5);
-        for(let i=1;i<ct.length;i++) ctx.lineTo(ct[i].x+.5,ct[i].y+.5);
-        ctx.closePath(); ctx.stroke();
-      }
-      const h=b.hull;
-      ctx.lineWidth=sw; ctx.strokeStyle='rgba(255,157,61,.95)';
-      ctx.fillStyle='rgba(255,157,61,.10)';
-      ctx.beginPath(); ctx.moveTo(h[0].x+.5,h[0].y+.5);
-      for(let i=1;i<h.length;i++) ctx.lineTo(h[i].x+.5,h[i].y+.5);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-    }
-    return;
-  }
-
-  if(k==='calipers'){
-    const dot=Math.max(2,sw*1.6);
-    for(const b of pass.blobs){
-      const h=b.hull;
-      ctx.lineWidth=sw*.7; ctx.strokeStyle='rgba(70,215,232,.30)';
-      ctx.beginPath(); ctx.moveTo(h[0].x+.5,h[0].y+.5);
-      for(let i=1;i<h.length;i++) ctx.lineTo(h[i].x+.5,h[i].y+.5);
-      ctx.closePath(); ctx.stroke();
-      const c=b.obb.corners;
-      ctx.lineWidth=sw; ctx.strokeStyle='rgba(166,255,63,.95)';
-      ctx.fillStyle='rgba(166,255,63,.09)';
-      ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
-      for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.fillStyle='#ff9d3d';
-      for(const pt of b.obb.contacts){
-        ctx.beginPath(); ctx.arc(pt.x,pt.y,dot,0,7); ctx.fill();
-      }
-    }
-    return;
-  }
-
-  if(k==='obb'){                                  // final word boxes (post-split)
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.42)'; ctx.fillRect(0,0,W,H);
-    const showRej=$('showRej').checked;
-    ctx.lineWidth=sw; ctx.lineJoin='round';
-    for(const b of pass.blobs){
-      for(const part of b.parts){
-        if(!part.accepted && !showRej) continue;
-        const c=part.corners;
-        ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
-        for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
-        ctx.closePath();
-        if(part.accepted){ctx.strokeStyle='rgba(84,221,126,.95)';ctx.fillStyle='rgba(84,221,126,.13)';}
-        else{ctx.strokeStyle='rgba(255,93,108,.92)';ctx.fillStyle='rgba(255,93,108,.10)';}
-        ctx.fill(); ctx.stroke();
-      }
-    }
-    return;
-  }
-
-  if(k==='density'){                                // ---- height-density filter ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const hf=pass.heightFilter;
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90));
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    if(!hf || !hf.hist){
-      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.fillText(hf?.reason ? 'density filter: '+hf.reason : 'density filter disabled (toggle 07b)', W/2, H/2);
-      ctx.textAlign='left';
-      // still draw the parts as plain-accepted so the gallery shows them
-      ctx.lineWidth=sw; ctx.lineJoin='round';
-      for(const b of pass.blobs) for(const part of b.parts){
-        if(!part.accepted) continue;
-        const c=part.corners;
-        ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
-        for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
-        ctx.closePath();
-        ctx.strokeStyle='rgba(84,221,126,.65)'; ctx.fillStyle='rgba(84,221,126,.08)';
-        ctx.fill(); ctx.stroke();
-      }
-      return;
-    }
-    // draw every part, colour-coded by status
-    ctx.lineWidth=sw; ctx.lineJoin='round';
-    const drawPart=(part,stroke,fill)=>{
-      const c=part.corners;
-      ctx.beginPath(); ctx.moveTo(c[0].x,c[0].y);
-      for(let i=1;i<4;i++) ctx.lineTo(c[i].x,c[i].y);
-      ctx.closePath();
-      ctx.strokeStyle=stroke; ctx.fillStyle=fill;
-      ctx.fill(); ctx.stroke();
-    };
-    let nKept=0, nSplit=0, nSmall=0, nTall=0, nReplaced=0;
-    for(const b of pass.blobs) for(const part of b.parts){
-      if(part.accepted){
-        if(part.fromDensitySplit){
-          drawPart(part,'rgba(110,220,255,.95)','rgba(110,220,255,.15)'); nSplit++;
-        } else {
-          drawPart(part,'rgba(84,221,126,.95)','rgba(84,221,126,.13)'); nKept++;
-        }
-      } else if(part.rejectedBy==='density-small'){
-        drawPart(part,'rgba(170,170,170,.7)','rgba(170,170,170,.06)'); nSmall++;
-      } else if(part.rejectedBy==='density-tall-no-split'){
-        drawPart(part,'rgba(255,93,108,.95)','rgba(255,93,108,.12)'); nTall++;
-      } else if(part.rejectedBy==='density-replaced-by-split'){
-        drawPart(part,'rgba(255,160,40,.8)','rgba(255,160,40,.04)'); nReplaced++;
-      }
-      // parts rejected by earlier stages (CCA filter, splitter) are not drawn here
-    }
-    // histogram overlay (top-right)
-    const hist=hf.hist, bucket=hf.bucket;
-    const padW=Math.max(8, fs*0.5);
-    const chartW=Math.max(160, Math.min(W*0.30, 320));
-    const chartH=Math.max(110, Math.min(H*0.22, 200));
-    const chartX=W-chartW-padW, chartY=padW;
-    ctx.fillStyle='rgba(8,11,12,.85)';
-    ctx.fillRect(chartX,chartY,chartW,chartH);
-    ctx.strokeStyle='rgba(120,130,135,.4)'; ctx.lineWidth=1;
-    ctx.strokeRect(chartX+0.5,chartY+0.5,chartW-1,chartH-1);
-    const nB=hist.length;
-    const peakVal=hf.peakVal;
-    const barW=(chartW-padW*2)/nB;
-    const barAreaH=chartH-padW*2 - fs*1.2;          // leave room for axis label
-    // highlighted band in the back
-    const lo=Math.floor(hf.hMin/bucket), hi=Math.ceil(hf.hMax/bucket);
-    ctx.fillStyle='rgba(84,221,126,.18)';
-    ctx.fillRect(chartX+padW+lo*barW, chartY+padW, (hi-lo)*barW, barAreaH);
-    // bars
-    for(let i=0;i<nB;i++){
-      const v=hist[i];
-      if(v<=0) continue;
-      const bh=Math.max(1, Math.round(v/peakVal*barAreaH));
-      const bx=chartX+padW+i*barW, by=chartY+padW+barAreaH-bh;
-      ctx.fillStyle = (i*bucket>=hf.hMin && i*bucket<hf.hMax)
-        ? 'rgba(84,221,126,.92)'
-        : 'rgba(170,170,170,.70)';
-      ctx.fillRect(bx, by, Math.max(1,barW-1), bh);
-    }
-    // axis labels
-    ctx.fillStyle='rgba(220,235,240,.85)';
-    ctx.font=`500 ${Math.round(fs*0.78)}px "JetBrains Mono", monospace`;
-    ctx.fillText('0', chartX+padW, chartY+chartH-padW*0.4);
-    const maxTxt=Math.round(nB*bucket)+'px';
-    const mtw=ctx.measureText(maxTxt).width;
-    ctx.fillText(maxTxt, chartX+chartW-padW-mtw, chartY+chartH-padW*0.4);
-    const peakTxt='peak '+Math.round(hf.peakH)+'px';
-    const ptw=ctx.measureText(peakTxt).width;
-    ctx.fillText(peakTxt, chartX+(chartW-ptw)/2, chartY+chartH-padW*0.4);
-    // stats text (top-left)
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    const lines=[
-      'band: ['+Math.round(hf.hMin)+', '+Math.round(hf.hMax)+') px',
-      'thresh: '+hf.densityThresh.toFixed(2)+'   peak: '+hf.peakVal,
-      'kept: '+nKept+'    split→'+nSplit+' children ('+hf.splitOk+' parents)',
-      'dropped: '+nSmall+' small   '+nTall+' tall'
-    ];
-    const lh=fs*1.35;
-    const boxW=Math.max(...lines.map(t=>ctx.measureText(t).width))+padW*2;
-    const boxH=lines.length*lh+padW*0.6;
-    ctx.fillStyle='rgba(8,11,12,.85)';
-    ctx.fillRect(padW,padW,boxW,boxH);
-    ctx.fillStyle='rgba(220,235,240,.97)';
-    for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], padW*1.4, padW+fs*0.8+i*lh);
-    return;
-  }
-
-  if(k==='lines'){                                  // ---- pass-A whole-line blobs ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const L=pass.lines;
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    if(!L){
-      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.fillText('line blobs disabled (toggle 05b)',W/2,H/2); ctx.textAlign='left';
-      return;
-    }
-    // tint the fused component mask cyan over the darkened page
-    const id=ctx.getImageData(0,0,W,H), d=id.data, m=L.dilated;
-    for(let i=0,j=0;i<N;i++,j+=4){
-      if(!m[i]) continue;
-      d[j]=(d[j]+110)>>1; d[j+1]=(d[j+1]+200)>>1; d[j+2]=(d[j+2]+255)>>1;
-    }
-    ctx.putImageData(id,0,0);
-    // one box + tag per line
-    ctx.lineWidth=sw; ctx.lineJoin='round'; ctx.textBaseline='middle';
-    let nWords=0;
-    L.lines.forEach((ln,i)=>{
-      const b=ln.bb; nWords+=ln.words.length;
-      ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
-      ctx.fillStyle='rgba(110,200,255,.08)'; ctx.fill();
-      ctx.strokeStyle='rgba(110,200,255,.95)'; ctx.stroke();
-      const t='L'+(i+1)+' · '+ln.words.length+'w';
-      const tw=ctx.measureText(t).width, tp=fs*0.3;
-      const tx=Math.max(0,b.x0-tw-tp*3), ty=(b.y0+b.y1)/2;
-      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(tx,ty-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
-      ctx.fillStyle='rgba(120,205,255,.97)'; ctx.fillText(t,tx+tp,ty);
-    });
-    ctx.textBaseline='alphabetic';
-    const txt='lines: '+L.lines.length+'   words: '+nWords;
-    const tw=ctx.measureText(txt).width;
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
-    return;
-  }
-
-  if(k==='tlchains'){                               // ---- text-line chains ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    ctx.lineJoin='round'; ctx.textBaseline='middle';
-    let ai=0, nRej=0, labelled=0;
-    for(const c of pass.chains){
-      if(c.accepted){
-        const col=labColor(ai++), rgb=col[0]+','+col[1]+','+col[2];
-        ctx.lineWidth=sw*0.7; ctx.strokeStyle=`rgba(${rgb},.55)`; ctx.fillStyle=`rgba(${rgb},.18)`;
-        for(const m of c.members){ const b=m.bb;
-          ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
-          ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
-        const b=c.bb; ctx.lineWidth=sw*1.3; ctx.strokeStyle=`rgba(${rgb},.95)`;
-        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
-      } else {
-        nRej++;
-        const b=c.bb; ctx.lineWidth=sw; ctx.strokeStyle='rgba(255,93,108,.9)'; ctx.fillStyle='rgba(255,93,108,.10)';
-        ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
-        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
-        if(labelled<40){ labelled++;
-          const t=c.reason, tw=ctx.measureText(t).width, tp=fs*0.3;
-          ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(b.x1+tp,(b.y0+b.y1)/2-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
-          ctx.fillStyle='rgba(255,160,160,.97)'; ctx.fillText(t,b.x1+tp*2,(b.y0+b.y1)/2); }
-      }
-    }
-    ctx.textBaseline='alphabetic';
-    const s=pass.stats;
-    const txt='glyphs: '+s.kept+' / '+s.components+'   lines: '+s.accepted+' accepted, '+nRej+' rejected   median glyph h: '+Math.round(s.hMed)+' px';
-    const tw=ctx.measureText(txt).width;
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
-    return;
-  }
-
-  if(k==='fulllines'){                              // ---- full lines (pass A / TL) ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const R=pass.rows;
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    if(!R){
-      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.fillText(st.pass==='TL'?'no full lines':pass.lines?'full lines disabled (toggle 05c)':'full lines need line blobs (toggle 05b)',W/2,H/2);
-      ctx.textAlign='left'; return;
-    }
-    ctx.lineJoin='round'; ctx.textBaseline='middle';
-    let nWords=0, nPieces=0;
-    R.rows.forEach((r,i)=>{
-      // faint outline of each joined piece
-      ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(110,200,255,.35)';
-      for(const ln of r.lines){ const b=ln.ink;
-        ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
-      nWords+=r.words; nPieces+=r.lines.length;
-      // the full line as a polygon that follows its pieces (never the
-      // bounding rectangle, which would overlap neighbouring tilted rows)
-      const P=r.poly||[];
-      if(P.length){
-        ctx.beginPath(); ctx.moveTo(P[0].x,P[0].y);
-        for(let k=1;k<P.length;k++) ctx.lineTo(P[k].x,P[k].y);
-        ctx.closePath();
-        ctx.fillStyle=i%2?'rgba(84,221,126,.14)':'rgba(166,255,63,.12)'; ctx.fill();
-        ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.95)'; ctx.stroke();
-      }
-      // reading path through the piece centres
-      const C=r.centerline||[];
-      if(C.length){
-        ctx.beginPath(); ctx.moveTo(C[0].x,C[0].y);
-        for(let k=1;k<C.length;k++) ctx.lineTo(C[k].x,C[k].y);
-        ctx.lineWidth=Math.max(1,sw*0.6); ctx.strokeStyle='rgba(255,255,255,.45)'; ctx.stroke();
-      }
-      const first=r.lines[0].ink;
-      const t='R'+(i+1)+' · '+r.lines.length+'p · '+r.words+'w';
-      const tw=ctx.measureText(t).width, tp=fs*0.3;
-      const tx=Math.max(0,first.x0-tw-tp*3), ty=(first.y0+first.y1)/2;
-      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(tx,ty-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
-      ctx.fillStyle='rgba(166,255,63,.97)'; ctx.fillText(t,tx+tp,ty);
-    });
-    ctx.textBaseline='alphabetic';
-    const txt='full lines: '+R.rows.length+'   pieces: '+nPieces+'   words: '+nWords+'   max line h: '+Math.round(R.hMax)+' px'
-      +(R.slope!==undefined?'   page tilt: '+(Math.atan(R.slope)*180/Math.PI).toFixed(2)+'°':'');
-    const tw=ctx.measureText(txt).width;
-    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
-    return;
-  }
-
-  if(k==='borders'){                                // ---- detected rules ----
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.45)'; ctx.fillRect(0,0,W,H);
-    const b=pass.borders;
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90));
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    if(!b){
-      ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.fillText('borders not computed',W/2,H/2); ctx.textAlign='left';
-      return;
-    }
-    // Horizontal rules in cyan, vertical rules in lime — same colours
-    // used elsewhere for row/column visualisations so the meaning
-    // carries through.  Each rule has a polyline (one (x,y) per pixel
-    // column for h-rules, per row for v-rules) — draw that as a smooth
-    // stroke so curved rules render as actual curves rather than
-    // collapsing to a straight line at the rule's mean Y / X.
-    const lw = Math.max(2, sw * 1.6);
-    ctx.lineWidth = lw;
-    ctx.lineCap   = 'round';
-    ctx.lineJoin  = 'round';
-
-    const strokePolyline = (poly) => {
-      if(!poly || poly.length < 2) return;
-      ctx.beginPath();
-      ctx.moveTo(poly[0].x + 0.5, poly[0].y + 0.5);
-      for(let i = 1; i < poly.length; i++){
-        ctx.lineTo(poly[i].x + 0.5, poly[i].y + 0.5);
-      }
-      ctx.stroke();
-    };
-
-    const drawDotMarkers = (poly, fill) => {
-      // For dashed rules: draw a small filled circle at every polyline
-      // vertex (= every detected dot's centre).  The polyline itself is
-      // still stroked as a continuous line, so the user sees both the
-      // inferred rule's shape AND where every contributing dot sits.
-      if(!poly) return;
-      ctx.fillStyle = fill;
-      const r = Math.max(2.5, sw * 1.4);
-      for(const p of poly){
-        ctx.beginPath();
-        ctx.arc(p.x + 0.5, p.y + 0.5, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    };
-
-    ctx.strokeStyle = 'rgba(110,200,255,.95)';                  // h-rules
-    for(const h of b.hLines){
-      // For dashed h-rules use a thinner, more transparent stroke so the
-      // dot markers (drawn next) read as the primary signal.
-      if(h.isDashed){
-        ctx.strokeStyle = 'rgba(110,200,255,.45)';
-        ctx.lineWidth   = Math.max(1, sw * 0.8);
-      } else {
-        ctx.strokeStyle = 'rgba(110,200,255,.95)';
-        ctx.lineWidth   = lw;
-      }
-      if(h.polyline) strokePolyline(h.polyline);
-      else {
-        ctx.beginPath();
-        ctx.moveTo(h.x0, h.y + 0.5);
-        ctx.lineTo(h.x1, h.y + 0.5);
-        ctx.stroke();
-      }
-      if(h.isDashed) drawDotMarkers(h.polyline, 'rgba(110,200,255,.95)');
-    }
-
-    for(const v of b.vLines){
-      if(v.isDashed){
-        ctx.strokeStyle = 'rgba(166,255,63,.45)';
-        ctx.lineWidth   = Math.max(1, sw * 0.8);
-      } else {
-        ctx.strokeStyle = 'rgba(166,255,63,.95)';
-        ctx.lineWidth   = lw;
-      }
-      if(v.polyline) strokePolyline(v.polyline);
-      else {
-        ctx.beginPath();
-        ctx.moveTo(v.x + 0.5, v.y0);
-        ctx.lineTo(v.x + 0.5, v.y1);
-        ctx.stroke();
-      }
-      if(v.isDashed) drawDotMarkers(v.polyline, 'rgba(166,255,63,.95)');
-    }
-    ctx.lineWidth = lw;
-    // count badge in the top-left
-    const txt='H: '+b.hLines.length+'   V: '+b.vLines.length;
-    const pad=fs*0.5, tw=ctx.measureText(txt).width;
-    ctx.fillStyle='rgba(8,11,12,.85)';
-    ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
-    ctx.fillStyle='rgba(220,235,240,.97)';
-    ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
-    return;
-  }
-
-  if(k==='rows'||k==='cols'||k==='table'||k==='brows'||k==='bcols'||k==='btable'){
-    // ---- table layout (heuristic or border-only) ----
-    const fromBorders = (k==='brows'||k==='bcols'||k==='btable');
-    const kBase = fromBorders ? k.slice(1) : k;      // 'brows' -> 'rows'
-    if(base) ctx.drawImage(base,0,0);
-    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
-    const L = fromBorders ? pass.layoutBorders : pass.layout;
-    const fs=Math.max(11,Math.round(Math.min(W,H)/90));
-    ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
-    ctx.textBaseline='middle'; ctx.lineJoin='round';
-    const msg=t=>{ ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
-      ctx.fillText(t,W/2,H/2); ctx.textAlign='left'; };
-    // multi-line diagnostic when detection failed
-    const msgDiag=(headline,diag)=>{
-      ctx.textAlign='center';
-      const lines=[headline];
-      if(diag){
-        lines.push('');
-        lines.push(`boxes:${diag.boxes}   rows:${diag.rows}   medH:${diag.medH}`);
-        if(diag.rlsaCols!==undefined){
-          lines.push(`rlsa cols:${diag.rlsaCols}   detect cols:${diag.detectCols}   by-centers:${diag.byCenters}`);
-        }
-        if(diag.borderV!==undefined){
-          lines.push(`borders: v=${diag.borderV}  h=${diag.borderH}`);
-        }
-        const bandLines=[diag.band1,diag.band2,diag.band3].filter(b=>b&&b!=='-');
-        if(bandLines.length) lines.push(`band tries: ${bandLines.join('   ')}`);
-        lines.push(`source: ${diag.source}`);
-      }
-      const lh=fs*1.6, top=H/2-((lines.length-1)*lh)/2;
-      ctx.fillStyle='rgba(230,240,235,.88)';
-      lines.forEach((t,i)=>{
-        if(i===0){ ctx.fillStyle='rgba(255,205,120,.95)'; ctx.fillText(t,W/2,top+i*lh); }
-        else     { ctx.fillStyle='rgba(220,230,235,.78)'; ctx.fillText(t,W/2,top+i*lh); }
-      });
-      ctx.textAlign='left';
-    };
-    if(!L || !L.allRows.length){ msgDiag('table detection produced no layout', L&&L.diag); return; }
-    const tag=(x,y,t,col)=>{
-      const pad=fs*0.34, tw=ctx.measureText(t).width;
-      y=Math.max(fs,y);
-      ctx.fillStyle='rgba(8,11,12,.85)';
-      ctx.fillRect(x,y-fs*0.6-pad,tw+pad*2,fs+pad*1.6);
-      ctx.fillStyle=col; ctx.fillText(t,x+pad,y);
-    };
-    const rect=b=>{ ctx.beginPath(); ctx.rect(b.x0,b.y0,b.x1-b.x0,b.y1-b.y0); };
-    const [bT,bB]=L.tRange;
-
-    if(kBase==='rows'){
-      L.allRows.forEach((r,i)=>{                    // non-table text lines, dim
-        if(i>=bT && i<=bB) return;
-        rect(r); ctx.fillStyle='rgba(150,165,170,.09)'; ctx.fill();
-        ctx.lineWidth=sw; ctx.strokeStyle='rgba(150,165,170,.5)'; ctx.stroke();
-      });
-      L.rows.forEach((r,i)=>{                       // table rows as tiled cells
-        rect(r); ctx.fillStyle='rgba(84,221,126,.14)'; ctx.fill();
-        ctx.lineWidth=sw; ctx.strokeStyle='rgba(84,221,126,.9)'; ctx.stroke();
-        tag(r.x0+sw*2,(r.y0+r.y1)/2,i===L.colHeader?'HDR':'R'+(i+1),'rgba(166,255,63,.96)');
-      });
-      return;
-    }
-    const tb=L.table;
-    if(!tb){ msgDiag('no multi-column table found', L.diag); return; }
-
-    if(kBase==='cols'){
-      L.cols.forEach((c,i)=>{                       // tiled column cells
-        rect(c);
-        ctx.fillStyle=i%2?'rgba(110,200,255,.15)':'rgba(166,255,63,.12)'; ctx.fill();
-        ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,200,255,.85)'; ctx.stroke();
-        tag((c.x0+c.x1)/2-fs,tb.y0+fs*1.1,'C'+(i+1),'rgba(120,205,255,.97)');
-      });
-      return;
-    }
-    // kBase==='table'
-    if(L.header){ rect(L.header);
-      ctx.fillStyle='rgba(110,160,255,.16)'; ctx.fill();
-      ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,160,255,.7)'; ctx.stroke();
-      tag(L.header.x0+sw*2,L.header.y0+fs,'HEADER','rgba(155,190,255,.97)'); }
-    if(L.footer){ rect(L.footer);
-      ctx.fillStyle='rgba(255,170,70,.15)'; ctx.fill();
-      ctx.lineWidth=sw; ctx.strokeStyle='rgba(255,170,70,.7)'; ctx.stroke();
-      tag(L.footer.x0+sw*2,L.footer.y0+fs,'FOOTER','rgba(255,193,115,.97)'); }
-    rect(tb); ctx.fillStyle='rgba(84,221,126,.08)'; ctx.fill();
-    if(L.colHeader>=0 && L.rows[L.colHeader]){       // column-header row band
-      const hr=L.rows[L.colHeader];
-      ctx.beginPath(); ctx.rect(hr.x0,hr.y0,hr.x1-hr.x0,hr.y1-hr.y0);
-      ctx.fillStyle='rgba(166,255,63,.18)'; ctx.fill();
-    }
-    ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(166,255,63,.5)';
-    for(let i=1;i<L.cols.length;i++){                // shared column edges
-      const x=L.cols[i].x0;
-      ctx.beginPath(); ctx.moveTo(x,tb.y0); ctx.lineTo(x,tb.y1); ctx.stroke();
-    }
-    ctx.strokeStyle='rgba(84,221,126,.45)';
-    for(let i=1;i<L.rows.length;i++){                // shared row edges
-      const y=L.rows[i].y0;
-      ctx.beginPath(); ctx.moveTo(tb.x0,y); ctx.lineTo(tb.x1,y); ctx.stroke();
-    }
-    ctx.lineWidth=sw*1.9; ctx.strokeStyle='rgba(84,221,126,.97)';
-    rect(tb); ctx.stroke();
-    tag(tb.x0+sw*2,tb.y0+fs,'TABLE · '+L.rows.length+'R × '+L.cols.length+'C',
-        'rgba(84,221,126,.98)');
-    return;
+      const a=C.toImage(tx0,ym), b=C.toImage(tx1,ym); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    ctx.lineWidth=sw*1.9; ctx.strokeStyle='rgba(84,221,126,.97)'; T.poly(quad(tx0,tx1,B.yTop,B.yBottom)); ctx.stroke();
+    const q=C.toImage(tx0,B.yTop); T.tag(q.x+sw*2,q.y+fs,'TABLE · '+B.rows.length+'R × '+C.columns.length+'C','rgba(84,221,126,.98)');
+    return finish('table: '+B.rows.length+' rows × '+C.columns.length+' columns   header: '+header.length+'   footer: '+footer.length+'   tilt: '+tilt);
   }
 }

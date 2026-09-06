@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CALIPER · WebGPU OBB pipeline</title>
+<title>CALIPER · invoice layout</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -14,10 +14,8 @@
       <line x1="2" y1="5" x2="9" y2="5"/><line x1="2" y1="3" x2="2" y2="7"/><line x1="9" y1="3" x2="9" y2="7"/>
       <line x1="24" y1="24" x2="26" y2="24"/>
     </svg>
-    <div>
-      <div class="title">CALI<b>PER</b></div>
-    </div>
-    <div class="sub">WebGPU&nbsp;·&nbsp;two-pass OBB — Sauvola → dilate → CCA → contour → hull → calipers, before &amp; after deskew</div>
+    <div><div class="title">CALI<b>PER</b></div></div>
+    <div class="sub">WebGPU&nbsp;·&nbsp;rectify → borders → text lines → columns</div>
     <div class="gpu"><span class="dot" id="gpuDot"></span><span id="gpuTxt">checking webgpu…</span></div>
   </header>
 
@@ -25,6 +23,7 @@
     <aside>
       <div class="err-banner" id="errBanner"></div>
 
+      <!-- 00 · source image -->
       <div class="grp">
         <h3><span class="ix">00</span> Source image</h3>
         <div class="drop" id="drop">
@@ -36,395 +35,261 @@
         <div class="meta" id="meta" style="display:none"></div>
       </div>
 
+      <!-- 00b · rectification -->
       <div class="grp">
         <h3><span class="ix">00b</span> Rectification</h3>
         <label class="chk"><input type="checkbox" id="rectify" checked> Rectify image (lens + perspective) before processing</label>
-        <div class="hint">Checked: radial lens distortion is undone and the detected page quad is warped back to a rectangle; every later section works on that rectified image. Unchecked: both corrections are skipped and every section works on the original image as loaded. The Lens-corrected and Rectified stages then simply show the source.</div>
+        <div class="hint">Checked: radial lens distortion is undone and the detected page quad is warped back to a rectangle; every later section works on that rectified image. Unchecked: both corrections are skipped and every section works on the original image as loaded.</div>
       </div>
 
+      <!-- 01 · binarisation -->
       <div class="grp">
-        <h3><span class="ix">01</span> Deskew · rotation</h3>
-        <label class="chk"><input type="checkbox" id="deskew" checked> Auto-correct skew (rotate back)</label>
-        <div id="deskewOpts" style="margin-top:9px">
-          <div class="ctl">
-            <label>Max skew angle <span class="val" id="vSkew">30°</span></label>
-            <input type="range" id="skewMax" min="5" max="45" step="1" value="30">
-            <div class="hint">Projection-profile search range, ± this many degrees.</div>
-          </div>
-          <div class="meta" id="skewOut" style="margin-top:7px">detected angle — run the pipeline</div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">02</span> Binarization · Sauvola</h3>
+        <h3><span class="ix">01</span> Binarisation · Sauvola</h3>
         <div class="ctl">
-          <label>Window size <span class="val" id="vWin">31 px</span></label>
-          <input type="range" id="win" min="3" max="151" step="2" value="31">
-          <div class="hint">Local mean/std window (separable box, GPU).</div>
+          <label>Window size <span class="val" id="sauvolaWindowVal">31 px</span></label>
+          <input type="range" id="sauvolaWindow" min="3" max="151" step="2" value="31">
+          <div class="hint">Local mean / std window of the adaptive threshold T = m·(1 + k·(s/R − 1)). Runs on the GPU.</div>
         </div>
         <div class="ctl">
-          <label>k (threshold weight) <span class="val" id="vK">0.34</span></label>
-          <input type="range" id="k" min="0.01" max="0.80" step="0.01" value="0.34">
+          <label>k (threshold weight) <span class="val" id="sauvolaKVal">0.34</span></label>
+          <input type="range" id="sauvolaK" min="0.01" max="0.80" step="0.01" value="0.34">
         </div>
         <div class="ctl">
-          <label>R (std normalization) <span class="val" id="vR">0.50</span></label>
-          <input type="range" id="rr" min="0.05" max="1.00" step="0.01" value="0.50">
+          <label>R (std normalisation) <span class="val" id="sauvolaRVal">0.50</span></label>
+          <input type="range" id="sauvolaR" min="0.05" max="1.00" step="0.01" value="0.50">
         </div>
         <label class="chk"><input type="checkbox" id="invert"> Invert input (light text on dark)</label>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">02a</span> Borders · rules</h3>
-        <label class="chk"><input type="checkbox" id="brEnable" checked> Detect long borders before the text-line clean</label>
-        <div id="brOpts" style="margin-top:9px">
-          <div class="hint" style="margin-bottom:8px">Runs the rule detector of section 08 (same k for border binary, gap-bridge, opening, thickness, coverage and dashed settings) on the rectified image. Rules are interpreted as a full table grid, a vertical grid, a boxed header row, stacked row rules or section separators, and their pixels are erased before glyph detection so a rule fused to a glyph never spoils a line.</div>
-          <div class="ctl">
-            <label>Long rule <span class="val" id="vBrMinLen">0.25</span> × page width</label>
-            <input type="range" id="brMinLen" min="0.05" max="0.90" step="0.05" value="0.25">
-            <div class="hint">A horizontal rule at least this fraction of the page width (or a vertical one of the page height) counts as long: only long rules can form stacked row rules; the grid uses every rule that intersects another.</div>
-          </div>
-          <div class="ctl">
-            <label>Section rule <span class="val" id="vBrSectionLen">0.50</span> × page width</label>
-            <input type="range" id="brSectionLen" min="0.20" max="0.95" step="0.05" value="0.50">
-            <div class="hint">A long rule outside the table at least this wide is a section separator.</div>
-          </div>
-          <label class="chk"><input type="checkbox" id="brErase" checked> Erase every rule from the image for all later stages</label>
-          <label class="chk"><input type="checkbox" id="brUseCols" checked> Feed the table region and column boundaries to the column stage</label>
-          <div class="hint">Erasing paints every detected rule — table borders, section lines, pen lines, dashed rules — out of the working image with the surrounding paper. Text lines, columns, pass A, deskew, dewarp and passes B and C then process the rule-free image; pass B\u2019s own border detection still reads the original. With a full or vertical grid the column stage takes the table band from the border box; with a header box or a grid it adds the vertical rules as column boundaries where the glyph coverage does not contradict them.</div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">02b</span> Text lines · clean</h3>
-        <label class="chk"><input type="checkbox" id="tlEnable" checked> Detect text lines and remove all non-text before pass A</label>
-        <div id="tlOpts" style="margin-top:9px">
-          <div class="hint" style="margin-bottom:8px">Runs on the rectified image. Character components are filtered, chained into text lines, and only the ink of accepted lines is passed on: pass A runs on this clean binary instead of thresholding the image itself. Chaining (not dilation) is used so that skewed lines are followed and stacked lines never fuse; a pen tick or stroke that reaches two lines is detected as a bridge and can never join them.</div>
-          <div class="ctl">
-            <label>Min glyph height <span class="val" id="vTlMinH">0.30</span> × median</label>
-            <input type="range" id="tlMinH" min="0.05" max="1.00" step="0.05" value="0.30">
-            <div class="hint">Components shorter than this fraction of the median component height are noise: dust, halftone dots, thin rules.</div>
-          </div>
-          <div class="ctl">
-            <label>Max glyph height <span class="val" id="vTlMaxH">2.50</span> × median</label>
-            <input type="range" id="tlMaxH" min="1.20" max="5.00" step="0.10" value="2.50">
-            <div class="hint">Taller components are cut at their ink valleys; whatever is still taller (logos, vertical rules, box borders, uncuttable merges) is removed.</div>
-          </div>
-          <div class="ctl">
-            <label>Max glyph aspect <span class="val" id="vTlMaxAsp">12</span></label>
-            <input type="range" id="tlMaxAsp" min="3" max="40" step="1" value="12">
-            <div class="hint">Width ÷ height above this is rule-shaped. Touching characters in bold or small fonts rarely exceed 6–8.</div>
-          </div>
-          <div class="ctl">
-            <label>Chain gap <span class="val" id="vTlGap">1.50</span> × glyph height</label>
-            <input type="range" id="tlGap" min="0.30" max="4.00" step="0.10" value="1.50">
-            <div class="hint">Two components on the same line are linked when the horizontal gap between them is at most this multiple of the taller one. Word spaces are ~0.3–0.6; column gutters are usually 2+.</div>
-          </div>
-          <div class="ctl">
-            <label>Min vertical overlap <span class="val" id="vTlOverlap">0.35</span> × glyph height</label>
-            <input type="range" id="tlOverlap" min="0.10" max="0.90" step="0.05" value="0.35">
-            <div class="hint">Linked components must overlap vertically by this fraction of the shorter one. Lower follows steeper skew; higher separates tightly stacked lines more strictly.</div>
-          </div>
-          <div class="ctl">
-            <label>Min glyphs per line <span class="val" id="vTlMinChars">1</span></label>
-            <input type="range" id="tlMinChars" min="1" max="6" step="1" value="1">
-            <div class="hint">Chains with fewer components are rejected. At 1, a lone component is still accepted only if it looks like a glyph (height, fill and aspect checks).</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">02c</span> Columns</h3>
-        <label class="chk"><input type="checkbox" id="clEnable" checked> Detect the table band, gutters, columns and cells</label>
-        <div id="clOpts" style="margin-top:9px">
-          <div class="hint" style="margin-bottom:8px">Works on the full lines of 02b in the de-skewed frame. Rows with enough pieces form the table band; a coverage profile of the glyphs across that band exposes the gutters; the intervals between gutters are the columns and every glyph is assigned to the column under its centre. Needs no rules or borders.</div>
-          <div class="ctl">
-            <label>Min pieces per table row <span class="val" id="vClMinPieces">3</span></label>
-            <input type="range" id="clMinPieces" min="2" max="8" step="1" value="3">
-            <div class="hint">A full line with at least this many pieces counts as a table row. Key/value rows like "Invoice Date : 16.05.2026" have 2 pieces, so 3 keeps them out of the band.</div>
-          </div>
-          <div class="ctl">
-            <label>Row gap tolerance <span class="val" id="vClRowGap">1</span> rows</label>
-            <input type="range" id="clRowGap" min="0" max="3" step="1" value="1">
-            <div class="hint">How many consecutive non-tabular rows (blank or wrapped cells) may sit inside the band without ending it.</div>
-          </div>
-          <div class="ctl">
-            <label>Band merge gap <span class="val" id="vClMergeGap">6</span> rows</label>
-            <input type="range" id="clMergeGap" min="0" max="15" step="1" value="6">
-            <div class="hint">An invoice has one item table. When a watermark, a pen line or a paper fold damages a few rows, the table shows up as two separate runs of tabular rows; a second run within this many rows of the main one is merged back in if its glyphs respect the main run's gutters (same columns), together with the damaged rows in between. 0 disables merging.</div>
-          </div>
-          <div class="ctl">
-            <label>Min gutter width <span class="val" id="vClGutterW">0.30</span> × glyph height</label>
-            <input type="range" id="clGutterW" min="0.10" max="3.00" step="0.05" value="0.30">
-            <div class="hint">A valley narrower than this cannot be a gutter. A gutter is either a clear run (coverage below the max below) or a deep valley — coverage at most 42 % of the lower neighbouring peak — which is how columns separated only by a word-space-sized gap that lines up in every row are found. Word spaces inside a column fall at different positions per row and never dip that deep.</div>
-          </div>
-          <div class="ctl">
-            <label>Max gutter coverage <span class="val" id="vClGutterCov">0.10</span> × rows</label>
-            <input type="range" id="clGutterCov" min="0.00" max="0.50" step="0.02" value="0.10">
-            <div class="hint">A gutter may be crossed by at most this fraction of the band rows (a long product name spilling into the next column). 0 demands a perfectly clear gutter.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">03</span> Morphology · before rotate</h3>
-        <div class="ctl">
-          <label>Dilation H <span class="val" id="vDilHa">3 px</span></label>
-          <input type="range" id="dilHa" min="0" max="40" step="1" value="3">
-          <div class="hint">Pass A — runs on the original (pre-deskew) image.</div>
-        </div>
-        <div class="ctl">
-          <label>Dilation V <span class="val" id="vDilVa">1 px</span></label>
-          <input type="range" id="dilVa" min="0" max="40" step="1" value="1">
-          <div class="hint">Separable box dilation on the GPU; full kernel = 2r+1.</div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">04</span> Components</h3>
-        <div class="ctl">
-          <label style="margin-bottom:5px">Connectivity</label>
-          <div class="seg" id="conn">
+        <div class="ctl" style="margin-top:9px">
+          <label style="margin-bottom:5px">Component connectivity</label>
+          <div class="seg" id="connectivity">
             <button data-c="4">4-conn</button>
             <button data-c="8" class="on">8-conn</button>
           </div>
         </div>
         <div class="ctl" style="margin-top:9px">
-          <label>Min blob area <span class="val" id="vMin">12 px</span></label>
-          <input type="range" id="minA" min="1" max="400" step="1" value="12">
-          <div class="hint">Drops speckle noise below this pixel count.</div>
+          <label>Min component area <span class="val" id="minAreaVal">12 px</span></label>
+          <input type="range" id="minArea" min="1" max="400" step="1" value="12">
+          <div class="hint">Connected components below this pixel count are speckle and are dropped before any analysis.</div>
         </div>
       </div>
 
+      <!-- 02 · borders -->
       <div class="grp">
-        <h3><span class="ix">05</span> Height filter · pass A</h3>
-        <label class="chk"><input type="checkbox" id="heightFilter" checked> One blob = one letter, word or line; keep only text-shaped blobs</label>
-        <div id="heightOpts" style="margin-top:9px">
+        <h3><span class="ix">02</span> Borders · rules</h3>
+        <label class="chk"><input type="checkbox" id="bordersEnable" checked> Detect long rules and erase them for every later stage</label>
+        <div id="bordersOptions" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Rules are traced on a separate Sauvola binary built with the lower k below (thin and faint rules survive), then interpreted as a full table grid, a vertical grid, a boxed header row, stacked row rules or section separators. Their pixels are painted out of the working image with the surrounding paper, so text lines and columns never see a rule, and the table region and column boundaries are handed to the column stage.</div>
           <div class="ctl">
-            <label>Max line height <span class="val" id="vHSplit">1.60</span> × median</label>
-            <input type="range" id="hSplitF" min="1.20" max="3.00" step="0.05" value="1.60">
-            <div class="hint">A blob taller than this multiple of the median blob height spans more than one line: its ink is projected onto Y and cut at every genuine valley, and each piece becomes its own blob. Any blob or piece still taller than this after the cut is a merge that could not be separated and is removed. Blobs wider than the section 06 max aspect ratio (× their height) are also dropped as rule-shaped. Runs on the before-rotate pass only, right after the min-area filter, so contours, hulls, calipers and OBBs are computed on the survivors.</div>
+            <label>k for the border binary <span class="val" id="rulesKVal">0.18</span></label>
+            <input type="range" id="rulesK" min="0.01" max="0.80" step="0.01" value="0.18">
           </div>
           <div class="ctl">
-            <label>Min height <span class="val" id="vHMin">0.30</span> × median</label>
-            <input type="range" id="hMinF" min="0.05" max="1.00" step="0.05" value="0.30">
-            <div class="hint">Blobs shorter than this fraction of the median blob height are removed — dots, dashes, speckle and thin horizontal rules.</div>
+            <label>Long rule <span class="val" id="bordersLongRuleVal">0.25</span> × page width</label>
+            <input type="range" id="bordersLongRule" min="0.05" max="0.90" step="0.05" value="0.25">
+            <div class="hint">A horizontal rule at least this fraction of the page width (or a vertical one of the page height) counts as long: only long rules can form stacked row rules; the grid uses every rule that intersects another.</div>
+          </div>
+          <div class="ctl">
+            <label>Section rule <span class="val" id="bordersSectionRuleVal">0.50</span> × page width</label>
+            <input type="range" id="bordersSectionRule" min="0.20" max="0.95" step="0.05" value="0.50">
+            <div class="hint">A long rule outside the table at least this wide is a section separator.</div>
+          </div>
+          <label class="chk"><input type="checkbox" id="bordersErase" checked> Erase every rule from the image for all later stages</label>
+          <label class="chk"><input type="checkbox" id="bordersFeedColumns" checked> Feed the table region and column boundaries to the column stage</label>
+
+          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
+            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Rule tracing · solid rules</summary>
+            <div class="hint" style="margin:6px 0">Rules are extracted by bridging gaps in each row / column, then a morphological opening keeps only locally-near-horizontal (or near-vertical) structures, then per-component centreline tracing gives a polyline.</div>
+            <div class="ctl">
+              <label>Min length <span class="val" id="rulesMinLengthVal">0.18</span> × side</label>
+              <input type="range" id="rulesMinLength" min="0.05" max="0.60" step="0.01" value="0.18">
+              <div class="hint">A horizontal rule must span at least this fraction of the image width. Vertical rules use a much lower fixed fraction so short cell borders survive.</div>
+            </div>
+            <div class="ctl">
+              <label>Gap bridge · horizontal <span class="val" id="rulesGapHVal">12 px</span></label>
+              <input type="range" id="rulesGapH" min="0" max="40" step="1" value="12">
+            </div>
+            <div class="ctl">
+              <label>Gap bridge · vertical <span class="val" id="rulesGapVVal">12 px</span></label>
+              <input type="range" id="rulesGapV" min="0" max="40" step="1" value="12">
+              <div class="hint">Gaps up to this many pixels between consecutive ink runs in the same row / column are bridged (text crossings). Set ≥ the widest glyph that typically crosses a rule.</div>
+            </div>
+            <div class="ctl">
+              <label>Opening kernel · horizontal <span class="val" id="rulesOpenHVal">8 px</span></label>
+              <input type="range" id="rulesOpenH" min="2" max="20" step="1" value="8">
+            </div>
+            <div class="ctl">
+              <label>Opening kernel · vertical <span class="val" id="rulesOpenVVal">8 px</span></label>
+              <input type="range" id="rulesOpenV" min="2" max="20" step="1" value="8">
+              <div class="hint">Erosion + dilation radius. Larger rejects text more aggressively but tolerates less curvature.</div>
+            </div>
+            <div class="ctl">
+              <label>Max thickness <span class="val" id="rulesMaxThicknessVal">8 px</span></label>
+              <input type="range" id="rulesMaxThickness" min="1" max="30" step="1" value="8">
+              <div class="hint">Discards rules whose mean ink thickness exceeds this. Genuine rules are 1–3 px; text lines register as 6–15.</div>
+            </div>
+            <div class="ctl">
+              <label>Min coverage <span class="val" id="rulesMinCoverageVal">0.70</span></label>
+              <input type="range" id="rulesMinCoverage" min="0.30" max="1.00" step="0.05" value="0.70">
+              <div class="hint">Fraction of the traced polyline that coincides with ink in the binary. Real rules score ≈ 1; joined shards score lower.</div>
+            </div>
+            <div class="ctl">
+              <label>Polyline smoothing radius <span class="val" id="rulesSmoothingVal">15</span></label>
+              <input type="range" id="rulesSmoothing" min="0" max="50" step="1" value="15">
+            </div>
+          </details>
+
+          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
+            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Rule tracing · dashed / dotted rules</summary>
+            <div class="hint" style="margin:6px 0">Small components clustered into chains with uniform size and stride. Chains failing periodicity, size consistency or stride-to-size gates are rejected.</div>
+            <label class="chk"><input type="checkbox" id="rulesDashed" checked> Detect dashed / dotted rules</label>
+            <div class="ctl" style="margin-top:9px">
+              <label>Max dot size <span class="val" id="rulesDotMaxSizeVal">6 px</span></label>
+              <input type="range" id="rulesDotMaxSize" min="1" max="12" step="1" value="6">
+            </div>
+            <div class="ctl">
+              <label>Min dots in chain <span class="val" id="rulesDotMinCountVal">4</span></label>
+              <input type="range" id="rulesDotMinCount" min="3" max="15" step="1" value="4">
+            </div>
+            <div class="ctl">
+              <label>Min stride / dot-size ratio <span class="val" id="rulesDotStrideVal">2.0</span></label>
+              <input type="range" id="rulesDotStride" min="1.0" max="5.0" step="0.1" value="2.0">
+              <div class="hint">A dashed rule has stride ≫ dot size; tightly packed small text has stride ≈ character width.</div>
+            </div>
+            <div class="ctl">
+              <label>Min length <span class="val" id="rulesDashedMinLengthVal">0.30</span> × side</label>
+              <input type="range" id="rulesDashedMinLength" min="0.10" max="0.80" step="0.05" value="0.30">
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 03 · text lines -->
+      <div class="grp">
+        <h3><span class="ix">03</span> Text lines · clean</h3>
+        <label class="chk"><input type="checkbox" id="tlEnable" checked> Detect text lines and remove all non-text</label>
+        <div id="tlOptions" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Runs on the rules-erased image. Character components are filtered, chained into text lines, and only the ink of accepted lines is kept. Chaining (not dilation) is used so that skewed lines are followed and stacked lines never fuse; a pen tick or stroke that reaches two lines is detected as a bridge and can never join them.</div>
+          <div class="ctl">
+            <label>Min glyph height <span class="val" id="tlMinGlyphHeightVal">0.30</span> × reference</label>
+            <input type="range" id="tlMinGlyphHeight" min="0.05" max="1.00" step="0.05" value="0.30">
+            <div class="hint">Components shorter than this fraction of the reference glyph height are noise: dust, halftone dots, thin rules.</div>
+          </div>
+          <div class="ctl">
+            <label>Max glyph height <span class="val" id="tlMaxGlyphHeightVal">2.50</span> × reference</label>
+            <input type="range" id="tlMaxGlyphHeight" min="1.20" max="5.00" step="0.10" value="2.50">
+            <div class="hint">Taller components are cut at their ink valleys; whatever is still taller (logos, vertical rules, box borders, uncuttable merges) is removed. Raise it if a large-font heading disappears.</div>
+          </div>
+          <div class="ctl">
+            <label>Max glyph aspect <span class="val" id="tlMaxGlyphAspectVal">12</span></label>
+            <input type="range" id="tlMaxGlyphAspect" min="3" max="40" step="1" value="12">
+            <div class="hint">Width ÷ height above this is rule-shaped. Touching characters in bold or small fonts rarely exceed 6–8.</div>
+          </div>
+          <div class="ctl">
+            <label>Chain gap <span class="val" id="tlChainGapVal">1.50</span> × glyph height</label>
+            <input type="range" id="tlChainGap" min="0.30" max="4.00" step="0.10" value="1.50">
+            <div class="hint">Two components on the same line are linked when the horizontal gap between them is at most this multiple of the taller one. Word spaces are ≈ 0.3–0.6; column gutters are usually 2+.</div>
+          </div>
+          <div class="ctl">
+            <label>Min vertical overlap <span class="val" id="tlMinOverlapVal">0.35</span> × glyph height</label>
+            <input type="range" id="tlMinOverlap" min="0.10" max="0.90" step="0.05" value="0.35">
+            <div class="hint">Linked components must overlap vertically by this fraction of the shorter one. Lower follows steeper skew; higher separates tightly stacked lines more strictly.</div>
+          </div>
+          <div class="ctl">
+            <label>Min glyphs per line <span class="val" id="tlMinGlyphsVal">1</span></label>
+            <input type="range" id="tlMinGlyphs" min="1" max="6" step="1" value="1">
+            <div class="hint">Chains with fewer components are rejected. At 1, a lone component is still accepted only if it looks like a glyph and sits inside the page.</div>
           </div>
         </div>
       </div>
 
+      <!-- 04 · columns -->
       <div class="grp">
-        <h3><span class="ix">05b</span> Line blobs · pass A</h3>
-        <label class="chk"><input type="checkbox" id="lineBlobs" checked> Fuse the kept word blobs into whole-line blobs</label>
-        <div id="lineOpts" style="margin-top:9px">
+        <h3><span class="ix">04</span> Columns</h3>
+        <label class="chk"><input type="checkbox" id="clEnable" checked> Detect the table band, gutters, columns and cells</label>
+        <div id="clOptions" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Works on the full lines of section 03 in the de-skewed frame. Rows with enough pieces form the table band; a glyph coverage profile across the band exposes the gutters; the intervals between gutters are the columns and every glyph goes to the column under its centre.</div>
           <div class="ctl">
-            <label>Line dilation H <span class="val" id="vLineDilH">60 px</span></label>
-            <input type="range" id="lineDilH" min="0" max="300" step="5" value="60">
-            <div class="hint">Horizontal growth applied to the blobs that survived section 05, so that neighbouring words on the same line merge into one component. Set it larger than the widest word gap on the page and smaller than the column gutter you want to keep separate.</div>
+            <label>Min pieces per table row <span class="val" id="clMinPiecesVal">3</span></label>
+            <input type="range" id="clMinPieces" min="2" max="8" step="1" value="3">
+            <div class="hint">A full line with at least this many pieces counts as a table row. Key / value rows like "Invoice Date : 16.05.2026" have 2 pieces, so 3 keeps them out of the band.</div>
           </div>
           <div class="ctl">
-            <label>Line dilation V <span class="val" id="vLineDilV">1 px</span></label>
-            <input type="range" id="lineDilV" min="0" max="10" step="1" value="1">
-            <div class="hint">Vertical growth. Keep it far below the line gap so stacked lines stay separate. Because rules, borders, logos and multi-line merges were already removed in section 05, the fused components are clean whole text lines; the stage shows each line with its word count.</div>
+            <label>Row gap tolerance <span class="val" id="clRowGapVal">1</span> rows</label>
+            <input type="range" id="clRowGap" min="0" max="3" step="1" value="1">
+            <div class="hint">How many consecutive non-tabular rows (blank or wrapped cells) may sit inside the band without ending it.</div>
+          </div>
+          <div class="ctl">
+            <label>Band merge gap <span class="val" id="clMergeGapVal">6</span> rows</label>
+            <input type="range" id="clMergeGap" min="0" max="15" step="1" value="6">
+            <div class="hint">An invoice has one item table. When a watermark, a pen line or a paper fold damages a few rows, the table shows up as two runs of tabular rows; a second run within this many rows of the main one is merged back in when its glyphs respect the same gutters. 0 disables merging.</div>
+          </div>
+          <div class="ctl">
+            <label>Min gutter width <span class="val" id="clGutterWidthVal">0.40</span> × glyph height</label>
+            <input type="range" id="clGutterWidth" min="0.10" max="3.00" step="0.05" value="0.40">
+            <div class="hint">A valley narrower than this cannot be a gutter. A gutter is either a clear run (coverage below the max below) or a deep valley — coverage at most 42 % of the lower neighbouring peak — which is how columns separated only by a word-space-sized gap that lines up in every row are found.</div>
+          </div>
+          <div class="ctl">
+            <label>Max gutter coverage <span class="val" id="clGutterCoverageVal">0.10</span> × rows</label>
+            <input type="range" id="clGutterCoverage" min="0.00" max="0.50" step="0.02" value="0.10">
+            <div class="hint">A clear gutter may be crossed by at most this fraction of the band rows (a long product name spilling into the next column).</div>
           </div>
         </div>
       </div>
 
+      <!-- 05 · characters -->
       <div class="grp">
-        <h3><span class="ix">05c</span> Full lines · pass A</h3>
-        <label class="chk"><input type="checkbox" id="fullLines" checked> Join line blobs left to right into one full line per row</label>
-        <div id="fullOpts" style="margin-top:9px">
+        <h3><span class="ix">05</span> Characters</h3>
+        <label class="chk"><input type="checkbox" id="chEnable" checked> Segment every text line into single symbols</label>
+        <div id="chOptions" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Inside each accepted line, stacked parts of one symbol (i-dot and stem, the dots of a colon) are joined, and a component much wider than the line\u2019s typical character is cut at the low-ink valleys of its column profile.</div>
           <div class="ctl">
-            <label>Min vertical overlap <span class="val" id="vFullOverlap">0.50</span> × line height</label>
-            <input type="range" id="fullOverlap" min="0.20" max="0.90" step="0.05" value="0.50">
-            <div class="hint">Two line blobs from section 05b are joined into one full line when their ink overlaps vertically by at least this fraction of the shorter one. Each piece is judged against its nearest piece in the row, so a gently curled row still joins end to end. A join is always refused when the two neighbours together would exceed the section 05 max line height, and also whenever the two pieces overlap horizontally: reading left to right there is exactly one piece at any horizontal position, so pieces that share an x range are different lines no matter how little they are offset. The result is one line per text row spanning from its leftmost to its rightmost piece.</div>
+            <label>Join overlap <span class="val" id="chJoinOverlapVal">0.50</span> × narrower part</label>
+            <input type="range" id="chJoinOverlap" min="0.20" max="0.95" step="0.05" value="0.50">
+            <div class="hint">Two components of the same line are one symbol when their x ranges overlap by this fraction of the narrower one.</div>
+          </div>
+          <div class="ctl">
+            <label>Split above <span class="val" id="chSplitRatioVal">1.30</span> × character width</label>
+            <input type="range" id="chSplitRatio" min="1.10" max="3.00" step="0.05" value="1.30">
+            <div class="hint">A symbol wider than this multiple of the line\u2019s median character width is a merge and is cut. Keep it above 1.5 so m and w are not cut.</div>
+          </div>
+          <div class="ctl">
+            <label>Valley depth <span class="val" id="chValleyDepthVal">0.25</span> × mean ink</label>
+            <input type="range" id="chValleyDepth" min="0.05" max="0.80" step="0.05" value="0.25">
+            <div class="hint">A cut column must carry at most this fraction of the component\u2019s mean ink per column.</div>
+          </div>
+          <div class="ctl">
+            <label>Min character width <span class="val" id="chMinWidthVal">0.35</span> × character width</label>
+            <input type="range" id="chMinWidth" min="0.15" max="0.80" step="0.05" value="0.35">
+            <div class="hint">Pieces narrower than this are merged back into their neighbour, and cuts are at least this far apart.</div>
           </div>
         </div>
       </div>
 
+      <!-- 06 · recognition -->
       <div class="grp">
-        <h3><span class="ix">06</span> Non-character filter</h3>
-        <label class="chk"><input type="checkbox" id="rmNon" checked> Remove lines / rules / table borders</label>
-        <div id="nonOpts" style="margin-top:9px">
+        <h3><span class="ix">06</span> Recognition</h3>
+        <label class="chk"><input type="checkbox" id="rcEnable" checked> Recognise the characters (Tesseract.js)</label>
+        <div id="rcOptions" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Each full line is recognised on the clean binary in single-line mode and the engine\u2019s symbols are mapped onto the character boxes. The library and language data are downloaded from the jsDelivr CDN the first time and cached by the browser, so the first run needs a network connection.</div>
           <div class="ctl">
-            <label>Max aspect ratio <span class="val" id="vAsp">16</span></label>
-            <input type="range" id="asp" min="3" max="60" step="1" value="16">
-          </div>
-          <div class="ctl">
-            <label>Min fill ratio <span class="val" id="vFill">0.08</span></label>
-            <input type="range" id="fill" min="0.01" max="0.6" step="0.01" value="0.08">
-            <div class="hint">Hollow box borders fill little of their OBB.</div>
-          </div>
-          <div class="ctl">
-            <label>Max length (× short side) <span class="val" id="vLen">0.55</span></label>
-            <input type="range" id="len" min="0.1" max="1" step="0.05" value="0.55">
-          </div>
-          <div class="ctl">
-            <label>Max OBB area (× image) <span class="val" id="vArea">0.30</span></label>
-            <input type="range" id="amax" min="0.02" max="0.9" step="0.02" value="0.30">
-          </div>
-          <label class="chk"><input type="checkbox" id="showRej" checked> Show rejected boxes (red)</label>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">07</span> Split merged boxes</h3>
-        <label class="chk"><input type="checkbox" id="splitMerged" checked> Split boxes that span two text lines</label>
-        <div id="splitOpts" style="margin-top:9px">
-          <div class="ctl">
-            <label>Oversize threshold <span class="val" id="vSplit">1.60×</span></label>
-            <input type="range" id="splitRatio" min="1.3" max="2.6" step="0.05" value="1.6">
-            <div class="hint">A box taller than this multiple of the median word height is cut at the line gap; if a piece is still too tall it is re-dilated with reduced Dilation H (twice), then flagged rejected. After-rotate pass; accepted and rejected boxes alike.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">07b</span> Height-density filter</h3>
-        <label class="chk"><input type="checkbox" id="densityFilter"> Reject blobs outside the modal height band</label>
-        <div id="densityOpts" style="margin-top:9px;opacity:.4">
-          <div class="ctl">
-            <label>Density threshold <span class="val" id="vDens">0.50</span></label>
-            <input type="range" id="densityThresh" min="0.10" max="0.90" step="0.05" value="0.50">
-            <div class="hint">All accepted blob heights are bucketed; the peak bucket defines the dominant text-line height. The band is grown outward while density stays above peak × this fraction. Blobs shorter than the band are rejected as noise; blobs taller are split at internal valleys and rejected when no in-range split is possible. Lower threshold → wider band (more permissive); higher → narrower band (more aggressive cleanup).</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="grp">
-        <h3><span class="ix">08</span> Table layout</h3>
-        <label class="chk"><input type="checkbox" id="detectTable" checked> Detect table rows &amp; columns</label>
-        <div id="tableOpts" style="margin-top:9px">
-          <div class="ctl">
-            <label>Column gap sensitivity <span class="val" id="vTab">5</span></label>
-            <input type="range" id="tableSens" min="1" max="10" step="1" value="5">
-            <div class="hint">Higher splits the table into more, narrower columns; lower needs a wider whitespace gutter. Word boxes are grouped into rows, and the dominant multi-column band becomes the table — blank or wrapped-text rows inside it are kept — while the header / footer fall outside.</div>
+            <label>Language</label>
+            <select id="rcLanguage" style="width:100%;margin-top:4px">
+              <option value="eng" selected>English (eng)</option>
+              <option value="eng+ben">English + Bengali</option>
+              <option value="eng+hin">English + Hindi</option>
+              <option value="eng+ara">English + Arabic</option>
+              <option value="eng+deu">English + German</option>
+              <option value="eng+fra">English + French</option>
+              <option value="eng+spa">English + Spanish</option>
+            </select>
           </div>
           <div class="ctl" style="margin-top:9px">
-            <label>k for border binary <span class="val" id="vKB">0.18</span></label>
-            <input type="range" id="kBorder" min="0.01" max="0.80" step="0.01" value="0.18">
-            <div class="hint">Sauvola threshold weight used for the SEPARATE border-detection binary. Lower than k means more pixels are classified as ink, which helps thin / faint rules survive — they are often dropped at the higher k value tuned for word blobs. The word-detection binary stage (06) keeps using k. Set equal to k to skip the second Sauvola pass.</div>
+            <label>Target glyph height <span class="val" id="rcTargetHeightVal">30 px</span></label>
+            <input type="range" id="rcTargetHeight" min="16" max="60" step="2" value="30">
+            <div class="hint">Small text is upscaled (integer factor, up to 4×) so the reference glyph height reaches about this many pixels before recognition.</div>
           </div>
-
-          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
-            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Border detection · solid rules</summary>
-            <div class="hint" style="margin:6px 0">Rules are extracted by bridging gaps in each row/column, then morphological opening keeps only locally-near-horizontal (or near-vertical) structures, then per-component centerline tracing gives a polyline.</div>
-
-            <div class="ctl">
-              <label>Min length <span class="val" id="vBMinLenF">0.18</span> × side</label>
-              <input type="range" id="bMinLenF" min="0.05" max="0.60" step="0.01" value="0.18">
-              <div class="hint">A rule must span ≥ this fraction of image width (h-rules) or height (v-rules). Smaller catches shorter rules; larger filters out short text-like horizontals.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Gap-bridge — horizontal <span class="val" id="vBMaxGapH">12 px</span></label>
-              <input type="range" id="bMaxGapH" min="0" max="40" step="1" value="12">
-            </div>
-            <div class="ctl">
-              <label>Gap-bridge — vertical <span class="val" id="vBMaxGapV">12 px</span></label>
-              <input type="range" id="bMaxGapV" min="0" max="40" step="1" value="12">
-              <div class="hint">Per-row / per-column gap filling. Gaps up to this many pixels between consecutive ink runs in the same row/column are bridged. Set ≥ the widest text glyph that typically crosses a rule (usually 8-15 px). Doesn't extend past the rule's natural endpoints.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Opening kernel — horizontal <span class="val" id="vBOpenH">8 px</span></label>
-              <input type="range" id="bOpenH" min="2" max="20" step="1" value="8">
-            </div>
-            <div class="ctl">
-              <label>Opening kernel — vertical <span class="val" id="vBOpenV">8 px</span></label>
-              <input type="range" id="bOpenV" min="2" max="20" step="1" value="8">
-              <div class="hint">Erosion+dilation radius. Larger = more aggressive text rejection but less curvature tolerance. Max tolerable slope at any local point ≈ lineThickness / K. Lower this if real borders have sharper curves; raise it if text strokes are leaking through as false rules.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Max thickness <span class="val" id="vBMaxThick">8 px</span></label>
-              <input type="range" id="bMaxThick" min="1" max="30" step="1" value="8">
-              <div class="hint">Discards rules whose mean per-column / per-row ink height exceeds this. Genuine rules are 1-3 px thick; long horizontal text "lines" register as 6-15. Raise for thick decorative rules.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Min coverage <span class="val" id="vBMinCov">0.70</span></label>
-              <input type="range" id="bMinCov" min="0.30" max="1.00" step="0.05" value="0.70">
-              <div class="hint">Fraction of the rule's polyline points whose location coincides with ink in the original binary. Real rules score ~1.0; a row of disjointed shards or sparse dots that the gap-bridging artificially joined scores lower. Raise to 0.85+ to reject everything but the cleanest rules.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Polyline smoothing radius <span class="val" id="vBSmoothR">15</span></label>
-              <input type="range" id="bSmoothR" min="0" max="50" step="1" value="15">
-              <div class="hint">Sliding-window radius for smoothing the polyline along its axis. Removes the residual pixel-level jitter that's left after body-column detection has already excluded text-overlap regions. 0 disables.</div>
-            </div>
-          </details>
-
-          <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px">
-            <summary style="cursor:pointer;font-weight:bold;font-size:13px">Border detection · dashed / dotted rules</summary>
-            <div class="hint" style="margin:6px 0">Small connected components (dots) clustered into chains with uniform size and stride. Chains failing periodicity, size-consistency, or stride-to-size gates are rejected. Drawn in the gallery as a thin transparent line with explicit dot markers.</div>
-
-            <label class="chk"><input type="checkbox" id="bDetectDashed" checked> Detect dashed/dotted rules</label>
-
-            <div class="ctl" style="margin-top:9px">
-              <label>Max dot size <span class="val" id="vBDotMaxSize">6 px</span></label>
-              <input type="range" id="bDotMaxSize" min="1" max="12" step="1" value="6">
-              <div class="hint">A CCA component qualifies as a dot only if its bbox fits inside this in BOTH dimensions. Most text is 8-20 px; lowering this to 3-4 keeps only true dots, while 6 also catches short dashes.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Min dots in chain <span class="val" id="vBDotMinDots">4</span></label>
-              <input type="range" id="bDotMinDots" min="3" max="15" step="1" value="4">
-              <div class="hint">Minimum number of components in a chain. Higher → fewer false positives from coincidentally-aligned isolated marks.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Min stride / dot-size ratio <span class="val" id="vBDotStrideR">2.0</span></label>
-              <input type="range" id="bDotStrideR" min="1.0" max="5.0" step="0.1" value="2.0">
-              <div class="hint">The key discriminator between a dashed rule and a tightly-packed row of small text characters. A real dashed rule has stride ≫ dot size; text has stride ~ character width. Raise to 2.5+ if text-row false positives appear.</div>
-            </div>
-
-            <div class="ctl">
-              <label>Min length <span class="val" id="vBDashMinLenF">0.30</span> × side</label>
-              <input type="range" id="bDashMinLenF" min="0.10" max="0.80" step="0.05" value="0.30">
-              <div class="hint">Total span (last dot − first dot) must reach this fraction of the image side. Stricter than the solid-rule cutoff because dashed patterns at short lengths are usually coincidental, not real borders.</div>
-            </div>
-          </details>
-
-          <div style="margin-top:9px">
-            <div class="hint" style="margin-bottom:6px"><strong>Pass B · row dilation</strong> — H large fuses words into a full text-line; V small heals descenders/ascenders without bridging stacked lines.</div>
-            <div class="ctl">
-              <label>Pass B · Dilation H <span class="val" id="vRowDilH">120 px</span></label>
-              <input type="range" id="rowDilH" min="0" max="500" step="5" value="120">
-            </div>
-            <div class="ctl">
-              <label>Pass B · Dilation V <span class="val" id="vRowDilV">2 px</span></label>
-              <input type="range" id="rowDilV" min="0" max="20" step="1" value="2">
-            </div>
-            <div class="ctl">
-              <label>Pass B · Erode H <span class="val" id="vRowEroH">0 px</span></label>
-              <input type="range" id="rowEroH" min="0" max="5" step="1" value="0">
-            </div>
-            <div class="ctl">
-              <label>Pass B · Erode V <span class="val" id="vRowEroV">0 px</span></label>
-              <input type="range" id="rowEroV" min="0" max="5" step="1" value="0">
-            </div>
-
-            <div class="hint" style="margin-top:9px;margin-bottom:6px"><strong>Pass C · column dilation</strong> — V large fuses a column's stacked rows into one stripe; H small glues a row's word-fragments together without bridging side-by-side columns.</div>
-            <div class="ctl">
-              <label>Pass C · Dilation H <span class="val" id="vColDilH">2 px</span></label>
-              <input type="range" id="colDilH" min="0" max="20" step="1" value="2">
-            </div>
-            <div class="ctl">
-              <label>Pass C · Dilation V <span class="val" id="vColDilV">12 px</span></label>
-              <input type="range" id="colDilV" min="0" max="80" step="1" value="12">
-            </div>
-            <div class="ctl">
-              <label>Pass C · Erode H <span class="val" id="vColEroH">0 px</span></label>
-              <input type="range" id="colEroH" min="0" max="5" step="1" value="0">
-            </div>
-            <div class="ctl">
-              <label>Pass C · Erode V <span class="val" id="vColEroV">0 px</span></label>
-              <input type="range" id="colEroV" min="0" max="5" step="1" value="0">
-            </div>
-
-            <label class="chk" style="margin-top:9px;opacity:.5"><input type="checkbox" id="rlsa" checked disabled> Pass-based row/column detection (always on)</label>
-            <div class="hint" style="opacity:.6">Rows come from Pass B blobs and columns come from Pass C blobs. The legacy AABB-level union-find (RLSA on word boxes) and whitespace-projection paths have been replaced by pixel-level CCA on the directionally-dilated binaries.</div>
-          </div>
+          <label class="chk"><input type="checkbox" id="rcGrayscale"> Grayscale edges around the ink</label>
+          <div class="hint">Adds a 2 px ring of contrast-normalised grayscale from the rules-erased image around every glyph, so the engine sees anti-aliased edges. Helps clean scans; on tight bold digits it can blur neighbours together, so it is off by default.</div>
         </div>
       </div>
 
@@ -432,18 +297,21 @@
         <button class="run" id="run" disabled>RUN PIPELINE</button>
         <div class="row2">
           <button class="ghost" id="savePng" disabled>↓ stage PNG</button>
-          <button class="ghost" id="saveJson" disabled>↓ OBB JSON</button>
+          <button class="ghost" id="saveJson" disabled>↓ layout JSON</button>
         </div>
       </div>
 
+      <!-- 07 · readout -->
       <div class="grp">
-        <h3><span class="ix">09</span> Readout</h3>
+        <h3><span class="ix">07</span> Readout</h3>
         <div class="stats">
-          <div class="stat"><div class="n" id="sComp">—</div><div class="l">components</div></div>
-          <div class="stat"><div class="n" id="sBlob">—</div><div class="l">blobs ≥ min</div></div>
-          <div class="stat"><div class="n g" id="sKeep">—</div><div class="l">characters</div></div>
-          <div class="stat"><div class="n r" id="sRej">—</div><div class="l">rejected</div></div>
-          <div class="stat" style="grid-column:1/-1"><div class="n" id="sAngle">—</div><div class="l">detected skew angle</div></div>
+          <div class="stat"><div class="n" id="statRules">—</div><div class="l">rules h / v</div></div>
+          <div class="stat"><div class="n g" id="statLines">—</div><div class="l">text lines</div></div>
+          <div class="stat"><div class="n" id="statFullLines">—</div><div class="l">full lines</div></div>
+          <div class="stat"><div class="n g" id="statTable">—</div><div class="l">table rows × cols</div></div>
+          <div class="stat"><div class="n" id="statChars">—</div><div class="l">characters</div></div>
+          <div class="stat"><div class="n g" id="statRecognised">—</div><div class="l">recognised</div></div>
+          <div class="stat" style="grid-column:1/-1"><div class="n" id="statTilt">—</div><div class="l">page tilt</div></div>
         </div>
         <div class="meta" id="timing" style="margin-top:8px"></div>
       </div>
@@ -458,10 +326,6 @@
           <div>Load an image and run the pipeline.</div>
         </div>
         <div class="stagecap" id="stageCap" style="display:none"></div>
-        <div class="legend" id="legend">
-          <div><i style="background:var(--green)"></i> accepted character</div>
-          <div><i style="background:var(--red)"></i> rejected (line / border / noise)</div>
-        </div>
         <div class="hud" id="hud" style="display:none">
           <button id="zOut">−</button>
           <span class="z" id="zVal">100%</span>
