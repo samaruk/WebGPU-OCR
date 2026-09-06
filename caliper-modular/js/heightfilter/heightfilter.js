@@ -97,7 +97,9 @@ function splitBlob(bl,labels,binary,W,H,cuts,alloc,minArea,conn8){
      blobs  : array from runPass (label, area, bb, start), after min-area
      labels : Int32Array label map from cca (W*H)
      binary : Uint8Array Sauvola binary (W*H) — valleys are measured on ink
-     opts   : {lo, split, maxAspect, minArea, conn8, count, median?}  median = reference height override
+     opts   : {lo, split, hi?, maxAspect, minArea, conn8, count, median?}
+              median = reference height override; hi = reject limit (x median)
+              when it should differ from the cut threshold `split`
    Returns {blobs, lab2blob, lab2blobAll, blobsAll, count, heightFilter}. */
 export function filterBlobsByHeight(blobs,labels,binary,W,H,opts){
   const blobsAll=blobs.slice();
@@ -105,7 +107,10 @@ export function filterBlobsByHeight(blobs,labels,binary,W,H,opts){
   // of the blob heights
   let median=opts.median>0?opts.median:0;
   if(!median){ const hs=blobs.map(b=>b.bb.y1-b.bb.y0+1).sort((a,b)=>a-b); median=hs.length?hs[hs.length>>1]:0; }
-  const hMin=median*opts.lo, hSplit=median*opts.split, hMax=hSplit;   // one line at most
+  // split  = height above which a valley cut is attempted
+  // hi     = optional reject limit (defaults to split: one line at most)
+  const hMin=median*opts.lo, hSplit=median*opts.split;
+  const hMax=opts.hi>0 ? median*opts.hi : hSplit;
   const minRows=Math.max(2,Math.round(hMin)), mergeRows=Math.max(3,Math.round(hSplit));
   const smWin=Math.max(3,(Math.round(median*0.13)|1));
 

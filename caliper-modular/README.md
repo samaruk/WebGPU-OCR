@@ -33,14 +33,24 @@ The pipeline runs three geometric correction stages, then three detection passes
 
 ### Geometric correction
 
+The **Rectify image** checkbox in section 00b, on by default, gates the first two steps. When it is off, both are skipped and every later stage works on the original image as loaded.
+
 1. **Lens distortion** ([js/lens/lens.js](js/lens/lens.js)). Self-calibrates a radial barrel/pincushion model from the bowing of the page edges and straightens them. Engages only when the edges actually bow.
 2. **Perspective rectification** ([js/rectify/rectify.js](js/rectify/rectify.js), [js/rectify/detectPageQuad.js](js/rectify/detectPageQuad.js)). Finds the four page corners and warps the quadrilateral back to a rectangle with a homography. Passes the image through unchanged when no confident quad is found.
 3. **Skew** ([js/skew/skew.js](js/skew/skew.js)). Measures the page tilt from the median angle of pass A's word boxes, with a projection-profile fallback for near-blank pages, and rotates the raster upright.
 4. **Curl dewarp** ([js/dewarp/dewarp.js](js/dewarp/dewarp.js)). Fits the text-line baselines and applies a dense displacement field to straighten the non-planar curl that a homography cannot remove.
 
+### Borders
+
+First of the pre-pass-A stages, the **border stage** ([js/borderlayout/borderlayout.js](js/borderlayout/borderlayout.js), section 02a) runs the rule detector on the rectified image and interprets every long rule, whether printed border, section line or pen stroke. Intersecting rules form a grid: three or more horizontals with verticals give the whole table from borders, two horizontals with verticals give the region and columns, and a short boxed header row gives column boundaries that are extended down over the body. Stacked long horizontals with no verticals, such as a header underline and a totals line, bound the table; long rules outside it are section separators. Every rule is then painted out of the working image with the surrounding paper, and all later stages, from the text-line clean through passes B and C, process that rule-free image; only pass B's own border detection reads the original, levelled and dewarped with the same transforms. The table region and column boundaries are handed to the column stage as priors.
+
 ### Text-line clean
 
-Before pass A, the **text-line clean** stage ([js/textlines/textlines.js](js/textlines/textlines.js), section 02b) detects whole text lines on the rectified image and removes everything that is not text. Character components from the Sauvola binary are filtered by height, shape and multi-line splitting, then chained into lines by horizontal proximity, vertical overlap and comparable height. Chaining is used instead of a horizontal dilation so that skewed lines are followed and stacked lines never fuse. Lone specks, dash-like fragments and chains with uneven heights are rejected. Accepted lines are joined left to right into full lines, and only their ink is kept in a clean binary. Pass A runs on that clean binary, so rules, borders, logos, halftone and dust never reach the word-box stages.
+Before pass A, the **text-line clean** stage ([js/textlines/textlines.js](js/textlines/textlines.js), section 02b) detects whole text lines on the rectified image and removes everything that is not text. Character components from the Sauvola binary are filtered by height, shape and multi-line splitting, then chained into lines by horizontal proximity, vertical overlap and comparable height. Chaining is used instead of a horizontal dilation so that skewed lines are followed and stacked lines never fuse. A component whose neighbours sit on two different lines, such as a pen tick or stroke reaching across, is treated as a bridge: a tall one is dropped as pen noise, a short one keeps only the line it overlaps most, so a line never contains two text lines. Lone specks, dash-like fragments and chains with uneven heights are rejected. Accepted lines are joined left to right into full lines, each represented as a polygon that follows its pieces plus a centreline, in a de-skewed frame, using a page tilt estimated from the lines themselves, so a tilted photo does not chain neighbouring rows together. Pieces are joined against their nearest neighbour in the row, so a curled row still joins end to end and one odd piece cannot break a row. A lone glyph that joins nothing, is taller than a capital letter or hugs the page border is rejected as a stray mark, and a chain whose members fall above and below a line fit is split as a two-line merge. Only the ink of accepted lines is kept in a clean binary. Pass A runs on that clean binary, so rules, borders, logos, halftone and dust never reach the word-box stages.
+
+### Columns
+
+Right after the text-line clean, the **column stage** ([js/columns/columns.js](js/columns/columns.js), section 02c) reads the table skeleton from the full lines, entirely in the de-skewed frame. Rows with enough pieces form the table band, rows above and below are header and footer. Because an invoice has exactly one item table, a second run of tabular rows separated from the main one by a few damaged rows, such as a watermark, a pen line or a paper fold, is merged back in when its glyphs respect the same gutters, and the columns are recomputed from the whole table. A glyph-level coverage profile across the band exposes the gutters, either as clear runs that almost no row crosses or as deep valleys that drop to a fraction of the neighbouring peaks, since word spaces fall at different positions in every row while a column boundary lines up in all of them, even when it is only a word space wide. The intervals between gutters are the columns, classified left, right or centre aligned, and every glyph goes to the column under its centre to form a row × column grid of cells. The five stages show the row bands, the coverage profile with gutters, the columns, the cells and the resulting table layout with slanted separators. Needs no rules or borders and runs before any word box is fitted.
 
 ### Detection passes
 
@@ -73,14 +83,14 @@ Two optional clean-up steps run on pass B:
 
 ## Stage gallery
 
-Every stage is rendered at full resolution into the gallery under the main viewport. Click any panel to inspect it with pan and zoom. The stage list, in order, lives in [js/config/config.js](js/config/config.js): source, lens-corrected, rectified, the five text-line clean stages, the eleven pass A stages (height filter, line blobs and full lines included), deskewed, dewarped, the eight pass B and pass C stages, the height-density filter, five border-debugging stages, and the two table layouts.
+Every stage is rendered at full resolution into the gallery under the main viewport. Click any panel to inspect it with pan and zoom. The stage list, in order, lives in [js/config/config.js](js/config/config.js): source, lens-corrected, rectified, the five border stages, the five text-line clean stages, the five column stages, the eleven pass A stages (height filter, line blobs and full lines included), deskewed, dewarped, the eight pass B and pass C stages, the height-density filter, five border-debugging stages, and the two table layouts.
 
 The border-debugging stages are the fastest way to find out why a rule was missed. If it is absent from **Border · Binary** the problem is the threshold; if it is present in **Border · H-opened** but missing from **Detected Borders**, one of the length, coverage or thickness filters removed it.
 
 ## Exports
 
 - **Stage PNG** downloads the currently displayed stage at full resolution.
-- **OBB JSON** downloads `caliper_obb.json` containing the run parameters, the detected text lines and full lines from the clean stage, the accepted word boxes, line-blob boxes and full-line boxes for pass A (rectified image space) and the word boxes for pass B (deskewed image space) with centre, size, angle and four corners, and the detected table with its region, rows, columns, header and footer.
+- **OBB JSON** downloads `caliper_obb.json` containing the run parameters, the border layout, the detected text lines and full lines from the clean stage, the column layout (band, gutters, columns with alignment, cells), the accepted word boxes, line-blob boxes and full-line boxes for pass A (rectified image space) and the word boxes for pass B (deskewed image space) with centre, size, angle and four corners, and the detected table with its region, rows, columns, header and footer.
 
 ## Project layout
 
@@ -101,7 +111,9 @@ js/rectify/             page quad detection and perspective rectification
 js/skew/                skew estimation and deskew rotation
 js/dewarp/              curl dewarping via displacement field
 js/splitter/            merged two-line box splitting
+js/borderlayout/        pre-pass-A rule interpretation: grid, header box, row rules, sections, erase mask
 js/textlines/           pre-pass-A text-line detection and non-text removal
+js/columns/             pre-pass-A table band, gutter, column and cell detection
 js/heightfilter/        blob height filter and multi-line blob splitting (shared by 02b and 05)
 js/lines/               pass A whole-line blobs and left-to-right full lines
 js/blobfilter/          height-density blob filter

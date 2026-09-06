@@ -38,6 +38,170 @@ export function renderStage(idx){
   renderStageInto(STAGES[idx], cv.getContext('2d'), S.W, S.H);
 }
 
+/* ---- BORDERS group: rules interpreted -------------------------------- */
+function renderBorderLayout(B,ctx,W,H,base,sw){
+  if(base) ctx.drawImage(base,0,0);
+  ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+  const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
+  ctx.font=`600 ${fs}px "JetBrains Mono", monospace`; ctx.lineJoin='round'; ctx.lineCap='round';
+  const L=B.layout;
+  const stroke=(poly,fallback)=>{ ctx.beginPath();
+    if(poly&&poly.length){ ctx.moveTo(poly[0].x+.5,poly[0].y+.5); for(let i=1;i<poly.length;i++) ctx.lineTo(poly[i].x+.5,poly[i].y+.5); }
+    else { ctx.moveTo(fallback[0],fallback[1]); ctx.lineTo(fallback[2],fallback[3]); }
+    ctx.stroke(); };
+  const tag=(x,y,t,col)=>{ const tp=fs*0.3, tw=ctx.measureText(t).width; y=Math.max(fs,y);
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(x,y-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
+    ctx.fillStyle=col; ctx.fillText(t,x+tp,y); };
+  ctx.textBaseline='middle';
+  // every rule faint; long ones brighter
+  for(const h of B.hAll){ ctx.lineWidth=h.long?sw*1.2:sw*0.7; ctx.strokeStyle=h.long?'rgba(110,200,255,.55)':'rgba(110,200,255,.25)'; stroke(h.polyline,[h.x0,h.y,h.x1,h.y]); }
+  for(const v of B.vAll){ ctx.lineWidth=v.long?sw*1.2:sw*0.7; ctx.strokeStyle=v.long?'rgba(166,255,63,.55)':'rgba(166,255,63,.25)'; stroke(v.polyline,[v.x,v.y0,v.x,v.y1]); }
+  // section separators
+  for(const s of L.sections){ ctx.lineWidth=sw*1.6; ctx.strokeStyle='rgba(255,170,70,.9)';
+    ctx.beginPath(); ctx.moveTo(s.x0,s.y+.5); ctx.lineTo(s.x1,s.y+.5); ctx.stroke(); tag(s.x0+sw*2,s.y-fs,'SECTION','rgba(255,193,115,.97)'); }
+  // grid rules
+  if(L.grid){ ctx.lineWidth=sw*1.8;
+    for(const h of L.grid.hs){ ctx.strokeStyle='rgba(84,221,126,.95)'; stroke(h.polyline,[h.x0,h.y,h.x1,h.y]); }
+    for(const v of L.grid.vs){ ctx.strokeStyle='rgba(110,220,255,.95)'; stroke(v.polyline,[v.x,v.y0,v.x,v.y1]); }
+    ctx.fillStyle='rgba(255,220,120,.9)'; for(const q of L.grid.hits){ ctx.beginPath(); ctx.arc(q.x,q.y,Math.max(2,sw*1.4),0,7); ctx.fill(); } }
+  // table region / header box / extended column boundaries
+  const box=(b,st,fl)=>{ ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0,b.y1-b.y0); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw*1.9; ctx.strokeStyle=st; ctx.stroke(); };
+  if(L.table){ box(L.table,'rgba(84,221,126,.97)','rgba(84,221,126,.08)');
+    tag(L.table.x0+sw*2,L.table.y0+fs,'TABLE FROM BORDERS · '+L.kind+(L.rowsY.length?' · '+Math.max(0,L.rowsY.length-1)+' row bands':'')+(L.colsX.length?' · '+Math.max(0,L.colsX.length-1)+' columns':''),'rgba(84,221,126,.98)'); }
+  if(L.headerBox){ box(L.headerBox,'rgba(110,160,255,.95)','rgba(110,160,255,.14)');
+    tag(L.headerBox.x0+sw*2,L.headerBox.y0-fs,'HEADER BOX · '+Math.max(0,L.colsX.length-1)+' columns','rgba(155,190,255,.97)');
+    // extend its separators down over the body (to the table bottom or the next section)
+    let yEnd=L.table?L.table.y1:H; for(const s of L.sections) if(s.y>L.headerBox.y1 && s.y<yEnd) yEnd=s.y;
+    ctx.setLineDash([sw*4,sw*3]); ctx.lineWidth=sw*1.2; ctx.strokeStyle='rgba(110,220,255,.8)';
+    for(const c of L.colsX){ ctx.beginPath(); ctx.moveTo(c.x+.5,L.headerBox.y1); ctx.lineTo(c.x+.5,yEnd); ctx.stroke(); }
+    ctx.setLineDash([]); }
+  if(L.kind==='row-rules'){ ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.8)';
+    for(const r of L.rowsY){ ctx.beginPath(); ctx.moveTo(r.x0,r.y+.5); ctx.lineTo(r.x1,r.y+.5); ctx.stroke(); } }
+  ctx.textBaseline='alphabetic';
+  const txt='rules: '+B.hAll.length+' h / '+B.vAll.length+' v   long: '+B.long.h+' h / '+B.long.v+' v   layout: '+L.kind+'   sections: '+L.sections.length+'   erased: '+B.erased.toLocaleString()+' px';
+  const tw=ctx.measureText(txt).width;
+  ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+  ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);
+}
+
+/* ---- COLUMNS group (pre-pass-A column detection) ---------------------- */
+function renderColumns(k,C,ctx,W,H,base,sw){
+  if(base) ctx.drawImage(base,0,0);
+  ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(0,0,W,H);
+  const fs=Math.max(11,Math.round(Math.min(W,H)/90)), pad=fs*0.5;
+  ctx.font=`600 ${fs}px "JetBrains Mono", monospace`; ctx.lineJoin='round';
+  const msg=t=>{ ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center'; ctx.fillText(t,W/2,H/2); ctx.textAlign='left'; };
+  const badge=txt=>{ const tw=ctx.measureText(txt).width;
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
+    ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1); };
+  const tag=(x,y,t,col)=>{ const tp=fs*0.3, tw=ctx.measureText(t).width; y=Math.max(fs,y);
+    ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(x,y-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
+    ctx.fillStyle=col; ctx.fillText(t,x+tp,y); };
+  const poly=P=>{ ctx.beginPath(); ctx.moveTo(P[0].x,P[0].y); for(let i=1;i<P.length;i++) ctx.lineTo(P[i].x,P[i].y); ctx.closePath(); };
+  // slanted quad for a de-skewed x' range over a de-skewed y' range
+  const quad=(xa,xb,ya,yb)=>[C.back(xa,ya),C.back(xb,ya),C.back(xb,yb),C.back(xa,yb)];
+  const rowCol={table:['rgba(84,221,126,.95)','rgba(84,221,126,.12)'],
+                header:['rgba(110,160,255,.9)','rgba(110,160,255,.12)'],
+                footer:['rgba(255,170,70,.9)','rgba(255,170,70,.12)'],
+                other:['rgba(150,165,170,.6)','rgba(150,165,170,.08)']};
+  ctx.textBaseline='middle';
+
+  if(k==='clrows'){
+    C.rowsInfo.forEach((r,i)=>{ const P=r.row.poly; if(!P||!P.length) return;
+      const [st,fl]=rowCol[r.kind]||rowCol.other;
+      poly(P); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=st; ctx.stroke();
+      const f=r.row.lines[0].ink;
+      tag(Math.max(0,f.x0-fs*4.2),(f.y0+f.y1)/2,(r.kind==='table'?'T':r.kind==='header'?'H':'F')+(i+1)+'·'+r.pieces+'p',st); });
+    ctx.textBaseline='alphabetic';
+    if(!C.band){ badge('no table band — '+C.reason); return; }
+    badge('table band: rows '+(C.band.r0+1)+'–'+(C.band.r1+1)+' ('+C.band.rows.length+', '+(C.band.fromBorders?'from borders':C.band.parts+(C.band.parts>1?' parts merged':' part'))+')   header rows: '+C.band.r0+'   footer rows: '+(C.rowsInfo.length-1-C.band.r1)+'   page tilt: '+(Math.atan(C.slope)*180/Math.PI).toFixed(2)+'°');
+    return;
+  }
+  if(!C.band){ ctx.textBaseline='alphabetic'; msg('no table band — '+C.reason); return; }
+  const B=C.band, P=C.profile;
+
+  if(k==='clprofile'){
+    // gutters as slanted shaded bands over the table
+    for(const g of C.gutters){ poly(quad(g.x0,g.x1+1,B.yTop,B.yBot));
+      // red = almost no row crosses; amber = a deep valley between two dense
+      // columns (word-space-sized gap that lines up in every row)
+      ctx.fillStyle=g.rel?'rgba(255,190,60,.20)':'rgba(255,93,108,.18)'; ctx.fill();
+      ctx.lineWidth=sw*0.8; ctx.strokeStyle=g.rel?'rgba(255,190,60,.85)':'rgba(255,93,108,.8)'; ctx.stroke(); }
+    // histogram strip along the bottom of the band (in image x at the band bottom)
+    const barH=Math.max(30,Math.min(H*0.12,160)), yBase=Math.min(H-2, C.back(P.X0,B.yBot).y+barH+fs);
+    ctx.fillStyle='rgba(8,11,12,.7)'; ctx.fillRect(0,yBase-barH-fs*0.4,W,barH+fs*0.8);
+    const nb=P.X1-P.X0+1;
+    for(let i=0;i<nb;i++){ const v=P.cov[i]; if(!v) continue;
+      const x=C.back(P.X0+i,B.yBot).x, h=v/P.nRows*barH;
+      ctx.fillStyle = v<=P.thr ? 'rgba(255,93,108,.9)' : 'rgba(110,200,255,.85)';
+      ctx.fillRect(x,yBase-h,1,h); }
+    const yThr=yBase-(P.thr/P.nRows)*barH;
+    ctx.strokeStyle='rgba(255,220,120,.9)'; ctx.lineWidth=1; ctx.setLineDash([sw*3,sw*3]);
+    ctx.beginPath(); ctx.moveTo(0,yThr+.5); ctx.lineTo(W,yThr+.5); ctx.stroke(); ctx.setLineDash([]);
+    ctx.textBaseline='alphabetic';
+    badge('band rows: '+P.nRows+'   gutters: '+C.gutters.length+' ('+C.gutters.filter(g=>!g.rel).length+' clear, '+C.gutters.filter(g=>g.rel).length+' deep valleys; min width '+Math.round(P.minW)+' px, clear ≤ '+P.thr.toFixed(1)+' rows, valley ≤ 42 % of its peaks)   glyph h: '+Math.round(C.hMed)+' px');
+    return;
+  }
+
+  if(k==='clcols'){
+    C.gutters.forEach(g=>{ poly(quad(g.x0,g.x1+1,B.yTop,B.yBot)); ctx.setLineDash([sw*3,sw*3]);
+      ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(255,93,108,.6)'; ctx.stroke(); ctx.setLineDash([]); });
+    C.columns.forEach((c,i)=>{ poly(quad(c.x0,c.x1,B.yTop,B.yBot));
+      ctx.fillStyle=i%2?'rgba(110,200,255,.15)':'rgba(166,255,63,.12)'; ctx.fill();
+      ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,200,255,.9)'; ctx.stroke();
+      const q=C.back((c.x0+c.x1)/2,B.yTop);
+      tag(q.x-fs*1.5,q.y-fs*0.9,'C'+(i+1)+' '+c.align+' '+c.cells+'c','rgba(120,205,255,.97)'); });
+    ctx.textBaseline='alphabetic';
+    badge('columns: '+C.columns.length+'   gutters: '+C.gutters.length+(C.guttersFromBorders?' ('+C.guttersFromBorders+' from borders)':'')+'   pieces split across columns: '+C.spanningPieces);
+    return;
+  }
+
+  if(k==='clcells'){
+    let filled=0, empty=0;
+    B.rows.forEach((r,ri)=>{ C.columns.forEach((c,ci)=>{
+      const cl=C.cells[ri][ci];
+      if(cl){ filled++; const b=cl.bb; const col=labColor(ci);
+        ctx.fillStyle=`rgba(${col[0]},${col[1]},${col[2]},.22)`; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
+        ctx.lineWidth=sw; ctx.strokeStyle=`rgba(${col[0]},${col[1]},${col[2]},.95)`; ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
+      } else { empty++;
+        poly(quad(c.x0,c.x1,r.row.dy.y0,r.row.dy.y1)); ctx.setLineDash([sw*2,sw*2]);
+        ctx.lineWidth=sw*0.6; ctx.strokeStyle='rgba(170,170,170,.45)'; ctx.stroke(); ctx.setLineDash([]); }
+    }); });
+    ctx.textBaseline='alphabetic';
+    badge('grid: '+B.rows.length+' rows × '+C.columns.length+' columns   filled cells: '+filled+'   empty: '+empty);
+    return;
+  }
+
+  if(k==='cltable'){
+    // header / footer regions
+    const hdr=C.rowsInfo.filter(r=>r.kind==='header'), ftr=C.rowsInfo.filter(r=>r.kind==='footer');
+    const region=(rs,st,fl,label)=>{ if(!rs.length) return;
+      let x0=1/0,x1=-1/0; for(const r of rs){ for(const ln of r.row.lines){ const cy=(ln.ink.y0+ln.ink.y1)/2;
+        x0=Math.min(x0,C.toX(ln.ink.x0,cy)); x1=Math.max(x1,C.toX(ln.ink.x1+1,cy)); } }
+      const ya=Math.min(...rs.map(r=>r.row.dy.y0)), yb=Math.max(...rs.map(r=>r.row.dy.y1));
+      poly(quad(x0,x1,ya,yb)); ctx.fillStyle=fl; ctx.fill(); ctx.lineWidth=sw; ctx.strokeStyle=st; ctx.stroke();
+      const q=C.back(x0,ya); tag(q.x+sw*2,q.y+fs,label,st); };
+    region(hdr,'rgba(110,160,255,.8)','rgba(110,160,255,.12)','HEADER · '+hdr.length+' rows');
+    region(ftr,'rgba(255,170,70,.8)','rgba(255,170,70,.12)','FOOTER · '+ftr.length+' rows');
+    // table region
+    const tx0=Math.min(...C.columns.map(c=>c.x0)), tx1=Math.max(...C.columns.map(c=>c.x1));
+    poly(quad(tx0,tx1,B.yTop,B.yBot)); ctx.fillStyle='rgba(84,221,126,.08)'; ctx.fill();
+    // column separators at gutter centres, row separators between rows
+    ctx.lineWidth=sw*0.8; ctx.strokeStyle='rgba(166,255,63,.6)';
+    for(const g of C.gutters){ const xm=(g.x0+g.x1+1)/2, a=C.back(xm,B.yTop), b=C.back(xm,B.yBot);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    ctx.strokeStyle='rgba(84,221,126,.5)';
+    for(let i=1;i<B.rows.length;i++){ const ym=(B.rows[i-1].row.dy.y1+B.rows[i].row.dy.y0)/2;
+      const a=C.back(tx0,ym), b=C.back(tx1,ym); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    ctx.lineWidth=sw*1.9; ctx.strokeStyle='rgba(84,221,126,.97)'; poly(quad(tx0,tx1,B.yTop,B.yBot)); ctx.stroke();
+    const q=C.back(tx0,B.yTop); tag(q.x+sw*2,q.y+fs,'TABLE · '+B.rows.length+'R × '+C.columns.length+'C','rgba(84,221,126,.98)');
+    ctx.textBaseline='alphabetic';
+    badge('table: '+B.rows.length+' rows × '+C.columns.length+' columns   header: '+hdr.length+'   footer: '+ftr.length+'   tilt: '+(Math.atan(C.slope)*180/Math.PI).toFixed(2)+'°');
+    return;
+  }
+  ctx.textBaseline='alphabetic';
+}
+
 /* draw any stage descriptor into a W×H 2D context */
 export function renderStageInto(st,ctx,W,H){
   const sw=Math.max(1.4,Math.round(Math.min(W,H)/520));   // stroke width scaled to image
@@ -50,19 +214,31 @@ export function renderStageInto(st,ctx,W,H){
   if(st.kind==='dewarped'){ if(S.dewarpCanvas) ctx.drawImage(S.dewarpCanvas,0,0); else if(S.deskewCanvas) ctx.drawImage(S.deskewCanvas,0,0); return; }
 
   const pass = st.pass==='A' ? S.passes.A : st.pass==='C' ? S.passes.C
-             : st.pass==='TL' ? S.textLines : S.passes.B;
+             : st.pass==='TL' ? S.textLines : st.pass==='CL' ? S.columns
+             : st.pass==='BR' ? S.borders : S.passes.B;
   const k=st.kind, N=W*H;
   if(!pass){
-    if(st.pass==='TL'){
+    if(st.pass==='TL'||st.pass==='CL'||st.pass==='BR'){
       ctx.fillStyle='rgba(230,240,235,.85)'; ctx.textAlign='center';
       ctx.font=`600 ${Math.max(11,Math.round(Math.min(W,H)/90))}px "JetBrains Mono", monospace`;
-      ctx.fillText('text-line clean disabled (toggle 02b)',W/2,H/2); ctx.textAlign='left';
+      ctx.fillText(st.pass==='TL'?'text-line clean disabled (toggle 02b)':st.pass==='BR'?'border stage disabled (toggle 02a)':'columns disabled (toggle 02c) or text-line clean off',W/2,H/2); ctx.textAlign='left';
     }
     return;
   }
-  // pass A and the text-line stage run on the lens- and perspective-
-  // corrected raster, so their boxes only line up with that image.
-  const base = (st.pass==='A'||st.pass==='TL') ? (S.workCanvas || S.origCanvas) : (S.dewarpCanvas || S.deskewCanvas);
+  // pass A, the border, text-line and column stages run on the lens- and
+  // perspective-corrected raster, so their boxes only line up with that image.
+  const base = (st.pass==='A'||st.pass==='TL'||st.pass==='CL'||st.pass==='BR') ? (S.workCanvas || S.origCanvas) : (S.dewarpCanvas || S.deskewCanvas);
+
+  if(st.pass==='CL'){ renderColumns(k,pass,ctx,W,H,base,sw); return; }
+  if(k==='brlayout'){ renderBorderLayout(pass,ctx,W,H,base,sw); return; }
+  if(k==='brclean'){
+    if(pass.cleanCanvas) ctx.drawImage(pass.cleanCanvas,0,0);
+    else { if(base) ctx.drawImage(base,0,0);
+      const fs=Math.max(11,Math.round(Math.min(W,H)/90)); ctx.font=`600 ${fs}px "JetBrains Mono", monospace`;
+      ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(fs*0.5,fs*0.5,fs*22,fs*1.8);
+      ctx.fillStyle='rgba(255,200,140,.97)'; ctx.fillText('erase is off (section 02a) — original shown',fs*0.9,fs*1.7); }
+    return;
+  }
 
   if(k==='binary' || k==='dilated' || k==='rawbinary'){   // ---- raster mask ----
     const mask = k==='binary' ? pass.binary : k==='rawbinary' ? pass.binaryRaw : pass.dilated;
@@ -528,19 +704,34 @@ export function renderStageInto(st,ctx,W,H){
       ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(110,200,255,.35)';
       for(const ln of r.lines){ const b=ln.ink;
         ctx.strokeRect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1); }
-      // the full line, leftmost → rightmost piece
-      const b=r.ink; nWords+=r.words; nPieces+=r.lines.length;
-      ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0+1,b.y1-b.y0+1);
-      ctx.fillStyle=i%2?'rgba(84,221,126,.12)':'rgba(166,255,63,.10)'; ctx.fill();
-      ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.95)'; ctx.stroke();
+      nWords+=r.words; nPieces+=r.lines.length;
+      // the full line as a polygon that follows its pieces (never the
+      // bounding rectangle, which would overlap neighbouring tilted rows)
+      const P=r.poly||[];
+      if(P.length){
+        ctx.beginPath(); ctx.moveTo(P[0].x,P[0].y);
+        for(let k=1;k<P.length;k++) ctx.lineTo(P[k].x,P[k].y);
+        ctx.closePath();
+        ctx.fillStyle=i%2?'rgba(84,221,126,.14)':'rgba(166,255,63,.12)'; ctx.fill();
+        ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.95)'; ctx.stroke();
+      }
+      // reading path through the piece centres
+      const C=r.centerline||[];
+      if(C.length){
+        ctx.beginPath(); ctx.moveTo(C[0].x,C[0].y);
+        for(let k=1;k<C.length;k++) ctx.lineTo(C[k].x,C[k].y);
+        ctx.lineWidth=Math.max(1,sw*0.6); ctx.strokeStyle='rgba(255,255,255,.45)'; ctx.stroke();
+      }
+      const first=r.lines[0].ink;
       const t='R'+(i+1)+' · '+r.lines.length+'p · '+r.words+'w';
       const tw=ctx.measureText(t).width, tp=fs*0.3;
-      const tx=Math.max(0,b.x0-tw-tp*3), ty=(b.y0+b.y1)/2;
+      const tx=Math.max(0,first.x0-tw-tp*3), ty=(first.y0+first.y1)/2;
       ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(tx,ty-fs*0.6-tp,tw+tp*2,fs+tp*1.6);
       ctx.fillStyle='rgba(166,255,63,.97)'; ctx.fillText(t,tx+tp,ty);
     });
     ctx.textBaseline='alphabetic';
-    const txt='full lines: '+R.rows.length+'   pieces: '+nPieces+'   words: '+nWords+'   max line h: '+Math.round(R.hMax)+' px';
+    const txt='full lines: '+R.rows.length+'   pieces: '+nPieces+'   words: '+nWords+'   max line h: '+Math.round(R.hMax)+' px'
+      +(R.slope!==undefined?'   page tilt: '+(Math.atan(R.slope)*180/Math.PI).toFixed(2)+'°':'');
     const tw=ctx.measureText(txt).width;
     ctx.fillStyle='rgba(8,11,12,.85)'; ctx.fillRect(pad,pad,tw+pad*1.6,fs+pad*1.2);
     ctx.fillStyle='rgba(220,235,240,.97)'; ctx.fillText(txt,pad+pad*0.8,pad+fs*0.7+pad*0.1);

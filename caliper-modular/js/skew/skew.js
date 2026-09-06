@@ -24,10 +24,13 @@ import { S } from '../state/state.js';
    ===================================================================== */
 export function detectSkew(img,maxDeg){
   // ---- 1. downscale (skew angle is scale-invariant; keep line gaps) ----
-  const long=Math.max(img.naturalWidth,img.naturalHeight);
+  // `img` may be an <img> (naturalWidth) or a canvas (width)
+  const iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+  if(!(iw>0&&ih>0)) return 0;
+  const long=Math.max(iw,ih);
   const sc=Math.min(1,1000/long);
-  const sw=Math.max(32,Math.round(img.naturalWidth*sc));
-  const sh=Math.max(32,Math.round(img.naturalHeight*sc));
+  const sw=Math.max(32,Math.round(iw*sc));
+  const sh=Math.max(32,Math.round(ih*sc));
   const c=document.createElement('canvas'); c.width=sw; c.height=sh;
   const cx=c.getContext('2d',{willReadFrequently:true});
   cx.fillStyle='#fff'; cx.fillRect(0,0,sw,sh);   // composite (transparent PNGs)
@@ -122,18 +125,25 @@ export function detectSkew(img,maxDeg){
    convention the user thinks in.
    Exposed corners are filled solid white — uniform regions yield no
    Sauvola foreground, so they don't pollute CCA. */
-export function buildDeskew(angleDeg){
+export function buildDeskew(angleDeg, src, target){
   const W=S.W,H=S.H;
-  if(!S.deskewCanvas || S.deskewCanvas.width!==W || S.deskewCanvas.height!==H){
-    S.deskewCanvas=document.createElement('canvas');
-    S.deskewCanvas.width=W; S.deskewCanvas.height=H;
-  }
-  const ctx=S.deskewCanvas.getContext('2d',{willReadFrequently:true});
+  // default: rotate the working raster into S.deskewCanvas. A caller may
+  // pass another source (the rules-erased raster) and/or another target
+  // canvas to level a second raster with the same angle.
+  let cv=target;
+  if(!cv){
+    if(!S.deskewCanvas || S.deskewCanvas.width!==W || S.deskewCanvas.height!==H){
+      S.deskewCanvas=document.createElement('canvas');
+      S.deskewCanvas.width=W; S.deskewCanvas.height=H;
+    }
+    cv=S.deskewCanvas;
+  } else if(cv.width!==W || cv.height!==H){ cv.width=W; cv.height=H; }
+  const ctx=cv.getContext('2d',{willReadFrequently:true});
   ctx.setTransform(1,0,0,1,0,0);
   ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
   ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   const correction = angleDeg;                   // detectSkew returns the ctx.rotate angle that re-levels the text
-  const base = S.workCanvas || S.origCanvas;     // the post-rectification raster (already W x H)
+  const base = src || S.workCanvas || S.origCanvas;   // the post-rectification raster (already W x H)
   if(Math.abs(correction)>1e-3){
     ctx.save();
     ctx.translate(W/2,H/2);
@@ -144,7 +154,9 @@ export function buildDeskew(angleDeg){
   }else{
     ctx.drawImage(base,0,0,W,H);
   }
-  S.deskewImageData=ctx.getImageData(0,0,W,H);
+  const imageData=ctx.getImageData(0,0,W,H);
+  if(!target) S.deskewImageData=imageData;
+  return {canvas:cv, imageData};
 }
 
 /* skew measured directly from the accepted word OBBs of pass A.  Every

@@ -23,12 +23,29 @@
         line fit per edge -> corners from line intersections. Candidates are
         scored by convexity x quad fill x edge contrast, and shape-validated
         (convex, plausible angles, real contrast step on every visible edge).
-     5. Sub-pixel refinement at (near) full resolution: along each edge the
-        colour profile is sampled across the edge, the strongest paper-to-
-        background step is located with parabolic interpolation, and a
-        RANSAC + least-squares line is fitted through those edge points. Corners
-        are the intersections of the refined lines. This removes the ~1/scale px
-        quantisation error of working on the downscaled image.
+     5. Sub-pixel refinement at (near) full resolution. Along each edge, every
+        sample contributes all its edge-response peaks (sub-pixel, parabolic)
+        within a narrow window around the rough edge; a Hough vote over
+        (slope, offset) finds candidate straight lines, each refitted on its
+        inliers. Lines are ranked by the number of samples supporting them,
+        preferring lines with paper on the inside and non-paper on the
+        outside. Corners are the intersections of the refined lines.
+     6. Edge recovery (sweep). When no line is found near the rough edge, or
+        the edge had no evidence in the segmentation (merged with a
+        reflection, a second sheet, a white wall), or the found line is weak
+        with paper on both sides, the search widens far inward and moderately
+        outward. Candidates are tried from the outermost inward; a line is
+        accepted only if, per sample, it separates paper from non-paper, the
+        strip between it and the rough edge is non-paper where it lies inward
+        (a glass reflection qualifies, a band of print does not) and paper
+        where it lies outward, and an outward move needs near-complete
+        support. Print inside the page, table rules in full-frame scans and
+        neighbouring sheets are therefore left alone.
+
+   Known limits: a curled page edge is approximated by a straight line; two
+   stacked white sheets are separated only where a crease or shadow line is
+   visible; a page whose edge borders another white sheet along its whole
+   length keeps the segmentation's rough edge.
 
    opts: workSize (900), minAreaFrac (0.40), refine (true), maxRefinePixels
    (24e6), debug (array to receive diagnostics). */
@@ -97,7 +114,9 @@ export function detectPageQuad(canvas, opts = {}) {
     if (ec.inFrame < 2 || ec.strong < Math.max(2, ec.inFrame - 1)) return;
     c.score *= Math.min(1, ec.meanStep / Math.max(10, 0.5 * tD));
     c.weak = ec.strong < ec.inFrame;
+    c.weakEdge = ec.edge.map(v => v !== null && v < 6);
     if (c.weak) c.score *= 0.85;                         // never beats a candidate with all edges seen
+    if (ec.inFrame < 4) c.score *= 0.9;                  // an edge on the frame border is usually a leak into a bright surround
     c.tag = tag; cands.push(c);
     cands.sort((a, b) => (b.score - a.score) || (a.area - b.area));
   };
@@ -134,7 +153,7 @@ export function detectPageQuad(canvas, opts = {}) {
   if (!cands.length) return null;
   log('winner', cands[0].tag, cands[0].score.toFixed(3),
       'others', cands.slice(1).map(c => c.tag + '=' + c.score.toFixed(3)).join(' '));
-  const quad = cands[0].quad; // low-res, [tl,tr,br,bl]
+  const quad = cands[0].quad, weakEdge = cands[0].weakEdge; // low-res, [tl,tr,br,bl]
 
   /* 3. sub-pixel refinement at high resolution --------------------------- */
   if (o.refine) {
@@ -145,10 +164,10 @@ export function detectPageQuad(canvas, opts = {}) {
     } else sc2 = sc;                                     // refine on the analysis image itself
     const k = sc2 / sc;
     const qr = quad.map(p => ({ x: p.x * k, y: p.y * k }));
-    const R = Math.min(80, Math.max(5, Math.round(3 * k) + 2));
+    const R = Math.min(80, Math.max(6, Math.round(3 * k) + 3));
     const minG = Math.max(4, 0.1 * tD);
     tick('refine image read');
-    const refined = refineEdges(px2, W2, H2, qr, ref, R, minG, log);
+    const refined = refineEdges(px2, W2, H2, qr, ref, R, minG, weakEdge, log);
     tick('refine');
     if (refined && validQuad(refined, 0.04 * Math.hypot(W2, H2))) return toResult(refined, 1 / sc2);
     log('refinement rejected, using rough quad');
@@ -326,7 +345,7 @@ function growFromCentre(G, D, w, h, [x0, x1, y0, y1], t) {
 // a same-coloured object.
 function edgeContrast(Y, Cb, Cr, D, w, h, quad, d) {
   let inFrame = 0, strong = 0, sum = 0;
-  const steps = [];
+  const steps = [], edge = [null, null, null, null];
   const at = (x, y) => (Math.round(y) * w + Math.round(x));
   const inside = (x, y) => x >= 1 && y >= 1 && x < w - 1 && y < h - 1;
   for (let i = 0; i < 4; i++) {
@@ -349,9 +368,9 @@ function edgeContrast(Y, Cb, Cr, D, w, h, quad, d) {
     if (ev.length < K / 2) continue;                     // edge is (mostly) outside the frame
     ev.sort((a, b) => a - b);
     const q60 = ev[Math.min(ev.length - 1, Math.floor(ev.length * 0.6))];
-    inFrame++; sum += q60; steps.push(q60); if (q60 >= 6) strong++;
+    inFrame++; sum += q60; steps.push(q60); edge[i] = q60; if (q60 >= 6) strong++;
   }
-  return { inFrame, strong, steps, meanStep: inFrame ? sum / inFrame : 0 };
+  return { inFrame, strong, steps, edge, meanStep: inFrame ? sum / inFrame : 0 };
 }
 
 function cornersFromLines(lines, fallback, maxMove) {
@@ -365,10 +384,114 @@ function cornersFromLines(lines, fallback, maxMove) {
 /* ---------------------------------------------------------------------- */
 /* high-resolution edge refinement                                         */
 
-function refineEdges(px, W, H, q, ref, R, minG, log) {
-  const M = 2 * R + 1;
-  const pY = new Float32Array(M), pCb = new Float32Array(M), pCr = new Float32Array(M), pD = new Float32Array(M);
-  const sample = (x, y, k) => {                         // bilinear RGB -> Y/Cb/Cr/D at profile slot k
+function refineEdges(px, W, H, q, ref, R, minG, weakEdge, log) {
+  const sampler = makeSampler(px, W, H, ref);
+  const lines = [], recovered = [false, false, false, false];
+  log('rough quad', q.map(p => `(${p.x.toFixed(1)},${p.y.toFixed(1)})`).join(' '), 'R', R, 'minG', minG.toFixed(1), 'ref', ref.join(','));
+  const mid = i => ({ x: (q[i].x + q[(i + 1) % 4].x) / 2, y: (q[i].y + q[(i + 1) % 4].y) / 2 });
+  for (let i = 0; i < 4; i++) {
+    const A = q[i], B = q[(i + 1) % 4];
+    const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy);
+    let L = lineThrough(A, B);
+    if (!L) { lines.push(null); continue; }
+    const ux = dx / len, uy = dy / len, nx = uy, ny = -ux;   // outward normal (clockwise quad, y down)
+    const K = Math.min(96, Math.max(24, Math.round(len / 6)));
+    // A page edge separates paper (inside) from non-paper (outside). Every
+    // candidate line is probed 4..14 px either side; this rejects table rules
+    // and text baselines (paper on both sides) and soft shadow borders.
+    // All tests are per sample against that sample's own paper reading just
+    // inside the line, so shading across the page does not matter.
+    // paperOK: on >= 60% of samples the outside is clearly not paper.
+    const paperOK = c => c.paperFrac >= 0.6;
+    // stripOK: where the line lies inward of the rough edge the strip in between
+    // must not be paper (else the page simply continues, e.g. out of frame or a
+    // table rule in a full-frame scan) on >= 70% of those samples individually
+    // (a glass reflection is, a band of print with paper between the lines is
+    // not); where it lies outward the strip must BE paper on >= 70% (else the
+    // line belongs to another object).
+    const stripOK = c => (c.stripFrac !== c.stripFrac || c.stripFrac >= 0.7) && (c.stripOutFrac !== c.stripOutFrac || c.stripOutFrac >= 0.7);
+    const fmt = c => `support ${(c.support * 100).toFixed(0)}% rms ${c.rms.toFixed(2)} offset ${c.offset.toFixed(1)} D in ${c.insideD.toFixed(1)} out ${c.outsideD.toFixed(1)} paper ${(c.paperFrac * 100).toFixed(0)}% strip ${(c.stripFrac * 100).toFixed(0)}%/${(c.stripOutFrac * 100).toFixed(0)}%`;
+
+    // 1. line search in a narrow window around the rough edge, then in a wide
+    //    one (a rough edge rotated against the true edge only overlaps it in
+    //    part). Every sample contributes all its edge-response peaks and a
+    //    Hough vote ranks lines by the number of samples supporting them, so
+    //    a faint but collinear edge beats scattered noise peaks.
+    const res = findEdgeLine(sampler, A, B, ux, uy, nx, ny, len, K, R, R, minG, 0.4, 'support');
+    let pick = null;
+    if (res.ok) {
+      // lines that separate paper from non-paper first (a crease between two
+      // sheets has paper on both sides, so fall back to all); then the best
+      // supported, straightest one: a sharp edge has tiny residuals, a carpet
+      // of soft shadow peaks does not
+      const pool = res.cands.filter(paperOK);
+      pick = (pool.length ? pool : res.cands).reduce((a, c) => (c.support - a.support > 0.05 || (Math.abs(c.support - a.support) <= 0.05 && c.rms < a.rms)) ? c : a);
+      L = pick.line;
+    }
+    log('edge', i, 'fit +-' + R, 'in frame', res.valid, pick ? fmt(pick) : 'no consensus');
+    if (res.ok && res.cands.length > 1) log('edge', i, 'candidates:', res.cands.map(c => `[${c.offset.toFixed(1)} s${(c.support * 100).toFixed(0)} r${c.rms.toFixed(2)} D${c.insideD.toFixed(0)}/${c.outsideD.toFixed(0)}${paperOK(c) ? '*' : ''}]`).join(' '));
+
+    // 2. Sweep when no line was found near the rough edge (it is rotated
+    //    against the true edge, or sits on a merged reflection / second sheet
+    //    / white wall) or when the edge is weak. The search reaches far inward
+    //    and moderately outward; candidate lines are tried from the outermost
+    //    inward and the first that separates paper from non-paper AND whose
+    //    strip up to the rough edge is not paper wins (a paper strip means the
+    //    page simply continues: out of frame, or a table rule in a full-frame
+    //    scan). Print inside the page can therefore never beat the page edge.
+    // Also when the pick has paper on both sides AND is poorly supported: a
+    // rough edge lying inside the page finds only scattered print there. (A
+    // crease between two stacked sheets also has paper on both sides, but it
+    // is a real line with high support and must not be swept away.)
+    if (!pick || pick.support < 0.7 && (!paperOK(pick) || (weakEdge && weakEdge[i]))) {
+      const m = mid(i), o = mid((i + 2) % 4);
+      const depth = Math.abs((o.x - m.x) * nx + (o.y - m.y) * ny);
+      const range = Math.round(Math.min(0.35 * depth, 0.3 * Math.max(W, H)));
+      const rec = findEdgeLine(sampler, A, B, ux, uy, nx, ny, len, K, range, Math.max(24, Math.round(0.08 * len)), Math.max(6, minG), 0.6, 'outer');
+      // An edge that had clear evidence at its rough position may move outward
+      // only a little and only for a very well supported line: a paper-
+      // coloured strip out there is usually another sheet, not this page.
+      const weak = weakEdge && weakEdge[i];
+      const outOK = c => c.offset <= 2 || weak || (c.offset < 0.05 * len && c.support >= 0.85);
+      let hit = rec.ok ? rec.cands.find(c => Math.abs(c.offset) > 2 && outOK(c) && paperOK(c) && stripOK(c)) : null;
+      log('edge', i, pick ? 'weak;' : 'no line;', 'sweep', range + 'px ->', rec.ok ? rec.cands.length + ' lines, ' + (hit ? fmt(hit) + ' ACCEPTED' : 'none passes the paper tests: kept') : 'nothing consistent');
+      if (!hit && !pick) {
+        // Last resort: the edge may be visible along only part of its length
+        // (a page on a stack of white sheets shows its edge against the desk
+        // only near a corner). Accept a line whose inliers form one contiguous
+        // run of >= 25% of the edge with a strong response, passing the paper
+        // tests on >= 80% of that run, and staying on paper elsewhere.
+        const rec2 = findEdgeLine(sampler, A, B, ux, uy, nx, ny, len, K, range, Math.max(24, Math.round(0.08 * len)), Math.max(6, minG), 0.25, 'outer');
+        const partialOK = c => {
+          if (Math.abs(c.offset) <= 2 || !outOK(c) || c.run.frac < 0.25) return false;
+          if (c.run.strength < 2 * Math.max(6, minG) || c.insideFrac < 0.7) return false;
+          let np = 0, nt = 0, ns = 0, nst = 0;
+          for (let k = c.run.k0; k <= c.run.k1; k++) {
+            if (c.okPaper[k] !== undefined) { nt++; np += c.okPaper[k]; }
+            if (c.okStrip[k] !== undefined) { nst++; ns += c.okStrip[k]; }
+          }
+          return nt >= 5 && np / nt >= 0.8 && (nst < 5 || ns / nst >= 0.8);
+        };
+        hit = rec2.ok ? rec2.cands.find(partialOK) : null;
+        log('edge', i, 'partial-edge sweep ->', rec2.ok ? rec2.cands.length + ' lines, ' + (hit ? fmt(hit) + ` run ${(hit.run.frac * 100).toFixed(0)}% strength ${hit.run.strength.toFixed(0)} ACCEPTED` : 'none qualifies') : 'nothing consistent');
+      }
+      if (rec.ok && !hit) log('edge', i, 'sweep candidates:', rec.cands.slice(0, 12).map(c => `[${c.offset.toFixed(1)} s${(c.support * 100).toFixed(0)} paper${(c.paperFrac * 100).toFixed(0)}% strip${(c.stripFrac * 100).toFixed(0)}%/${(c.stripOutFrac * 100).toFixed(0)}%]`).join(' '));
+      if (hit) { L = hit.line; recovered[i] = true; }
+    }
+    lines.push(L);
+  }
+  return q.map((c, i) => {
+    const a = lines[(i + 3) % 4], b = lines[i];
+    const x = a && b ? intersect(a, b) : null;
+    const maxMove = (recovered[(i + 3) % 4] || recovered[i]) ? 0.4 * Math.hypot(W, H) : 4 * R;
+    return x && Math.hypot(x.x - c.x, x.y - c.y) <= maxMove ? x : c;
+  });
+}
+
+// bilinear colour sampler + edge-strength profiles at (near) full resolution
+function makeSampler(px, W, H, ref) {
+  const v = new Float32Array(4);
+  const sample = (x, y) => {                            // -> v = [Y, Cb, Cr, D]
     x -= 0.5; y -= 0.5;                                   // pixel centres sit at +0.5
     const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0;
     const i00 = (y0 * W + x0) * 4, i01 = i00 + 4, i10 = i00 + W * 4, i11 = i10 + 4;
@@ -377,74 +500,170 @@ function refineEdges(px, W, H, q, ref, R, minG, log) {
     const g = px[i00 + 1] * w00 + px[i01 + 1] * w01 + px[i10 + 1] * w10 + px[i11 + 1] * w11;
     const b = px[i00 + 2] * w00 + px[i01 + 2] * w01 + px[i10 + 2] * w10 + px[i11 + 2] * w11;
     const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    pY[k] = l; pCb[k] = 128 + 0.564 * (b - l); pCr[k] = 128 + 0.713 * (r - l);
-    pD[k] = paperDist(l, pCb[k], pCr[k], ref);
+    v[0] = l; v[1] = 128 + 0.564 * (b - l); v[2] = 128 + 0.713 * (r - l);
+    v[3] = paperDist(l, v[1], v[2], ref);
   };
-  // edge strength at profile slot k: the larger of the signed paper-distance
-  // increase (inside -> outside) and 0.8 x the sign-free colour change
-  const strength = k => {
-    if (pY[k - 1] !== pY[k - 1] || pY[k + 1] !== pY[k + 1]) return NaN;
-    return Math.max(pD[k + 1] - pD[k - 1],
-      0.8 * colourStep(pY[k + 1] - pY[k - 1], pCb[k + 1] - pCb[k - 1], pCr[k + 1] - pCr[k - 1]));
+  let cap = 0, pY, pCb, pCr, pD;
+  // edge strength for integer offsets s0..s1 along the normal (nx,ny) from
+  // (cx,cy): the larger of the signed paper-distance increase and 0.8 x the
+  // sign-free colour change, both over 2 px. NaN outside the image.
+  const strengths = (cx, cy, nx, ny, s0, s1) => {
+    const M = s1 - s0 + 3;
+    if (M > cap) { cap = M; pY = new Float32Array(M); pCb = new Float32Array(M); pCr = new Float32Array(M); pD = new Float32Array(M); }
+    for (let s = s0 - 1, k = 0; s <= s1 + 1; s++, k++) {
+      const x = cx + nx * s, y = cy + ny * s;
+      if (x < 1 || y < 1 || x > W - 2 || y > H - 2) { pY[k] = NaN; continue; }
+      sample(x, y); pY[k] = v[0]; pCb[k] = v[1]; pCr[k] = v[2]; pD[k] = v[3];
+    }
+    const out = new Float32Array(s1 - s0 + 1);
+    for (let k = 1; k <= s1 - s0 + 1; k++) {
+      if (pY[k - 1] !== pY[k - 1] || pY[k + 1] !== pY[k + 1]) { out[k - 1] = NaN; continue; }
+      out[k - 1] = Math.max(pD[k + 1] - pD[k - 1],
+        0.8 * colourStep(pY[k + 1] - pY[k - 1], pCb[k + 1] - pCb[k - 1], pCr[k + 1] - pCr[k - 1]));
+    }
+    return out;
   };
-  const lines = [];
-  let seed = 12345;
-  const rnd = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296;
-  for (let i = 0; i < 4; i++) {
-    const A = q[i], B = q[(i + 1) % 4];
-    const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy);
-    let L = lineThrough(A, B);
-    if (!L) { lines.push(null); continue; }
-    const ux = dx / len, uy = dy / len, nx = uy, ny = -ux;   // outward normal (clockwise quad, y down)
-    const K = Math.min(96, Math.max(24, Math.round(len / 6)));
-    const pts = [];
-    for (let k = 0; k < K; k++) {
-      const t = 0.08 + 0.84 * (k + 0.5) / K;
-      const cx = A.x + ux * t * len, cy = A.y + uy * t * len;
-      for (let s = -R; s <= R; s++) {
-        const x = cx + nx * s, y = cy + ny * s;
-        if (x < 1 || y < 1 || x > W - 2 || y > H - 2) pY[s + R] = NaN; else sample(x, y, s + R);
-      }
-      let best = -1, bg = minG;
-      for (let s = 1; s < 2 * R; s++) {
-        const g = strength(s);
-        if (g === g && g > bg) { bg = g; best = s; }
-      }
-      if (best < 0) continue;
-      let off = 0;
-      if (best >= 2 && best <= 2 * R - 2) {
-        const g0 = strength(best - 1), g2 = strength(best + 1);
-        const den = g0 - 2 * bg + g2;
-        if (den < 0 && g0 === g0 && g2 === g2) off = Math.max(-1, Math.min(1, 0.5 * (g0 - g2) / den));
-      }
-      const s = best - R + off;
-      pts.push({ x: cx + nx * s, y: cy + ny * s });
-    }
-    let used = 0;
-    if (pts.length >= 8) {
-      const rs = ransacLine(pts, 1.5, 80, rnd);
-      if (rs && rs.inliers.length >= 0.4 * pts.length) { L = tlsLine(rs.inliers); used = rs.inliers.length; }
-    }
-    log('edge', i, 'samples', K, 'edge points', pts.length, 'inliers used', used);
-    lines.push(L);
-  }
-  return cornersFromLines(lines, q, 4 * R);
+  const dist = (x, y) => {                              // paper distance at (x,y), NaN outside
+    if (x < 1 || y < 1 || x > W - 2 || y > H - 2) return NaN;
+    sample(x, y); return v[3];
+  };
+  return { sample, strengths, dist };
 }
 
-function ransacLine(pts, tol, iters, rnd) {
-  const n = pts.length;
-  let best = null, bestN = 0;
-  for (let it = 0; it < iters; it++) {
-    const i = (rnd() * n) | 0; let j = (rnd() * n) | 0;
-    if (j === i) j = (j + 1) % n;
-    const L = lineThrough(pts[i], pts[j]);
-    if (!L) continue;
-    let c = 0;
-    for (const p of pts) if (Math.abs(L.a * p.x + L.b * p.y + L.c) <= tol) c++;
-    if (c > bestN) { bestN = c; best = L; }
+// Candidate page-edge lines near a rough edge A->B. Every sample along the
+// inner 84% of the edge contributes all its edge-response peaks within
+// [-rangeIn, rangeOut] px of the rough line (negative = inward). Lines within
+// 12 deg of the rough edge are found with a (slope, offset) Hough vote that
+// counts distinct samples; a line needs support from `need` of the in-frame
+// samples. Candidates (up to 8, at least 3 px apart) come ordered by support
+// ('support') or from the outermost inward ('outer'), each with the median
+// paper distance 4..14 px inside and outside it, and across the strip between
+// it and the rough edge where it lies inward of that edge.
+function findEdgeLine(sampler, A, B, ux, uy, nx, ny, len, K, rangeIn, rangeOut, minG, need, order) {
+  const pts = [];
+  let valid = 0;
+  for (let k = 0; k < K; k++) {
+    const t = 0.08 + 0.84 * (k + 0.5) / K;
+    const cx = A.x + ux * t * len, cy = A.y + uy * t * len;
+    const g = sampler.strengths(cx, cy, nx, ny, -rangeIn, rangeOut);
+    let any = false;
+    for (let j = 1; j < g.length - 1; j++) {
+      if (g[j] !== g[j]) continue;
+      any = true;
+      if (g[j] < minG || g[j] < g[j - 1] || g[j] <= g[j + 1]) continue;
+      let off = 0;                                        // sub-pixel peak position
+      const g0 = g[j - 1], g2 = g[j + 1], den = g0 - 2 * g[j] + g2;
+      if (den < 0 && g0 === g0 && g2 === g2) off = Math.max(-1, Math.min(1, 0.5 * (g0 - g2) / den));
+      const sp = j - rangeIn + off;
+      pts.push({ k, d: (t - 0.5) * len, s: sp, g: g[j], x: cx + nx * sp, y: cy + ny * sp });
+    }
+    if (any) valid++;
   }
-  if (!best) return null;
-  return { line: best, inliers: pts.filter(p => Math.abs(best.a * p.x + best.b * p.y + best.c) <= tol) };
+  const res = { ok: false, valid, cands: [] };
+  const needN = need * valid;
+  if (valid < 0.3 * K || pts.length < needN) return res;
+
+  // Hough: s = c + m * d, slope bins fine enough for <= 2 px drift over the edge
+  // tolerance grows with edge length: real paper edges curl a little
+  const tol = Math.max(1.5, len / 800);
+  const mStep = 2 * tol / len, half = Math.max(1, Math.round(Math.tan(8 * Math.PI / 180) / mStep));
+  const nM = 2 * half + 1, c0 = Math.round(-rangeIn / tol) - 1, nC = Math.round((rangeIn + rangeOut) / tol) + 3;
+  const acc = new Uint16Array(nM * nC), lastK = new Int16Array(nM * nC).fill(-1);
+  for (const p of pts) for (let jm = 0; jm < nM; jm++) {
+    const c = Math.round((p.s - (jm - half) * mStep * p.d) / tol) - c0;
+    if (c < 0 || c >= nC) continue;
+    const idx = jm * nC + c;
+    if (lastK[idx] !== p.k) { lastK[idx] = p.k; acc[idx]++; }
+  }
+  const votes = (jm, c) => (c > 0 ? acc[jm * nC + c - 1] : 0) + acc[jm * nC + c] + (c < nC - 1 ? acc[jm * nC + c + 1] : 0);
+  const bins = [];
+  for (let c = 0; c < nC; c++) for (let jm = 0; jm < nM; jm++) { const v = votes(jm, c); if (v >= needN) bins.push({ c, jm, v }); }
+  if (!bins.length) return res;
+  bins.sort(order === 'outer' ? (a, b) => (b.c - a.c) || (b.v - a.v) : (a, b) => (b.v - a.v) || (b.c - a.c));
+
+  const med = arr => { arr.sort((x, y) => x - y); return arr.length ? arr[arr.length >> 1] : NaN; };
+  const low2 = arr => { arr.sort((x, y) => x - y); return arr.length > 1 ? arr[1] : arr.length ? arr[0] : NaN; };  // second lowest
+  const maxCands = order === 'outer' ? 40 : 12;
+  for (const bin of bins) {
+    if (res.cands.length >= maxCands) break;
+    // the bin only locates the line to within its quantisation; refit s = c + m d
+    // on the inliers (twice, tightening the tolerance) before counting support
+    let m = (bin.jm - half) * mStep, cOff = (bin.c + c0) * tol, inl = null;
+    for (const tt of [1.5 * tol, tol, tol]) {
+      inl = new Map();                                    // one inlier per sample: smallest residual
+      for (const p of pts) {
+        const r = Math.abs(p.s - (cOff + m * p.d));
+        if (r <= tt && (!inl.has(p.k) || r < inl.get(p.k).r)) inl.set(p.k, { p, r });
+      }
+      if (inl.size < needN) break;
+      let sd = 0, ss = 0, sdd = 0, sds = 0, n = inl.size;
+      for (const e of inl.values()) { sd += e.p.d; ss += e.p.s; sdd += e.p.d * e.p.d; sds += e.p.d * e.p.s; }
+      const md = sd / n, ms = ss / n, varD = sdd / n - md * md;
+      m = varD > 1e-6 ? (sds / n - md * ms) / varD : 0;
+      cOff = ms - m * md;
+    }
+    if (inl.size < needN) continue;
+    if (res.cands.some(x => Math.abs(x.cOff - cOff) <= 2 * tol && Math.abs(x.m - m) * len / 2 <= 2 * tol)) continue;  // same line
+    const inliers = [...inl.values()].map(e => e.p);
+    let sSum = 0, r2 = 0; for (const e of inl.values()) { sSum += e.p.s; r2 += e.r * e.r; }
+    // paper distance just inside / just outside the line, across the strip
+    // from the line up to the rough edge where the line lies inward of it,
+    // and across the strip from the rough edge out to the line where it lies outward
+    // Per-sample probes: paper reading 4..14 px inside the line, 4..14 px
+    // outside it, and across the strip between the line and the rough edge.
+    // Each sample is judged against its own inside reading.
+    const inner = [], outer = [], okPaper = new Array(K), okStrip = new Array(K), insideK = new Array(K);
+    let nPaper = 0, nSide = 0, nStripIn = 0, nStripInNonPaper = 0, nStripOut = 0, nStripOutPaper = 0;
+    for (let k = 0; k < K; k++) {
+      const t = 0.08 + 0.84 * (k + 0.5) / K;
+      const cx = A.x + ux * t * len, cy = A.y + uy * t * len, ck = cOff + m * (t - 0.5) * len;
+      const mi = [], mo = [], ms = [];
+      for (let j = 0; j < 5; j++) {
+        const q = (j + 0.5) / 5;
+        const si = ck - 4 - 10 * q, so = ck + 4 + 10 * q;
+        const a = sampler.dist(cx + nx * si, cy + ny * si), b = sampler.dist(cx + nx * so, cy + ny * so);
+        if (a === a) { inner.push(a); mi.push(a); } if (b === b) { outer.push(b); mo.push(b); }
+        if (ck + 4 < -2) {
+          const ss = ck + 4 + (-2 - ck - 4) * q, d = sampler.dist(cx + nx * ss, cy + ny * ss);
+          if (d === d) ms.push(d);
+        } else if (ck - 4 > 2) {
+          const ss = 2 + (ck - 4 - 2) * q, d = sampler.dist(cx + nx * ss, cy + ny * ss);
+          if (d === d) ms.push(-1 - d);                   // tagged as outward
+        }
+      }
+      if (mi.length < 3) continue;
+      const pin = med(mi);
+      insideK[k] = pin;
+      if (mo.length >= 3) { nSide++; okPaper[k] = low2(mo) >= 1.5 * pin + 3 ? 1 : 0; nPaper += okPaper[k]; }
+      if (ms.length >= 3) {
+        if (ms[0] >= 0) { nStripIn++; okStrip[k] = low2(ms) >= 1.4 * pin + 3 ? 1 : 0; nStripInNonPaper += okStrip[k]; }
+        else { nStripOut++; okStrip[k] = med(ms.map(v => -1 - v)) <= 1.5 * pin + 3 ? 1 : 0; nStripOutPaper += okStrip[k]; }
+      }
+    }
+    // longest contiguous run of inlier samples (gaps of <= 2 samples allowed),
+    // its mean edge response, and how much of the whole line has paper inside
+    // (judged against the paper reading within the run)
+    const inlK = new Set(inl.keys());
+    let run = { k0: 0, k1: -1, frac: 0, strength: 0 }, k0 = -1, gap = 0, gs = 0, gn = 0;
+    for (let k = 0; k <= K; k++) {
+      if (k < K && inlK.has(k)) { if (k0 < 0) { k0 = k; gs = 0; gn = 0; } gap = 0; gs += inl.get(k).p.g; gn++; }
+      else if (k0 >= 0 && (++gap > 2 || k === K)) {
+        const k1 = k - gap; if (k1 - k0 + 1 > run.k1 - run.k0 + 1) run = { k0, k1, frac: (k1 - k0 + 1) / K, strength: gs / gn };
+        k0 = -1;
+      }
+    }
+    const runIn = []; for (let k = run.k0; k <= run.k1; k++) if (insideK[k] !== undefined) runIn.push(insideK[k]);
+    const refIn = runIn.length ? med(runIn) : NaN;
+    let nIn = 0, nInPaper = 0; for (let k = 0; k < K; k++) if (insideK[k] !== undefined) { nIn++; if (insideK[k] <= 1.5 * refIn + 3) nInPaper++; }
+    res.cands.push({ line: tlsLine(inliers), support: inl.size / valid, rms: Math.sqrt(r2 / inl.size), offset: sSum / inliers.length, cOff, m,
+      insideD: med(inner), outsideD: med(outer),
+      paperFrac: nSide ? nPaper / nSide : 0,
+      stripFrac: nStripIn >= 5 ? nStripInNonPaper / nStripIn : NaN,
+      stripOutFrac: nStripOut >= 5 ? nStripOutPaper / nStripOut : NaN,
+      okPaper, okStrip, run, insideFrac: nIn ? nInPaper / nIn : 0 });
+  }
+  res.ok = res.cands.length > 0;
+  return res;
 }
 
 /* ---------------------------------------------------------------------- */

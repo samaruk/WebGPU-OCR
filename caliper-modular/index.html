@@ -37,6 +37,12 @@
       </div>
 
       <div class="grp">
+        <h3><span class="ix">00b</span> Rectification</h3>
+        <label class="chk"><input type="checkbox" id="rectify" checked> Rectify image (lens + perspective) before processing</label>
+        <div class="hint">Checked: radial lens distortion is undone and the detected page quad is warped back to a rectangle; every later section works on that rectified image. Unchecked: both corrections are skipped and every section works on the original image as loaded. The Lens-corrected and Rectified stages then simply show the source.</div>
+      </div>
+
+      <div class="grp">
         <h3><span class="ix">01</span> Deskew · rotation</h3>
         <label class="chk"><input type="checkbox" id="deskew" checked> Auto-correct skew (rotate back)</label>
         <div id="deskewOpts" style="margin-top:9px">
@@ -68,10 +74,31 @@
       </div>
 
       <div class="grp">
+        <h3><span class="ix">02a</span> Borders · rules</h3>
+        <label class="chk"><input type="checkbox" id="brEnable" checked> Detect long borders before the text-line clean</label>
+        <div id="brOpts" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Runs the rule detector of section 08 (same k for border binary, gap-bridge, opening, thickness, coverage and dashed settings) on the rectified image. Rules are interpreted as a full table grid, a vertical grid, a boxed header row, stacked row rules or section separators, and their pixels are erased before glyph detection so a rule fused to a glyph never spoils a line.</div>
+          <div class="ctl">
+            <label>Long rule <span class="val" id="vBrMinLen">0.25</span> × page width</label>
+            <input type="range" id="brMinLen" min="0.05" max="0.90" step="0.05" value="0.25">
+            <div class="hint">A horizontal rule at least this fraction of the page width (or a vertical one of the page height) counts as long: only long rules can form stacked row rules; the grid uses every rule that intersects another.</div>
+          </div>
+          <div class="ctl">
+            <label>Section rule <span class="val" id="vBrSectionLen">0.50</span> × page width</label>
+            <input type="range" id="brSectionLen" min="0.20" max="0.95" step="0.05" value="0.50">
+            <div class="hint">A long rule outside the table at least this wide is a section separator.</div>
+          </div>
+          <label class="chk"><input type="checkbox" id="brErase" checked> Erase every rule from the image for all later stages</label>
+          <label class="chk"><input type="checkbox" id="brUseCols" checked> Feed the table region and column boundaries to the column stage</label>
+          <div class="hint">Erasing paints every detected rule — table borders, section lines, pen lines, dashed rules — out of the working image with the surrounding paper. Text lines, columns, pass A, deskew, dewarp and passes B and C then process the rule-free image; pass B\u2019s own border detection still reads the original. With a full or vertical grid the column stage takes the table band from the border box; with a header box or a grid it adds the vertical rules as column boundaries where the glyph coverage does not contradict them.</div>
+        </div>
+      </div>
+
+      <div class="grp">
         <h3><span class="ix">02b</span> Text lines · clean</h3>
         <label class="chk"><input type="checkbox" id="tlEnable" checked> Detect text lines and remove all non-text before pass A</label>
         <div id="tlOpts" style="margin-top:9px">
-          <div class="hint" style="margin-bottom:8px">Runs on the rectified image. Character components are filtered, chained into text lines, and only the ink of accepted lines is passed on: pass A runs on this clean binary instead of thresholding the image itself. Chaining (not dilation) is used so that skewed lines are followed and stacked lines never fuse.</div>
+          <div class="hint" style="margin-bottom:8px">Runs on the rectified image. Character components are filtered, chained into text lines, and only the ink of accepted lines is passed on: pass A runs on this clean binary instead of thresholding the image itself. Chaining (not dilation) is used so that skewed lines are followed and stacked lines never fuse; a pen tick or stroke that reaches two lines is detected as a bridge and can never join them.</div>
           <div class="ctl">
             <label>Min glyph height <span class="val" id="vTlMinH">0.30</span> × median</label>
             <input type="range" id="tlMinH" min="0.05" max="1.00" step="0.05" value="0.30">
@@ -101,6 +128,39 @@
             <label>Min glyphs per line <span class="val" id="vTlMinChars">1</span></label>
             <input type="range" id="tlMinChars" min="1" max="6" step="1" value="1">
             <div class="hint">Chains with fewer components are rejected. At 1, a lone component is still accepted only if it looks like a glyph (height, fill and aspect checks).</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3><span class="ix">02c</span> Columns</h3>
+        <label class="chk"><input type="checkbox" id="clEnable" checked> Detect the table band, gutters, columns and cells</label>
+        <div id="clOpts" style="margin-top:9px">
+          <div class="hint" style="margin-bottom:8px">Works on the full lines of 02b in the de-skewed frame. Rows with enough pieces form the table band; a coverage profile of the glyphs across that band exposes the gutters; the intervals between gutters are the columns and every glyph is assigned to the column under its centre. Needs no rules or borders.</div>
+          <div class="ctl">
+            <label>Min pieces per table row <span class="val" id="vClMinPieces">3</span></label>
+            <input type="range" id="clMinPieces" min="2" max="8" step="1" value="3">
+            <div class="hint">A full line with at least this many pieces counts as a table row. Key/value rows like "Invoice Date : 16.05.2026" have 2 pieces, so 3 keeps them out of the band.</div>
+          </div>
+          <div class="ctl">
+            <label>Row gap tolerance <span class="val" id="vClRowGap">1</span> rows</label>
+            <input type="range" id="clRowGap" min="0" max="3" step="1" value="1">
+            <div class="hint">How many consecutive non-tabular rows (blank or wrapped cells) may sit inside the band without ending it.</div>
+          </div>
+          <div class="ctl">
+            <label>Band merge gap <span class="val" id="vClMergeGap">6</span> rows</label>
+            <input type="range" id="clMergeGap" min="0" max="15" step="1" value="6">
+            <div class="hint">An invoice has one item table. When a watermark, a pen line or a paper fold damages a few rows, the table shows up as two separate runs of tabular rows; a second run within this many rows of the main one is merged back in if its glyphs respect the main run's gutters (same columns), together with the damaged rows in between. 0 disables merging.</div>
+          </div>
+          <div class="ctl">
+            <label>Min gutter width <span class="val" id="vClGutterW">0.30</span> × glyph height</label>
+            <input type="range" id="clGutterW" min="0.10" max="3.00" step="0.05" value="0.30">
+            <div class="hint">A valley narrower than this cannot be a gutter. A gutter is either a clear run (coverage below the max below) or a deep valley — coverage at most 42 % of the lower neighbouring peak — which is how columns separated only by a word-space-sized gap that lines up in every row are found. Word spaces inside a column fall at different positions per row and never dip that deep.</div>
+          </div>
+          <div class="ctl">
+            <label>Max gutter coverage <span class="val" id="vClGutterCov">0.10</span> × rows</label>
+            <input type="range" id="clGutterCov" min="0.00" max="0.50" step="0.02" value="0.10">
+            <div class="hint">A gutter may be crossed by at most this fraction of the band rows (a long product name spilling into the next column). 0 demands a perfectly clear gutter.</div>
           </div>
         </div>
       </div>
@@ -176,7 +236,7 @@
           <div class="ctl">
             <label>Min vertical overlap <span class="val" id="vFullOverlap">0.50</span> × line height</label>
             <input type="range" id="fullOverlap" min="0.20" max="0.90" step="0.05" value="0.50">
-            <div class="hint">Two line blobs from section 05b are joined into one full line when their ink overlaps vertically by at least this fraction of the shorter one. A join is always refused when the combined height would exceed the section 05 max line height, and also whenever the two pieces overlap horizontally: reading left to right there is exactly one piece at any horizontal position, so pieces that share an x range are different lines no matter how little they are offset. The result is one line per text row spanning from its leftmost to its rightmost piece.</div>
+            <div class="hint">Two line blobs from section 05b are joined into one full line when their ink overlaps vertically by at least this fraction of the shorter one. Each piece is judged against its nearest piece in the row, so a gently curled row still joins end to end. A join is always refused when the two neighbours together would exceed the section 05 max line height, and also whenever the two pieces overlap horizontally: reading left to right there is exactly one piece at any horizontal position, so pieces that share an x range are different lines no matter how little they are offset. The result is one line per text row spanning from its leftmost to its rightmost piece.</div>
           </div>
         </div>
       </div>

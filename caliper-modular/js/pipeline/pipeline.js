@@ -17,6 +17,8 @@ import { filterByHeightDensity } from '../blobfilter/blobfilter.js';
 import { filterBlobsByHeight } from '../heightfilter/heightfilter.js';
 import { buildLineBlobs, buildFullLines } from '../lines/lines.js';
 import { detectTextLines } from '../textlines/textlines.js';
+import { detectColumns } from '../columns/columns.js';
+import { analyseBorders, inpaintRules } from '../borderlayout/borderlayout.js';
 import { estimateSkew, buildDeskew } from '../skew/skew.js';
 import { rectifyPerspective } from '../rectify/rectify.js';
 import { correctLensDistortion } from '../lens/lens.js';
@@ -32,11 +34,16 @@ import { fitView } from '../viewport/viewport.js';
 export function readParams(){
   const win=+$('win').value;
   return {
+    rectify:$('rectify').checked,
     deskew:$('deskew').checked, skewMax:+$('skewMax').value,
     radius:(win-1)>>1, k:+$('k').value, R:+$('rr').value, invert:$('invert').checked,
+    brEnable:$('brEnable').checked, brMinLen:+$('brMinLen').value, brSectionLen:+$('brSectionLen').value,
+    brErase:$('brErase').checked, brUseCols:$('brUseCols').checked,
     tlEnable:$('tlEnable').checked, tlMinH:+$('tlMinH').value, tlMaxH:+$('tlMaxH').value,
     tlMaxAsp:+$('tlMaxAsp').value, tlGap:+$('tlGap').value, tlOverlap:+$('tlOverlap').value,
     tlMinChars:+$('tlMinChars').value,
+    clEnable:$('clEnable').checked, clMinPieces:+$('clMinPieces').value, clRowGap:+$('clRowGap').value,
+    clGutterW:+$('clGutterW').value, clGutterCov:+$('clGutterCov').value, clMergeGap:+$('clMergeGap').value,
     dilA:{h:+$('dilHa').value, v:+$('dilVa').value, eh:0, ev:0},                       // before rotate (word detection — no erode, would damage thin glyphs)
     dilB:{h:+$('rowDilH').value, v:+$('rowDilV').value,                                 // after rotate · Pass B (rows)
           eh:+$('rowEroH').value, ev:+$('rowEroV').value},                              //   erode is selectable from the UI; defaults are 0/0 (off) — opt-in for noisy scans
@@ -171,25 +178,64 @@ export async function runPipeline(){
     //     perspective stage fits a quad to them. Auto-gated: engages
     //     only when the page edges actually bow.
     let t0=performance.now();
-    oStep.textContent='1 · lens distortion'; await raf();
-    let lens=null;
-    try{ lens=correctLensDistortion(S.origCanvas); }catch(e){ lens=null; }
+    let lens=null, rect=null;
+    if(p.rectify){
+      oStep.textContent='1 · lens distortion'; await raf();
+      try{ lens=correctLensDistortion(S.origCanvas); }catch(e){ lens=null; }
+    }
     S.lensCanvas = lens || S.origCanvas;
     t.lens=performance.now()-t0;
 
     // 2 · perspective rectification — warp the (now straight-edged) page
     //     quad back to a rectangle. Conservative: a flat/square-on
-    //     capture passes straight through.
+    //     capture passes straight through. Both corrections are skipped
+    //     when "Rectify image" (section 00b) is unchecked: every later
+    //     stage then works on the original image as loaded.
     t0=performance.now();
-    oStep.textContent='2 · perspective rectification'; await raf();
-    let rect=null;
-    try{ rect=rectifyPerspective(S.lensCanvas); }catch(e){ rect=null; }
+    if(p.rectify){
+      oStep.textContent='2 · perspective rectification'; await raf();
+      try{ rect=rectifyPerspective(S.lensCanvas); }catch(e){ rect=null; }
+    }
     S.workCanvas = rect || S.lensCanvas;
     S.workImageData = (S.workCanvas===S.origCanvas)
       ? S.origImageData
       : S.workCanvas.getContext('2d').getImageData(0,0,S.W,S.H);
-      t.rect = performance.now() - t0;
-      console.log(['lens, rect,S,t', lens, rect, S, t]);
+    t.rect = performance.now() - t0;
+    // 2a · borders — long rules on the rectified image, interpreted as a
+    //      table grid / header box / row rules / section separators, and
+    //      an erase mask so glyph detection never sees them
+    t0=performance.now();
+    S.borders=null;
+    if(p.brEnable){
+      oStep.textContent='2a · borders · rules'; await raf();
+      const binaryBorder = await gpuSauvola(S.workImageData, { ...p, k: p.kBorder });
+      const hOpenedPre = await gpuMorph(binaryBorder, S.W, S.H, [
+        { op: 'bridge', axis: 'h', radius: p.bMaxGapH },
+        { op: 'erode',  axis: 'h', radius: p.bOpenH  },
+        { op: 'dilate', axis: 'h', radius: p.bOpenH  } ]);
+      const vOpenedPre = await gpuMorph(binaryBorder, S.W, S.H, [
+        { op: 'bridge', axis: 'v', radius: p.bMaxGapV },
+        { op: 'erode',  axis: 'v', radius: p.bOpenV  },
+        { op: 'dilate', axis: 'v', radius: p.bOpenV  } ]);
+      const borders = detectBorders(binaryBorder, S.W, S.H, {
+        maxGapH:p.bMaxGapH, maxGapV:p.bMaxGapV, openKernelH:p.bOpenH, openKernelV:p.bOpenV,
+        maxThickness:p.bMaxThickness, minCoverage:p.bMinCoverage, smoothingRadius:p.bSmoothing,
+        minLenFrac:p.bMinLenFrac, hOpenedPrecomputed:hOpenedPre, vOpenedPrecomputed:vOpenedPre,
+        detectDashed:p.bDetectDashed, maxDotSize:p.bDotMaxSize, minDots:p.bDotMinDots,
+        minStrideToSizeRatio:p.bDotStrideRatio, minLenFracDashed:p.bDashMinLenFrac });
+      S.borders = Object.assign({ binaryRaw:binaryBorder, borders }, analyseBorders(borders, S.W, S.H, p, binaryBorder));
+    }
+    // rules-erased raster: every detected rule (table border, section
+    // line, pen line, dashed rule) is painted out with the surrounding
+    // paper. Every later processing stage reads THIS raster; the
+    // original stays for display and for pass B's own border detection.
+    if(S.borders && p.brErase){
+      const r=inpaintRules(S.workImageData, S.borders.erase, S.W, S.H);
+      S.cleanCanvas=r.canvas; S.cleanImageData=r.imageData;
+      S.borders.cleanCanvas=r.canvas;
+    } else { S.cleanCanvas=S.workCanvas; S.cleanImageData=S.workImageData; if(S.borders) S.borders.cleanCanvas=null; }
+    t.borders=performance.now()-t0;
+
     // 2b · text-line clean — detect whole text lines on the rectified
     //      image and drop every non-text component. Pass A then runs on
     //      the resulting clean binary rather than on its own threshold.
@@ -197,9 +243,20 @@ export async function runPipeline(){
     S.textLines=null;
     if(p.tlEnable){
       oStep.textContent='2b · text lines · clean'; await raf();
-      S.textLines = await detectTextLines(S.workImageData, p);
+      S.textLines = await detectTextLines(S.cleanImageData, p,
+        { erase: (p.brErase && S.borders) ? S.borders.erase : null });
     }
     t.textLines=performance.now()-t0;
+
+    // 2c · columns — table band, gutters, columns and cells from the
+    //      clean full lines, in the de-skewed frame
+    t0=performance.now();
+    S.columns=null;
+    if(p.clEnable && S.textLines){
+      oStep.textContent='2c · columns'; await raf();
+      S.columns=detectColumns(S.textLines,p,(p.brUseCols && S.borders) ? S.borders.layout : null);
+    }
+    t.columns=performance.now()-t0;
 
     // 3 · pass A — detection on the corrected, un-rotated image
     t0=performance.now();
@@ -207,7 +264,7 @@ export async function runPipeline(){
     const passAopts = p.heightFilter ? { heightFilter:{lo:p.hMinF, split:p.hSplitF,
                                                         maxAspect:p.rmNon ? p.maxAspect : 0} } : {};
     if(S.textLines) passAopts.binary = S.textLines.binary;
-    S.passes.A = await runPass(S.workImageData, p.dilA, p, passAopts);
+    S.passes.A = await runPass(S.cleanImageData, p.dilA, p, passAopts);
     t.passA=performance.now()-t0;
 
     // 3b · line blobs — fuse the clean pass-A word blobs into whole text
@@ -230,8 +287,20 @@ export async function runPipeline(){
     //     which already sit at the page's true rotation
     t0=performance.now();
     oStep.textContent='4 · skew detection'; await raf();
-    S.angle = p.deskew ? estimateSkew(S.passes.A, S.workCanvas, p.skewMax) : 0;
-    buildDeskew(S.angle);
+    // Preferred source: the page tilt the text-line stage measured from
+    // whole lines (weighted median over every wide line). Falls back to
+    // the pass-A word-box estimate, then to the projection profile.
+    const tlTilt = (S.textLines && S.textLines.rows && S.textLines.rows.slopeN>=3)
+      ? Math.atan(S.textLines.rows.slope)*180/Math.PI : null;
+    S.angle = !p.deskew ? 0
+            : (tlTilt!==null && Math.abs(tlTilt)<=p.skewMax) ? -tlTilt
+            : estimateSkew(S.passes.A, S.cleanCanvas, p.skewMax);
+    if(!Number.isFinite(S.angle)) S.angle=0;
+    buildDeskew(S.angle, S.cleanCanvas);                       // → S.deskewCanvas (rules erased)
+    if(S.cleanCanvas!==S.workCanvas){                          // original, same angle, for pass B borders
+      if(!S.deskewOrigCanvas) S.deskewOrigCanvas=document.createElement('canvas');
+      buildDeskew(S.angle, S.workCanvas, S.deskewOrigCanvas);
+    } else S.deskewOrigCanvas=null;
     t.skew=performance.now()-t0;
     $('skewOut').innerHTML = p.deskew
       ? `<span class="k">found</span> <span class="v">${fmtDeg(S.angle)}</span> &middot; `+
@@ -258,11 +327,15 @@ export async function runPipeline(){
         words.push({cx:mx+dx*ca-dy*sa, cy:my+dx*sa+dy*ca, h:y1-y0});
       }
       let dw=null;
-      try{ dw=dewarpCurl(S.deskewCanvas, words); }catch(e){ dw=null; }
+      try{ dw=dewarpCurl(S.deskewCanvas, words, S.deskewOrigCanvas?[S.deskewOrigCanvas]:[]); }catch(e){ dw=null; }
       S.dewarpCanvas = dw || S.deskewCanvas;
       S.dewarpImageData = dw
         ? dw.getContext('2d').getImageData(0,0,S.W,S.H)
         : S.deskewImageData;
+      // the original, warped with the same field, keeps its rules for
+      // pass B's border detection
+      S.dewarpOrigCanvas = S.deskewOrigCanvas ? ((dw && dw.also && dw.also[0]) || S.deskewOrigCanvas) : null;
+      S.dewarpOrigImageData = S.dewarpOrigCanvas ? S.dewarpOrigCanvas.getContext('2d').getImageData(0,0,S.W,S.H) : null;
     }
     t.dewarp=performance.now()-t0;
 
@@ -349,7 +422,11 @@ export async function runPipeline(){
        binaries, so we skip the second GPU call and reuse the existing
        binary as a shortcut.
        ------------------------------------------------------------------ */
-    if(p.kBorder === p.k){
+    if(S.dewarpOrigImageData){
+      // rules were erased from the working raster: read them from the
+      // original, levelled and dewarped with the same transforms
+      S.passes.B.binaryBorder = await gpuSauvola(S.dewarpOrigImageData, { ...p, k: p.kBorder });
+    } else if(p.kBorder === p.k){
       S.passes.B.binaryBorder = S.passes.B.binary;
     } else {
       S.passes.B.binaryBorder = await gpuSauvola(S.dewarpImageData, { ...p, k: p.kBorder });
@@ -438,7 +515,9 @@ export async function runPipeline(){
       `<span class="k">rectify</span> <span class="v">${t.rect.toFixed(0)}ms</span> · `+
       `<span class="k">skew</span> <span class="v">${t.skew.toFixed(0)}ms</span> · `+
       `<span class="k">dewarp</span> <span class="v">${t.dewarp.toFixed(0)}ms</span> · `+
+      `<span class="k">borders</span> <span class="v">${t.borders.toFixed(0)}ms</span> · `+
       `<span class="k">text lines</span> <span class="v">${t.textLines.toFixed(0)}ms</span> · `+
+      `<span class="k">columns</span> <span class="v">${t.columns.toFixed(0)}ms</span> · `+
       `<span class="k">pass A</span> <span class="v">${t.passA.toFixed(0)}ms</span> · `+
       `<span class="k">lines</span> <span class="v">${t.lines.toFixed(0)}ms</span> · `+
       `<span class="k">pass B</span> <span class="v">${t.passB.toFixed(0)}ms</span> · `+

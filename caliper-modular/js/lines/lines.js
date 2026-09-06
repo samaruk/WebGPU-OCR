@@ -78,39 +78,88 @@ export async function buildLineBlobs(pass,p){
                   when absent it is derived as 1.6 × median line height
      minOverlap : required vertical overlap as a fraction of the shorter
                   piece's height (0..1)
-   Returns {hMax, rows:[{bb, ink, lines:[...], words}]} sorted top → bottom,
-   each row's lines sorted left → right.                                */
+   Returns {hMax, slope, rows:[{bb, ink, dy, poly, centerline, lines:[...],
+   words}]} sorted top → bottom, each row's lines sorted left → right.
+   `slope` is the estimated page tilt (dy/dx) used for the join; `dy` is
+   the row's de-skewed vertical extent; `poly` is the closed outline that
+   follows the pieces and `centerline` the left → right reading path.  */
 export function buildFullLines(lineResult,hMax,minOverlap){
   const src=lineResult.lines.slice();
-  if(!src.length) return {hMax:hMax||0, rows:[]};
+  if(!src.length) return {hMax:hMax||0, slope:0, rows:[]};
   const hOf=b=>b.y1-b.y0+1;
+
+  /* --- page slope ---------------------------------------------------
+     On a photographed or skewed page a text row drifts vertically as it
+     crosses the page, so row N on the left can sit level with row N-1
+     on the right. Joining by raw vertical overlap would then chain
+     pieces of neighbouring rows into one "line". The slope is estimated
+     from the pieces themselves: a least-squares line through the member
+     centres of every wide piece with ≥ 4 members, combined as a
+     member-weighted median. Every vertical comparison below is done in
+     the de-skewed frame y' = y − slope·x.                              */
+  const slopes=[], wts=[];
+  for(const ln of src){
+    const ws=ln.words||[]; if(ws.length<4) continue;
+    if(ln.ink.x1-ln.ink.x0+1 < 3*hOf(ln.ink)) continue;
+    let sx=0,sy=0,sxx=0,sxy=0,n=0;
+    for(const m of ws){ const cx=(m.bb.x0+m.bb.x1)/2, cy=(m.bb.y0+m.bb.y1)/2;
+      sx+=cx; sy+=cy; sxx+=cx*cx; sxy+=cx*cy; n++; }
+    const d=n*sxx-sx*sx; if(d<=0) continue;
+    slopes.push((n*sxy-sx*sy)/d); wts.push(n);
+  }
+  let slope=0;
+  if(slopes.length){
+    const ix=slopes.map((_,i)=>i).sort((a,b)=>slopes[a]-slopes[b]);
+    let tot=0; for(const w of wts) tot+=w; let acc=0;
+    for(const i of ix){ acc+=wts[i]; if(acc>=tot/2){ slope=slopes[i]; break; } }
+  }
+  // de-skewed vertical extent of a piece = union of its members' extents,
+  // each shifted by the slope at that member's own x
+  const dsk=ln=>{
+    const ws=ln.words&&ln.words.length?ln.words:null;
+    if(!ws){ const cx=(ln.ink.x0+ln.ink.x1)/2; return {y0:ln.ink.y0-slope*cx, y1:ln.ink.y1-slope*cx}; }
+    let y0=1/0,y1=-1/0;
+    for(const m of ws){ const cx=(m.bb.x0+m.bb.x1)/2;
+      const a=m.bb.y0-slope*cx, b=m.bb.y1-slope*cx; if(a<y0)y0=a; if(b>y1)y1=b; }
+    return {y0,y1};
+  };
+  for(const ln of src) ln.dy=dsk(ln);
   if(!(hMax>0)){
-    const hs=src.map(l=>hOf(l.ink)).sort((a,b)=>a-b);
+    const hs=src.map(l=>hOf(l.dy)).sort((a,b)=>a-b);
     hMax=1.6*hs[hs.length>>1];
   }
-  // process pieces top→bottom; each joins the first row it is compatible
-  // with, otherwise starts a new row.  Compatibility is judged on the
-  // tight INK boxes (the dilated boxes are padded by lineDilV).
-  src.sort((a,b)=>a.ink.y0-b.ink.y0 || a.ink.x0-b.ink.x0);
+  // process pieces top→bottom (de-skewed); each joins the first row it is
+  // compatible with, otherwise starts a new row.
+  src.sort((a,b)=>a.dy.y0-b.dy.y0 || a.ink.x0-b.ink.x0);
   const wOf=b=>b.x1-b.x0+1;
   // horizontal overlap tolerance: a couple of pixels of dilation slop only
   const xTol=(a,b)=>Math.max(2,0.05*Math.min(wOf(a),wOf(b)));
+  /* --- joining --------------------------------------------------------
+     A piece is judged against its NEAREST piece in a candidate row (the
+     closest in x), not against the row as a whole: the vertical-overlap
+     and one-line-height tests are local. This keeps one odd piece (a
+     tall fragment, a glyph with a pen mark) from poisoning a whole row,
+     and lets a gently curled row, whose far ends sit at different
+     heights, still join piece by piece. The one-piece-per-x rule is
+     checked against every piece of the row.                            */
   const rows=[];
   for(const ln of src){
-    const b=ln.ink; let home=null;
+    const b=ln.ink, d=ln.dy; let home=null, bestScore=-1;
     for(const r of rows){
-      const ov=Math.min(r.ink.y1,b.y1)-Math.max(r.ink.y0,b.y0)+1;
-      const need=minOverlap*Math.min(hOf(r.ink),hOf(b));
-      if(ov<need) continue;
-      const uy0=Math.min(r.ink.y0,b.y0), uy1=Math.max(r.ink.y1,b.y1);
-      if(uy1-uy0+1>hMax) continue;                  // would become two lines
-      // one piece per x position: refuse if it sits over any existing piece
-      let stacked=false;
+      let stacked=false, near=null, nearDist=1/0;
       for(const m of r.lines){ const a=m.ink;
         const xo=Math.min(a.x1,b.x1)-Math.max(a.x0,b.x0)+1;
-        if(xo>xTol(a,b)){ stacked=true; break; } }
-      if(stacked) continue;
-      home=r; break;
+        if(xo>xTol(a,b)){ stacked=true; break; }      // sits over an existing piece
+        const dist=a.x1<b.x0 ? b.x0-a.x1 : a.x0-b.x1;
+        if(dist<nearDist){ nearDist=dist; near=m; } }
+      if(stacked || !near) continue;
+      const nd=near.dy;
+      const ov=Math.min(nd.y1,d.y1)-Math.max(nd.y0,d.y0)+1;
+      const mh=Math.min(hOf(nd),hOf(d));
+      if(ov<minOverlap*mh) continue;
+      if(Math.max(nd.y1,d.y1)-Math.min(nd.y0,d.y0)+1>hMax) continue;   // would become two lines
+      const score=ov/mh;
+      if(score>bestScore){ bestScore=score; home=r; }
     }
     if(home){
       home.lines.push(ln);
@@ -118,14 +167,29 @@ export function buildFullLines(lineResult,hMax,minOverlap){
                 x1:Math.max(home.ink.x1,b.x1),y1:Math.max(home.ink.y1,b.y1)};
       home.bb ={x0:Math.min(home.bb.x0,ln.bb.x0),y0:Math.min(home.bb.y0,ln.bb.y0),
                 x1:Math.max(home.bb.x1,ln.bb.x1),y1:Math.max(home.bb.y1,ln.bb.y1)};
+      home.dy ={y0:Math.min(home.dy.y0,d.y0), y1:Math.max(home.dy.y1,d.y1)};
     } else {
-      rows.push({lines:[ln], ink:{...b}, bb:{...ln.bb}});
+      rows.push({lines:[ln], ink:{...b}, bb:{...ln.bb}, dy:{...d}});
     }
   }
   for(const r of rows){
     r.lines.sort((a,b)=>a.ink.x0-b.ink.x0);
     r.words=r.lines.reduce((n,l)=>n+l.words.length,0);
+    /* --- polygon outline ------------------------------------------
+       A full line is NOT its bounding rectangle: on a tilted page that
+       rectangle is tall and overlaps the neighbouring rows. Instead the
+       outline follows the pieces — top edge along the top of each piece
+       box left → right, bottom edge back along the bottoms right → left,
+       with the gaps between pieces bridged by straight segments. The
+       centreline joins the piece centres and is the row's reading path. */
+    const top=[], bot=[], ctr=[];
+    for(const ln of r.lines){ const b=ln.ink;
+      top.push({x:b.x0,y:b.y0},{x:b.x1+1,y:b.y0});
+      bot.push({x:b.x0,y:b.y1+1},{x:b.x1+1,y:b.y1+1});
+      const cy=(b.y0+b.y1+1)/2; ctr.push({x:b.x0,y:cy},{x:b.x1+1,y:cy}); }
+    r.poly=top.concat(bot.reverse());
+    r.centerline=ctr;
   }
-  rows.sort((a,b)=>a.ink.y0-b.ink.y0 || a.ink.x0-b.ink.x0);
-  return {hMax, rows};
+  rows.sort((a,b)=>a.dy.y0-b.dy.y0 || a.ink.x0-b.ink.x0);
+  return {hMax, slope, slopeN:slopes.length, rows};
 }

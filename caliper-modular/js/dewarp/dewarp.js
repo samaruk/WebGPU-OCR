@@ -73,7 +73,10 @@ function lineBow(pts){
 /* Straighten smoothly curved text-line baselines. `words` is a list of
    {cx,cy,h} word-box centres in the canvas' coordinates. Returns a new
    W x H canvas, or null when the page is flat enough to leave untouched. */
-export function dewarpCurl(canvas, words){
+export function dewarpCurl(canvas, words, also=[]){
+  // `also`: further W×H canvases to resample with the SAME field (the
+  // rules-erased raster and the original must stay in register). They
+  // come back on the returned canvas as out.also[].
   const W=canvas.width, H=canvas.height;
   if(W<64||H<64 || !words || words.length<20) return null;
 
@@ -120,6 +123,10 @@ export function dewarpCurl(canvas, words){
   const octx=out.getContext('2d',{willReadFrequently:true});
   const oImg=octx.createImageData(W,H), od=oImg.data;
   for(let i=0;i<od.length;i+=4){ od[i]=od[i+1]=od[i+2]=255; od[i+3]=255; }
+  const extra=also.map(c=>{ const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+    const cx=cv.getContext('2d',{willReadFrequently:true}); const img=cx.createImageData(W,H);
+    const d=img.data; for(let i=0;i<d.length;i+=4){ d[i]=d[i+1]=d[i+2]=255; d[i+3]=255; }
+    return {cv,cx,img,d, sd:c.getContext('2d').getImageData(0,0,W,H).data}; });
   const D=new Float64Array(R);
   for(let x=0;x<W;x++){
     // each row's displacement at this column = baseline_y - straight_target
@@ -148,8 +155,10 @@ export function dewarpCurl(canvas, words){
       const y0=sy|0, fy=sy-y0;
       const o=(y*W+x)*4, i0=(y0*W+x)*4, i1=((y0+1)*W+x)*4;
       for(let k=0;k<3;k++) od[o+k]=(sd[i0+k]+(sd[i1+k]-sd[i0+k])*fy)|0;
+      for(const e of extra) for(let k=0;k<3;k++) e.d[o+k]=(e.sd[i0+k]+(e.sd[i1+k]-e.sd[i0+k])*fy)|0;
     }
   }
   octx.putImageData(oImg,0,0);
+  out.also=extra.map(e=>{ e.cx.putImageData(e.img,0,0); return e.cv; });
   return out;
 }
