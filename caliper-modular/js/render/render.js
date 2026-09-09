@@ -7,6 +7,7 @@
    ====================================================================== */
 import { S } from '../state/state.js';
 import { STAGES } from '../config/config.js';
+import { apiEngineList } from '../api/api.js';
 import { HF_KEPT, HF_TALL, HF_SMALL, HF_RULE, HF_SPLIT, HF_PARENT } from '../heightfilter/heightfilter.js';
 
 /* ---- colour helpers --------------------------------------------------- */
@@ -67,16 +68,23 @@ export function renderStageInto(stage,ctx,W,H){
   const kind=stage.kind;
 
   /* ---- source images ---------------------------------------------------- */
-  if(kind==='source'){ if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0); return; }
+  if(kind==='source'){ if(S.rawCanvas||S.origCanvas) ctx.drawImage(S.rawCanvas||S.origCanvas,0,0); return; }
+  if(kind==='watermark'){ if(S.origCanvas) ctx.drawImage(S.origCanvas,0,0);
+    const T0=makeTools(ctx,W,H,strokeW);
+    T0.badge(S.watermark ? 'watermark removed · '+S.watermark.watermarkPixels.toLocaleString()+' px returned to paper · contrast ≤ '+S.watermark.contrast.toFixed(2)+' · '+Math.round(S.watermark.ms)+' ms'
+                         : 'watermark not removed — identical to the source (button in section 00)');
+    return; }
   if(kind==='lens'){ ctx.drawImage(S.lensCanvas||S.origCanvas,0,0); return; }
   if(kind==='rectified'){ ctx.drawImage(S.workCanvas||S.origCanvas,0,0); return; }
 
   const result = stage.pass==='BR' ? S.borders : stage.pass==='TL' ? S.textLines : stage.pass==='CL' ? S.columns
-               : stage.pass==='CH' ? S.characters : S.recognition;
+               : stage.pass==='CH' ? S.characters : stage.pass==='AP' ? S.api : stage.pass==='FN' ? S.final : S.recognition;
   const base = S.workCanvas || S.origCanvas;                 // every result lives in the working-image frame
   const T=makeTools(ctx,W,H,strokeW);
   if(!result){
-    T.message(stage.pass==='BR' ? 'border stage disabled (section 02)'
+    T.message(stage.pass==='AP' ? 'OCR API disabled (section 00c)'
+            : stage.pass==='FN' ? 'final needs a run'
+            : stage.pass==='BR' ? 'border stage disabled (section 02)'
             : stage.pass==='TL' ? 'text-line clean disabled (section 03)'
             : stage.pass==='CL' ? 'columns disabled (section 04) or text-line clean off'
             : stage.pass==='CH' ? 'characters disabled (section 05) or text-line clean off'
@@ -105,6 +113,10 @@ export function renderStageInto(stage,ctx,W,H){
     case 'rec-characters':  renderRecognisedCharacters(result,ctx,W,H,base,T); break;
     case 'rec-lines':       renderLineText(result,ctx,W,H,base,T); break;
     case 'rec-table':       renderTableText(result,ctx,W,H,base,T); break;
+    case 'api-ocr':         renderApi(result,ctx,W,H,base,T); break;
+    case 'api-engine':      renderApiEngine(result,stage.engine,ctx,W,H,base,T); break;
+    case 'final-compare':   renderFinalCompare(result,ctx,W,H,base,T); break;
+    case 'final-table':     renderFinalTable(result,ctx,W,H,base,T); break;
   }
   ctx.textBaseline='alphabetic';
 }
@@ -151,7 +163,7 @@ function renderBorderLayout(B,ctx,W,H,base,T){
     ctx.fillStyle='rgba(255,220,120,.9)'; for(const q of L.grid.intersections){ ctx.beginPath(); ctx.arc(q.x,q.y,Math.max(2,sw*1.4),0,7); ctx.fill(); } }
   const box=(b,stroke,fill)=>{ ctx.beginPath(); ctx.rect(b.x0+.5,b.y0+.5,b.x1-b.x0,b.y1-b.y0); ctx.fillStyle=fill; ctx.fill(); ctx.lineWidth=sw*1.9; ctx.strokeStyle=stroke; ctx.stroke(); };
   if(L.table){ box(L.table,'rgba(84,221,126,.97)','rgba(84,221,126,.08)');
-    T.tag(L.table.x0+sw*2,L.table.y0+fs,'TABLE FROM BORDERS · '+L.kind+(L.rowsY.length?' · '+Math.max(0,L.rowsY.length-1)+' row bands':'')+(L.colsX.length?' · '+Math.max(0,L.colsX.length-1)+' columns':''),'rgba(84,221,126,.98)'); }
+    T.tag(L.table.x0+sw*2,L.table.y0+fs,'TABLE FROM BORDERS · '+L.kind+(L.rowsY.length?' · '+(L.rowRuled?L.rowsY.length+' ruled rows (pitch '+Math.round(L.rowPitch)+' px)':Math.max(0,L.rowsY.length-1)+' row bands'):'')+(L.colsX.length?' · '+Math.max(0,L.colsX.length-1)+' columns':''),'rgba(84,221,126,.98)'); }
   if(L.headerBox){ box(L.headerBox,'rgba(110,160,255,.95)','rgba(110,160,255,.14)');
     T.tag(L.headerBox.x0+sw*2,L.headerBox.y0-fs,'HEADER BOX · '+Math.max(0,L.colsX.length-1)+' columns','rgba(155,190,255,.97)');
     let yEnd=L.table?L.table.y1:H; for(const s of L.sections) if(s.y>L.headerBox.y1 && s.y<yEnd) yEnd=s.y;
@@ -159,7 +171,11 @@ function renderBorderLayout(B,ctx,W,H,base,T){
     for(const c of L.colsX){ ctx.beginPath(); ctx.moveTo(c.x+.5,L.headerBox.y1); ctx.lineTo(c.x+.5,yEnd); ctx.stroke(); }
     ctx.setLineDash([]); }
   if(L.kind==='row-rules'){ ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.8)';
-    for(const r of L.rowsY){ ctx.beginPath(); ctx.moveTo(r.x0,r.y+.5); ctx.lineTo(r.x1,r.y+.5); ctx.stroke(); } }
+    for(const r of L.rowsY){ ctx.beginPath(); ctx.moveTo(r.x0,r.y+.5); ctx.lineTo(r.x1,r.y+.5); ctx.stroke(); }
+    if(L.rowRuled){ ctx.fillStyle='rgba(84,221,126,.07)';                  // the row bands between the rules
+      for(let i=1;i<L.rowsY.length;i+=2){ const a=L.rowsY[i-1], b=L.rowsY[i]; ctx.fillRect(Math.min(a.x0,b.x0),a.y+1,Math.max(a.x1,b.x1)-Math.min(a.x0,b.x0),b.y-a.y-1); } } }
+  if(L.box){ box(L.box,'rgba(110,160,255,.95)','rgba(110,160,255,.10)');
+    T.tag(L.box.x0+sw*2,L.box.y0-fs,'BOXED BLOCK - not the table','rgba(155,190,255,.97)'); }
   ctx.textBaseline='alphabetic';
   T.badge('rules: '+B.horizontalRules.length+' h / '+B.verticalRules.length+' v   long: '+B.longCounts.h+' h / '+B.longCounts.v+' v   layout: '+L.kind+'   sections: '+L.sections.length+'   erased: '+B.erasedPixels.toLocaleString()+' px');
 }
@@ -314,7 +330,7 @@ function renderRecognisedCharacters(RC,ctx,W,H,base,T){
     else { ctx.strokeStyle='rgba(170,170,170,.6)'; T.rect(b); }
   }
   ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; ctx.textBaseline='alphabetic';
-  T.badge('recognised: '+RC.recognised+' / '+RC.characters+' characters   language: '+RC.language+'   grayscale crops, no dictionary, upscale ×'+RC.scale+'   green ≥ 80, amber ≥ 50, red < 50 confidence');
+  T.badge('recognised: '+RC.recognised+' / '+RC.characters+' characters   language: '+RC.language+'   '+(RC.cropStyle||'grayscale')+' crops, no dictionary, upscale ×'+RC.scale+'   green ≥ 80, amber ≥ 50, red < 50 confidence');
 }
 function renderLineText(RC,ctx,W,H,base,T){
   T.darken(base,0.65);
@@ -354,7 +370,7 @@ function renderTableText(RC,ctx,W,H,base,T){
     ctx.fillText(text, b.x0, (b.y0+b.y1)/2);
   }); });
   ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; ctx.textBaseline='alphabetic';
-  T.badge('table text: '+C.band.rows.length+' rows × '+C.columns.length+' columns');
+  T.badge('table text: '+C.band.rows.length+' rows × '+C.columns.length+' columns'+(RC.cellPass?'   cell pass: '+RC.cellPass.changed+' of '+RC.cellPass.tried+' cells re-read with a whitelist ('+RC.cellPass.calls+' calls)':''));
 }
 
 /* ======================================================================
@@ -376,7 +392,7 @@ function renderColumns(kind,C,ctx,W,H,base,T){
       const f=r.row.lines[0].ink;
       T.tag(Math.max(0,f.x0-fs*4.2),(f.y0+f.y1)/2,(r.kind==='table'?'T':r.kind==='header'?'H':'F')+(i+1)+'·'+r.pieces+'p',stroke); });
     if(!C.band) return finish('no table band — '+C.reason);
-    return finish('table band: rows '+(C.band.first+1)+'–'+(C.band.last+1)+' ('+C.band.rows.length+', '+C.band.parts+(C.band.parts>1?' parts merged':' part')+(C.band.fromBorders?', border box folded in':'')+(C.band.foreignRows?', '+C.band.foreignRows+' foreign rows dropped':'')+(C.band.footerCut?', footer cut by '+C.band.footerCut:'')+')   header rows: '+C.band.first+'   footer rows: '+(C.rows.length-1-C.band.last)+'   page tilt: '+tilt);
+    return finish('table band: rows '+(C.band.first+1)+'–'+(C.band.last+1)+' ('+C.band.rows.length+', '+C.band.parts+(C.band.parts>1?' parts merged':' part')+(C.band.fromBorders?', border box folded in':'')+(C.band.foreignRows?', '+C.band.foreignRows+' foreign rows dropped':'')+(C.band.footerCut?', footer cut by '+C.band.footerCut:'')+(C.fragmentsMerged?', '+C.fragmentsMerged+' row fragments joined':'')+')   header rows: '+C.band.first+'   footer rows: '+(C.rows.length-1-C.band.last)+'   page tilt: '+tilt);
   }
   if(!C.band){ ctx.textBaseline='alphabetic'; return T.message('no table band — '+C.reason); }
   const B=C.band, P=C.profile;
@@ -403,8 +419,8 @@ function renderColumns(kind,C,ctx,W,H,base,T){
       ctx.fillStyle=i%2?'rgba(110,200,255,.15)':'rgba(166,255,63,.12)'; ctx.fill();
       ctx.lineWidth=sw; ctx.strokeStyle='rgba(110,200,255,.9)'; ctx.stroke();
       const q=C.toImage((c.x0+c.x1)/2,B.yTop);
-      T.tag(q.x-fs*1.5,q.y-fs*0.9,'C'+(i+1)+' '+c.align+' '+c.cells+'c','rgba(120,205,255,.97)'); });
-    return finish('columns: '+C.columns.length+'   gutters: '+C.gutters.length+(C.guttersFromBorders?' ('+C.guttersFromBorders+' from borders)':'')+'   pieces split across columns: '+C.spanningPieces);
+      T.tag(q.x-fs*1.5,q.y-fs*0.9,'C'+(i+1)+(c.key?' '+c.key+(c.found===false?'?':''):'')+' '+c.align+' '+c.cells+'c',c.key?(c.found===false?'rgba(255,200,120,.97)':'rgba(166,255,63,.97)'):'rgba(120,205,255,.97)'); });
+    return finish('columns: '+C.columns.length+(C.headerRule?' · '+C.headerRule.mode+(C.headerRule.name&&C.headerRule.mode.startsWith('exact')?' "'+C.headerRule.name+'"':'')+' ('+C.headerRule.found+' of '+C.headerRule.total+(C.headerRule.mode.startsWith('exact')?' titles found, '+C.headerRule.boundariesFromGutters+' boundaries on gutters':' columns named')+')':' from the coverage profile (no title words to name them)')+'   gutters: '+C.gutters.length+(C.guttersFromBorders?' ('+C.guttersFromBorders+' from borders)':'')+'   pieces split across columns: '+C.spanningPieces);
   }
   if(kind==='cells'){
     let filled=0, empty=0;
@@ -416,7 +432,7 @@ function renderColumns(kind,C,ctx,W,H,base,T){
       else { empty++; T.poly(quad(c.x0,c.x1,r.row.dy.y0,r.row.dy.y1)); ctx.setLineDash([sw*2,sw*2]);
         ctx.lineWidth=sw*0.6; ctx.strokeStyle='rgba(170,170,170,.45)'; ctx.stroke(); ctx.setLineDash([]); }
     }); });
-    return finish('grid: '+B.rows.length+' rows × '+C.columns.length+' columns   filled cells: '+filled+'   empty: '+empty+(B.rescuedPieces||B.mergedRows?'   rescued: '+(B.rescuedPieces||0)+' pieces, '+(B.mergedRows||0)+' thin rows merged':''));
+    return finish('grid: '+B.rows.length+' rows × '+C.columns.length+' columns'+(C.headerRule?' (rule "'+C.headerRule.name+'")':'')+'   filled cells: '+filled+'   empty: '+empty+(B.rescuedPieces||B.mergedRows?'   rescued: '+(B.rescuedPieces||0)+' pieces, '+(B.mergedRows||0)+' thin rows merged':''));
   }
   if(kind==='table'){
     const header=C.rows.filter(r=>r.kind==='header'), footer=C.rows.filter(r=>r.kind==='footer');
@@ -440,4 +456,182 @@ function renderColumns(kind,C,ctx,W,H,base,T){
     const q=C.toImage(tx0,B.yTop); T.tag(q.x+sw*2,q.y+fs,'TABLE · '+B.rows.length+'R × '+C.columns.length+'C','rgba(84,221,126,.98)');
     return finish('table: '+B.rows.length+' rows × '+C.columns.length+' columns   header: '+header.length+'   footer: '+footer.length+'   tilt: '+tilt);
   }
+}
+
+/* ======================================================================
+   API · PaddleOCR
+   ====================================================================== */
+const confColor=c=>c>=80?'rgba(84,221,126,.97)':c>=50?'rgba(255,200,80,.97)':'rgba(255,110,110,.97)';
+/* text drawn inside a box: font from the box height, shrunk to the width */
+function fitText(ctx,text,b,maxFrac=0.85){
+  const h=b.y1-b.y0+1, w=b.x1-b.x0+1; let fs=Math.max(8,Math.round(h*maxFrac));
+  ctx.font=`700 ${fs}px "JetBrains Mono", monospace`;
+  const tw=ctx.measureText(text).width; if(tw>w && tw>0){ fs=Math.max(7,Math.floor(fs*w/tw)); ctx.font=`700 ${fs}px "JetBrains Mono", monospace`; }
+  return fs;
+}
+/* one engine's regions on their own: its boxes, text coloured by confidence */
+function renderApiEngine(A,engine,ctx,W,H,base,T){
+  T.darken(base,0.55); ctx.textBaseline='alphabetic';
+  const names={paddle:'PaddleOCR', tesseract5:'Tesseract 5', easyocr:'EasyOCR'};
+  if(A.status==='pending'){ T.badge('API · '+names[engine]+' · request in flight → '+A.url); T.message('waiting for the API — this stage fills in when the answer arrives'); return; }
+  if(A.status==='error'){ T.badge('API · '+names[engine]+' · failed after '+Math.round(A.ms)+' ms → '+A.url); T.message(A.error); return; }
+  const E=apiEngineList(A.response).find(e=>e.name===engine);
+  if(!E){ T.badge('API · '+names[engine]+' · not in the answer'); T.message('the service did not report this engine — an older build of api/InvoiceOcrApi?'); return; }
+  if(E.status!=='ok'){ T.badge('API · '+E.label+' · '+E.status); T.message(names[engine]+' '+E.status+(E.error?': '+E.error:'')); return; }
+  const sw=T.strokeW; ctx.textBaseline='middle';
+  const edge={paddle:'rgba(255,170,70,.6)', tesseract5:'rgba(255,130,190,.6)', easyocr:'rgba(200,150,255,.6)'}[engine]||'rgba(255,170,70,.6)';
+  let confSum=0;
+  for(const l of E.regions){
+    const b=l.bbox; if(!b) continue; const c=100*(l.confidence||0); confSum+=c;
+    if(l.polygon && l.polygon.length>=3){ ctx.beginPath(); ctx.moveTo(l.polygon[0][0],l.polygon[0][1]); for(let i=1;i<l.polygon.length;i++) ctx.lineTo(l.polygon[i][0],l.polygon[i][1]); ctx.closePath(); }
+    else { ctx.beginPath(); ctx.rect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1); }
+    ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fill(); ctx.lineWidth=sw*0.7; ctx.strokeStyle=edge; ctx.stroke();
+    fitText(ctx,l.text,b); ctx.fillStyle=confColor(c); ctx.fillText(l.text,b.x0+2,(b.y0+b.y1)/2);
+  }
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const mean=E.regions.length?confSum/E.regions.length:0;
+  T.badge('API · '+E.label+' · '+E.regions.length+(engine==='paddle'?' regions':engine==='tesseract5'?' words':' fragments')+' · mean confidence '+mean.toFixed(1)+' · '+Math.round(E.ms)+' ms on the server'+(engine==='paddle'?' · its regions give the layout of the combined stage':''));
+}
+
+/* the combined stage: outside the table PaddleOCR's regions in grey; inside
+   it the service's vote per cell, coloured by who agreed (VOTE_COLORS), a
+   legend along the bottom of the image */
+const VOTE_COLORS=[
+  {key:'paddle+easyocr+tesseract5', label:'all 3 agree',             color:'rgba(240,245,245,.98)'},
+  {key:'paddle+tesseract5',         label:'PaddleOCR + Tesseract',   color:'rgba(255,225,130,.98)'},
+  {key:'paddle+easyocr',            label:'PaddleOCR + EasyOCR',     color:'rgba(110,220,255,.98)'},
+  {key:'easyocr+tesseract5',        label:'Tesseract + EasyOCR',     color:'rgba(120,230,140,.98)'},
+  {key:'paddle',                    label:'PaddleOCR only (most confident)', color:'rgba(255,170,70,.98)'},
+  {key:'easyocr',                   label:'EasyOCR only (most confident)',   color:'rgba(200,150,255,.98)'},
+  {key:'tesseract5',                label:'Tesseract only (most confident)', color:'rgba(255,130,190,.98)'},
+];
+const voteKey=src=>{ if(!src) return ''; const names=(src.startsWith('vote:')?src.slice(5):src).split('+'); const order=['paddle','easyocr','tesseract5']; return names.slice().sort((a,b)=>order.indexOf(a)-order.indexOf(b)).join('+'); };
+function drawLegend(ctx,T,W,H,items){
+  const fs=T.fontSize*1.15, pad=fs*0.6, sw=fs*0.9, gap=fs*1.4;
+  ctx.font=`600 ${fs}px "JetBrains Mono", monospace`; ctx.textBaseline='middle';
+  const widths=items.map(it=>sw+fs*0.4+ctx.measureText(it.label).width);
+  const rows=[[]]; let x=pad;
+  items.forEach((it,i)=>{ if(x+widths[i]>W-pad && rows[rows.length-1].length){ rows.push([]); x=pad; } rows[rows.length-1].push(i); x+=widths[i]+gap; });
+  const rowH=fs*1.7, h=rows.length*rowH+pad;
+  ctx.fillStyle='rgba(8,11,12,.88)'; ctx.fillRect(0,H-h,W,h);
+  ctx.fillStyle='rgba(110,200,255,.5)'; ctx.fillRect(0,H-h,W,Math.max(1,T.strokeW*0.6));
+  rows.forEach((row,r)=>{ let xx=pad; const y=H-h+pad/2+rowH*(r+0.5);
+    for(const i of row){ const it=items[i]; ctx.fillStyle=it.color; ctx.fillRect(xx,y-sw/2,sw,sw); ctx.fillStyle='rgba(235,240,240,.95)'; ctx.fillText(it.label,xx+sw+fs*0.4,y); xx+=widths[i]+gap; } });
+  ctx.textBaseline='alphabetic';
+  return h;
+}
+function renderApi(A,ctx,W,H,base,T){
+  T.darken(base,0.55); ctx.textBaseline='alphabetic';
+  if(A.status==='pending'){ T.badge('API · combined · request in flight → '+A.url); T.message('waiting for the API — this stage fills in when the answer arrives'); return; }
+  if(A.status==='error'){ T.badge('API · combined · failed after '+Math.round(A.ms)+' ms → '+A.url); T.message(A.error); return; }
+  const R=A.response, sw=T.strokeW;
+  const regions=R.brief&&R.brief.lines ? R.brief.lines : [];
+  const D=R.deep, t=D&&D.table, voted=!!(t&&t.consensus);
+  const s=D?Math.tan(D.columnTiltDeg*Math.PI/180):0;
+  const inTable=b=>voted && (b.y0+b.y1)/2>=t.bbox.y0 && (b.y0+b.y1)/2<=t.bbox.y1 && (b.x0+b.x1)/2>=t.bbox.x0 && (b.x0+b.x1)/2<=t.bbox.x1;
+  ctx.textBaseline='middle';
+  if(regions.length){
+    for(const l of regions){
+      const b=l.bbox, c=100*(l.confidence||0);
+      if(inTable(b)) continue;                                    // the table is drawn from the vote below
+      if(l.polygon){ ctx.beginPath(); ctx.moveTo(l.polygon[0][0],l.polygon[0][1]); for(let i=1;i<l.polygon.length;i++) ctx.lineTo(l.polygon[i][0],l.polygon[i][1]); ctx.closePath();
+        ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fill(); ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(150,165,170,.5)'; ctx.stroke(); }
+      fitText(ctx,l.text,b); ctx.fillStyle=voted?'rgba(200,210,215,.9)':confColor(c); ctx.fillText(l.text,b.x0+2,(b.y0+b.y1)/2);
+    }
+  } else if(D){                           // depth = deep: rows only
+    for(const r of D.rows){ const b=r.bbox; if(inTable(b)) continue; ctx.lineWidth=sw*0.7; ctx.strokeStyle='rgba(255,170,70,.6)'; T.rect(b);
+      fitText(ctx,r.text,b); ctx.fillStyle='rgba(255,200,120,.95)'; ctx.fillText(r.text,b.x0+2,(b.y0+b.y1)/2); }
+  }
+  let tableNote='no table'; const counts={};
+  if(D){
+    const rowColor={header:'rgba(110,160,255,.9)', table:'rgba(84,221,126,.9)', footer:'rgba(255,170,70,.9)'};
+    ctx.lineWidth=sw*0.6;
+    for(const r of D.rows){ ctx.strokeStyle=rowColor[r.kind]||'rgba(150,165,170,.6)'; ctx.setLineDash([sw*3,sw*3]); T.rect(r.bbox); }
+    ctx.setLineDash([]);
+    if(t){
+      ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(84,221,126,.98)'; T.rect(t.bbox);
+      ctx.lineWidth=sw*0.8; ctx.strokeStyle='rgba(110,200,255,.85)';
+      for(const c of t.columns.slice(1)){ const xTop=c.x0-0.5-s*t.bbox.y0, xBot=c.x0-0.5-s*t.bbox.y1; ctx.beginPath(); ctx.moveTo(xTop,t.bbox.y0); ctx.lineTo(xBot,t.bbox.y1); ctx.stroke(); }
+      if(voted){
+        /* every table cell: the voted text in the colour of who agreed; the
+           cell box is PaddleOCR's when it read there, else row band × column span */
+        for(let ri=0;ri<t.rowCount;ri++){
+          const row=D.rows[t.firstRow+ri]; if(!row) continue;
+          const cy=(row.bbox.y0+row.bbox.y1)/2;
+          t.consensus[ri].forEach((text,ci)=>{
+            if(!text) return;
+            const src=t.consensusSource[ri][ci], k=voteKey(src), vc=VOTE_COLORS.find(v=>v.key===k);
+            counts[k]=(counts[k]||0)+1;
+            const cell=row.cells&&row.cells[ci], col=t.columns[ci];
+            const b=cell&&cell.bbox?cell.bbox:{x0:Math.round(col.x0-s*cy), y0:row.bbox.y0, x1:Math.round(col.x1-s*cy), y1:row.bbox.y1};
+            ctx.fillStyle='rgba(8,11,12,.6)'; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
+            fitText(ctx,text,b); ctx.fillStyle=vc?vc.color:'rgba(200,210,215,.9)'; ctx.fillText(text,b.x0+2,(b.y0+b.y1)/2);
+          });
+        }
+      }
+      ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+      T.tag(t.bbox.x0+sw*2,t.bbox.y0+T.fontSize,'API TABLE · '+t.rowCount+'R × '+t.columnCount+'C'+(t.footerCut?' · footer cut by '+t.footerCut:''),'rgba(84,221,126,.98)');
+      tableNote=t.rowCount+' rows × '+t.columnCount+' columns'+(t.footerCut?' (footer cut by '+t.footerCut+')':'');
+    }
+  }
+  if(voted) drawLegend(ctx,T,W,H,VOTE_COLORS.map(v=>({label:v.label+(counts[v.key]?' '+counts[v.key]:''), color:v.color})));
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const engines=(R.engines||[]).map(e=>e.name+' '+e.status+(e.lines?' '+e.lines.length+'w':'')+(e.ms?' '+e.ms+'ms':'')).join(', ');
+  const votedN=voted?t.consensusSource.flat().filter(x=>x.startsWith('vote')).length+' of '+t.consensusSource.flat().filter(Boolean).length+' cells by agreement, the rest the most confident engine':'';
+  T.badge('API · combined · '+R.depth+' · '+regions.length+' PaddleOCR regions · server '+R.timing.totalMs+' ms (ocr '+R.timing.ocrMs+'), round trip '+Math.round(A.ms)+' ms · table: '+tableNote+(engines?' · engines: '+engines:'')+(votedN?' · '+votedN:'')+(D?' · fields: '+D.fields.map(f=>f.key).join(', '):''));
+}
+
+/* ======================================================================
+   FINAL · best analysis
+   ====================================================================== */
+const SRC_COLOR={agreed:'rgba(240,245,245,.97)', vote:'rgba(255,225,130,.97)', local:'rgba(84,221,126,.97)', api:'rgba(255,170,70,.97)', easyocr:'rgba(200,150,255,.97)', tesseract5:'rgba(255,130,190,.97)', 'local-only':'rgba(110,200,255,.97)', empty:'rgba(150,165,170,.5)'};
+function finalHeader(F){
+  const lt=F.localTable?F.localTable.rows+'×'+F.localTable.cols:'none', at=F.apiTable?F.apiTable.rows+'×'+F.apiTable.cols:'none';
+  const st=F.stats||{};
+  return 'rows: '+(st.localRows||0)+' local + '+(st.apiRows||0)+' API'+(st.droppedTop?' ('+st.droppedTop+' above the title dropped)':'')+' · local table '+lt+' · API table '+at+(F.header&&F.header.rule?' · header from rule "'+F.header.rule+'"':'')+(F.note?' · '+F.note:'');
+}
+/* the title row: the rule's labels (or the best title words) in the header cells */
+function drawFinalHeader(F,ctx,T){
+  if(!F.header || !F.header.cells) return;
+  F.header.cells.forEach((b,ci)=>{ const label=F.header.labels[ci]||'';
+    ctx.lineWidth=T.strokeW; ctx.strokeStyle='rgba(255,220,120,.9)'; ctx.fillStyle='rgba(8,11,12,.55)'; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1); T.rect(b);
+    if(label){ fitText(ctx,label,b,0.6); ctx.fillStyle='rgba(255,230,140,.98)'; ctx.fillText(label,b.x0+2,(b.y0+b.y1)/2); } });
+}
+function renderFinalCompare(F,ctx,W,H,base,T){
+  T.darken(base,0.65); ctx.textBaseline='alphabetic';
+  if(!F.grid){ T.badge('FINAL · compare · '+finalHeader(F)); return T.message('no table to compare'); }
+  const sw=T.strokeW; ctx.textBaseline='middle';
+  drawFinalHeader(F,ctx,T);
+  let disagree=0;
+  for(const row of F.grid) for(const g of row){ const b=g.bb; if(!b) continue;
+    const h=b.y1-b.y0+1;
+    const both=g.local&&g.api, differ=both&&g.source!=='agreed'; if(differ) disagree++;
+    ctx.lineWidth=differ?sw*1.2:sw*0.6; ctx.strokeStyle=differ?'rgba(255,90,90,.95)':both?'rgba(110,200,255,.45)':g.local?'rgba(84,221,126,.7)':g.api?'rgba(255,170,70,.7)':'rgba(150,165,170,.25)'; T.rect(b);
+    if(g.local){ fitText(ctx,g.local,{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y0+h/2},0.9); ctx.fillStyle='rgba(84,221,126,.97)'; ctx.fillText(g.local,b.x0+1,b.y0+h*0.27); }
+    if(g.api){ fitText(ctx,g.api,{x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y0+h/2},0.9); ctx.fillStyle='rgba(255,170,70,.97)'; ctx.fillText(g.api,b.x0+1,b.y0+h*0.75); }
+  }
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const st=F.stats;
+  T.badge('FINAL · compare · local (green) over PaddleOCR (orange) · '+finalHeader(F)+' · both read '+st.both+' cells, agree '+st.agreed+' ('+Math.round(100*st.agreement)+'%), differ '+disagree+(st.vote?' · '+st.vote+' cells settled by the other engines\' vote':''));
+}
+function renderFinalTable(F,ctx,W,H,base,T){
+  T.darken(base,0.65); ctx.textBaseline='alphabetic';
+  if(!F.grid){ T.badge('FINAL · '+finalHeader(F)); return T.message('no table from either side'); }
+  const sw=T.strokeW; ctx.textBaseline='middle';
+  // a real table: the header row, then every row as a band of full cells
+  // (row extent × column span) with shared borders; text inside each cell
+  const rows=F.grid.map(r=>r.map(g=>g.box||g.bb));
+  const bands=(F.header&&F.header.cells?[F.header.cells]:[]).concat(rows);
+  ctx.fillStyle='rgba(8,11,12,.45)';
+  for(const band of bands){ const x0=Math.min(...band.map(b=>b.x0)), x1=Math.max(...band.map(b=>b.x1)), y0=Math.min(...band.map(b=>b.y0)), y1=Math.max(...band.map(b=>b.y1)); ctx.fillRect(x0,y0,x1-x0+1,y1-y0+1); }
+  ctx.lineWidth=sw*0.9; ctx.strokeStyle='rgba(110,200,255,.75)';
+  for(const band of bands) for(const b of band) T.rect(b);
+  if(F.header && F.header.cells){ ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(255,220,120,.95)';
+    F.header.cells.forEach((b,ci)=>{ T.rect(b); const label=F.header.labels[ci]||''; if(label){ fitText(ctx,label,b,0.6); ctx.fillStyle='rgba(255,230,140,.98)'; ctx.fillText(label,b.x0+3,(b.y0+b.y1)/2); } }); }
+  F.grid.forEach((row,ri)=>row.forEach((g,ci)=>{ const b=rows[ri][ci]; if(!b || !g.text) return;
+    fitText(ctx,g.text,{x0:b.x0+2,y0:b.y0,x1:b.x1-2,y1:b.y1},0.7); ctx.fillStyle=SRC_COLOR[g.source]||SRC_COLOR.agreed; ctx.fillText(g.text,b.x0+3,(b.y0+b.y1)/2); }));
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const st=F.stats;
+  const eng=(F.engines||[]).map(e=>e.name+' '+e.status).join(', ');
+  T.badge('FINAL · '+F.grid.length+' rows × '+(F.grid[0]?F.grid[0].length:0)+' columns from the '+F.source+' structure · local+PaddleOCR agree '+st.agreed+', engines vote '+(st.vote||0)+', PaddleOCR '+st.api+(st.easyocr?', EasyOCR '+st.easyocr:'')+(st.tesseract5?', Tesseract 5 '+st.tesseract5:'')+', local '+st.local+', one side only '+st.localOnly+', empty '+st.empty+(eng?' · engines: '+eng+', local':'')+' · '+finalHeader(F));
 }

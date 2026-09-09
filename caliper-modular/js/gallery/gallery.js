@@ -48,6 +48,17 @@ export async function buildGallery(){
   }
 }
 
+/* Re-render the thumbnails of the stages whose kind is listed, and the
+   view if one of them is on screen — used when the API answer arrives
+   after the gallery was built. */
+export function refreshStages(kinds){
+  if(!S.thumbs.length || !S.W) return;
+  const cv=getStageCanvas(), ctx=cv.getContext('2d');
+  STAGES.forEach((st,i)=>{ if(!kinds.includes(st.kind) || !S.thumbs[i]) return;
+    renderStageInto(st,ctx,S.W,S.H); S.thumbs[i].src=cv.toDataURL('image/png'); });
+  renderStage(S.stage); drawView(); setStageCap(S.stage);
+}
+
 export function showStage(i){
   S.stage=i;
   document.querySelectorAll('.gitem').forEach(g=>

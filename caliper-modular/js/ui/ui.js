@@ -11,10 +11,13 @@ import { STAGES } from '../config/config.js';
 import { runPipeline, readParams } from '../pipeline/pipeline.js';
 import { columnsToJson } from '../columns/columns.js';
 import { bordersToJson } from '../borderlayout/borderlayout.js';
+import { removeWatermark } from '../watermark/watermark.js';
+import { finalTableJson } from '../final/final.js';
+import { resetResults, previewImage } from '../imageload/imageload.js';
 
 /* stage caption under the viewport (-1 = raw preview before a run) */
-export function setStageCap(index){
-  if(index<0){ stageCap.innerHTML='<b>SOURCE</b> — raw image preview. Run the pipeline.'; return; }
+export function setStageCap(index,note){
+  if(index<0){ stageCap.innerHTML='<b>SOURCE</b> — '+(note||'raw image preview')+'. Run the pipeline.'; return; }
   const stage=STAGES[index];
   stageCap.innerHTML=`<b>${stage.name}</b> — ${stage.desc}`;
   $('hud').style.display='flex';
@@ -34,13 +37,47 @@ bind('tlMinGlyphHeight',two); bind('tlMaxGlyphHeight',two); bind('tlMaxGlyphAspe
 bind('tlChainGap',two); bind('tlMinOverlap',two); bind('tlMinGlyphs',raw);
 bind('clMinPieces',raw); bind('clRowGap',raw); bind('clMergeGap',raw); bind('clGutterWidth',two); bind('clGutterCoverage',two);
 bind('chJoinOverlap',two); bind('chSplitRatio',two); bind('chValleyDepth',two); bind('chMinWidth',two);
-bind('rcTargetHeight',px);
+bind('rcTargetHeight',px); bind('wmContrast',two);
+
+/* the Final table · JSON panel (section 07): refreshed whenever the
+   final table is (after a run and again when the API answer lands) */
+export function updateFinalJson(){
+  const pre=$('finalJson'), btn=$('copyFinalJson');
+  if(!S.final || !S.final.grid){ pre.textContent=S.final&&S.final.note?S.final.note:'no final table yet — run the pipeline'; btn.disabled=true; return; }
+  pre.textContent=JSON.stringify(finalTableJson(S.final),null,1); btn.disabled=false;
+}
+$('copyFinalJson').onclick=()=>{ const t=$('finalJson').textContent; navigator.clipboard.writeText(t).then(()=>{ $('copyFinalJson').textContent='Copied'; setTimeout(()=>$('copyFinalJson').textContent='Copy JSON',1200); }); };
+
+/* Remove watermark / Restore original: swaps the image the pipeline
+   starts from (S.origCanvas) between the raw load and the cleaned copy,
+   shows it in the viewport and drops every result of the previous run */
+$('removeWm').onclick=()=>{
+  if(!S.rawImageData) return;
+  const button=$('removeWm');
+  if(S.watermark){
+    S.origCanvas=S.rawCanvas; S.origImageData=S.rawImageData; S.watermark=null;
+    button.textContent='Remove watermark';
+    resetResults(); previewImage(S.origCanvas,'original restored');
+    return;
+  }
+  button.disabled=true; button.textContent='removing…';
+  setTimeout(()=>{                                   // let the label paint before the CPU work
+    try{
+      const r=removeWatermark(S.rawImageData,{contrast:+$('wmContrast').value});
+      S.origCanvas=r.canvas; S.origImageData=r.imageData; S.watermark=r.stats;
+      resetResults();
+      previewImage(S.origCanvas,'watermark removed in '+Math.round(r.stats.ms)+' ms — '+r.stats.watermarkPixels.toLocaleString()+' px returned to paper (contrast ≤ '+r.stats.contrast.toFixed(2)+')');
+      button.textContent='Restore original';
+    }catch(e){ button.textContent='Remove watermark'; throw e; }
+    finally{ button.disabled=false; }
+  },20);
+};
 
 /* enable checkboxes dim their option block */
 const gate=(checkboxId,blockId)=>$(checkboxId).addEventListener('change',e=>{
   $(blockId).style.opacity=e.target.checked?1:.4; $(blockId).style.pointerEvents=e.target.checked?'auto':'none'; });
 gate('bordersEnable','bordersOptions'); gate('tlEnable','tlOptions'); gate('clEnable','clOptions');
-gate('chEnable','chOptions'); gate('rcEnable','rcOptions');
+gate('chEnable','chOptions'); gate('rcEnable','rcOptions'); gate('apiEnable','apiOptions');
 
 /* connectivity segmented button */
 $('connectivity').querySelectorAll('button').forEach(b=>b.onclick=()=>{
@@ -65,7 +102,8 @@ saveJson.onclick=()=>{
   const TL=S.textLines;
   const out={
     image:{width:S.W,height:S.H,source:{width:S.srcW,height:S.srcH},resized:!!S.scaledFrom,
-           rectified:params.rectify, space:params.rectify?'rectified image':'original image'},
+           rectified:params.rectify, space:params.rectify?'rectified image':'original image',
+           watermarkRemoved:S.watermark?{contrast:S.watermark.contrast,window:S.watermark.window,pixels:S.watermark.watermarkPixels}:null},
     params,
     borders:bordersToJson(S.borders),
     textLines: TL ? {
@@ -82,7 +120,13 @@ saveJson.onclick=()=>{
       language:S.recognition.language, recognised:S.recognition.recognised,
       lines:S.recognition.lines.map(l=>({row:l.rowIndex+1, text:l.text, confidence:+l.confidence.toFixed(1)})),
       tableCells:S.recognition.cells
-    } : null
+    } : null,
+    api: S.api ? {status:S.api.status, url:S.api.url, roundTripMs:Math.round(S.api.ms), error:S.api.error, response:S.api.response} : null,
+    finalTable: S.final ? finalTableJson(S.final) : null,
+    final: S.final ? {source:S.final.source, note:S.final.note, header:S.final.header?{labels:S.final.header.labels, rule:S.final.header.rule}:null, localTable:S.final.localTable, apiTable:S.final.apiTable, stats:S.final.stats, fields:S.final.fields,
+      rows:S.final.rows ? S.final.rows.map(r=>r.source) : null,
+      cells:S.final.grid ? S.final.grid.map(row=>row.map(g=>({text:g.text, source:g.source, local:g.local, api:g.api,
+        localConfidence:+g.localConf.toFixed(1), apiConfidence:+g.apiConf.toFixed(1), bbox:box(g.bb)}))) : null} : null
   };
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(out,null,2)],{type:'application/json'}));

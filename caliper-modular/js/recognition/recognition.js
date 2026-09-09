@@ -86,7 +86,9 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
   const ink=textLines.cleanBinary, labels=textLines.labels, rows=textLines.fullLines.rows, luma=textLines.luma||null;
   const slope=textLines.fullLines.slope||0;
   const reference=textLines.stats.reference||20;
-  const scale=Math.max(1,Math.min(4,Math.round((params.targetHeight||30)/Math.max(8,reference))));
+  const scale=Math.max(1,Math.min(5,(params.targetHeight||40)/Math.max(8,reference)));   // fractional: the glyph height lands on the target exactly
+  const cropStyle=params.cropStyle||'gray';
+  if(params.psm!==undefined){ try{ await worker.setParameters({tessedit_pageseg_mode:String(params.psm)}); }catch(e){} }
   const byLine=new Map();                          // chainIndex → characters
   for(const ch of characters.characters){ if(!byLine.has(ch.line)) byLine.set(ch.line,[]); byLine.get(ch.line).push(ch); }
   const chainRowIndex=new Map();                   // piece (chain) → full-line row index
@@ -128,47 +130,67 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
     if(smallLabels.size){ const fat=dilateCPU(smallMask,cw,chh,1,1); for(let k=0;k<mask.length;k++) if(fat[k]) mask[k]=1; }
     let inkCount=0; for(let i=0;i<mask.length;i++) inkCount+=mask[i];
     if(!inkCount) return {rowIndex:ri, text:'', confidence:0, symbols:[], words:[]};
-    const grown=dilateCPU(mask,cw,chh,2,2);
-    const img=new ImageData(cw,chh), d=img.data; d.fill(255);
-    if(luma && params.grayscaleEdges){
-      // contrast levels from the row's own pixels: ink = 5th percentile of
-      // masked luma, paper = 90th percentile of the unmasked neighbourhood
+    /* two crop styles of the same row:
+         · GRAYSCALE — the page's own grey inside the members' outline grown
+           by 3 px (the anti-aliased edges and whatever the threshold
+           missed), levels normalised from the row itself (ink 5th
+           percentile → 0, paper 90th percentile → 255), everything else
+           paper. The engine's own binarisation sees the real strokes — a
+           JPEG-softened scan reads far better this way;
+         · BINARY — the threshold's mask, solid black: robust when the grey
+           is a mess (a heavy watermark, a dark photo), and every speck the
+           threshold caught is kept.
+       "both" recognises the grayscale crop and, unless it is confident,
+       the binary one too, keeping the more confident reading.            */
+    const grown=dilateCPU(mask,cw,chh,3,3);
+    let inkLevel=0, paperLevel=255;
+    if(luma){
       const inkVals=[], paperVals=[];
-      for(let yy=0;yy<chh;yy++){ const shiftBack=y=>y; for(let xx=0;xx<cw;xx++){
-        const x=x0+xx, shift=slope*(x-xc), y=Math.round(yy+yTop+shift); if(y<0||y>=H||x>=W) continue;
-        const v=luma[y*W+x]; if(mask[yy*cw+xx]) inkVals.push(v); else if((xx+yy)%7===0) paperVals.push(v); } }
-      inkVals.sort((a,b)=>a-b); paperVals.sort((a,b)=>a-b);
-      const inkLevel=inkVals.length?inkVals[Math.floor(inkVals.length*0.05)]:0;
-      const paperLevel=paperVals.length?paperVals[Math.floor(paperVals.length*0.9)]:255;
-      const span=Math.max(24,paperLevel-inkLevel);
-      // binary core + soft edges: every pixel the binary calls ink is
-      // solid black (the engine never sees less than the binary had — a
-      // period the threshold barely caught stays a period), and only the
-      // 2 px ring around the ink keeps the anti-aliased grayscale, with a
-      // steep gamma so mid-greys read as ink rather than paper
       for(let yy=0;yy<chh;yy++) for(let xx=0;xx<cw;xx++){
-        const k=yy*cw+xx; if(!grown[k]) continue;
-        const o=k*4;
-        if(mask[k]){ d[o]=d[o+1]=d[o+2]=0; continue; }
         const x=x0+xx, shift=slope*(x-xc), y=Math.round(yy+yTop+shift); if(y<0||y>=H||x>=W) continue;
-        const t=Math.max(0,Math.min(1,(luma[y*W+x]-inkLevel)/span));
-        d[o]=d[o+1]=d[o+2]=Math.round(Math.pow(t,2.2)*255);
-      }
-    } else {
-      for(let k=0;k<mask.length;k++) if(mask[k]){ const o=k*4; d[o]=d[o+1]=d[o+2]=0; }
+        const v=luma[y*W+x]; if(mask[yy*cw+xx]) inkVals.push(v); else if(!grown[yy*cw+xx] && (xx+yy)%5===0) paperVals.push(v); }
+      inkVals.sort((a,b)=>a-b); paperVals.sort((a,b)=>a-b);
+      if(inkVals.length) inkLevel=inkVals[Math.floor(inkVals.length*0.05)];
+      if(paperVals.length) paperLevel=paperVals[Math.floor(paperVals.length*0.9)];
     }
-    const small=document.createElement('canvas'); small.width=cw; small.height=chh; small.getContext('2d').putImageData(img,0,0);
-    const crop=document.createElement('canvas'); crop.width=cw*scale; crop.height=chh*scale;
-    const cctx=crop.getContext('2d'); cctx.fillStyle='#fff'; cctx.fillRect(0,0,crop.width,crop.height);
-    cctx.imageSmoothingEnabled=true; cctx.drawImage(small,0,0,crop.width,crop.height);
-    let data;
-    try{ ({data}=await worker.recognize(crop,{},{text:true,blocks:true})); }
+    const span=Math.max(24,paperLevel-inkLevel);
+    const buildCrop=style=>{
+      const img=new ImageData(cw,chh), d=img.data; d.fill(255);
+      if((style==='gray' || style==='raw') && luma){
+        // raw: the row's whole band of grey, nothing masked — strokes the
+        // threshold missed are still there for the engine to see
+        for(let yy=0;yy<chh;yy++) for(let xx=0;xx<cw;xx++){
+          const k=yy*cw+xx; if(style==='gray' && !grown[k]) continue;
+          const x=x0+xx, shift=slope*(x-xc), y=Math.round(yy+yTop+shift); if(y<0||y>=H||x>=W) continue;
+          const t=Math.max(0,Math.min(1,(luma[y*W+x]-inkLevel)/span));
+          const v=Math.round(Math.pow(t,1.3)*255), o=k*4; d[o]=d[o+1]=d[o+2]=v;
+        }
+      } else {
+        for(let k=0;k<mask.length;k++) if(mask[k]){ const o=k*4; d[o]=d[o+1]=d[o+2]=0; }
+      }
+      const small=document.createElement('canvas'); small.width=cw; small.height=chh; small.getContext('2d').putImageData(img,0,0);
+      const crop=document.createElement('canvas'); crop.width=Math.round(cw*scale); crop.height=Math.round(chh*scale);
+      const cctx=crop.getContext('2d'); cctx.fillStyle='#fff'; cctx.fillRect(0,0,crop.width,crop.height);
+      cctx.imageSmoothingEnabled=true; cctx.imageSmoothingQuality='high'; cctx.drawImage(small,0,0,crop.width,crop.height);
+      return crop;
+    };
+    const meanConf=res=>{ const ws=collectWords(res).filter(w=>w.text&&w.text.trim()); return ws.length?ws.reduce((s,w)=>s+w.confidence,0)/ws.length:0; };
+    let data, cropStyleUsed=cropStyle;
+    try{
+      const first=cropStyle==='binary'?'binary':cropStyle==='raw'?'raw':'gray';
+      ({data}=await worker.recognize(buildCrop(first),{},{text:true,blocks:true})); cropStyleUsed=first;
+      if(cropStyle==='both' && meanConf(data)<85){
+        const alt=(await worker.recognize(buildCrop('binary'),{},{text:true,blocks:true})).data;
+        if(meanConf(alt)>meanConf(data)){ data=alt; cropStyleUsed='binary'; }
+      }
+    }
     catch(e){ return {rowIndex:ri, text:'', confidence:0, symbols:[], words:[], error:e.message}; }
     // engine boxes → page coordinates, undoing the scale and the shear at the box's own x
     const toPage=s=>{ const sx0=x0+s.bbox.x0/scale, sx1=x0+s.bbox.x1/scale, shift=slope*((sx0+sx1)/2-xc);
       return {text:s.text, confidence:s.confidence, bb:{x0:sx0, y0:yTop+s.bbox.y0/scale+shift, x1:sx1, y1:yTop+s.bbox.y1/scale+shift}}; };
     const symbols=collectSymbols(data).map(toPage);
     const words=collectWords(data).map(toPage).filter(w=>w.text&&w.text.trim());
+    row.cropStyleUsed=cropStyleUsed;
     // assign each symbol to the character box it overlaps most
     const lineChars=[]; for(const piece of row.lines){ const idx=textLines.chains.indexOf(piece); if(byLine.has(idx)) lineChars.push(...byLine.get(idx)); }
     /* sequence alignment (dynamic programming) between the engine's
@@ -332,7 +354,7 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
   recognised=characters.characters.filter(c=>c.text).length;
 
   const cells=buildCellTexts(characters,columns,reference);
-  return {available:true, language:params.language||'eng', scale, lines:results, recognised, loosePieces:extra,
+  return {available:true, language:params.language||'eng', scale, cropStyle, lines:results, recognised, loosePieces:extra,
           characters:characters.characters.length, cells};
 }
 
@@ -355,4 +377,96 @@ export function buildCellTexts(characters,columns,reference){
     const [r,c]=key.split(',').map(Number); cells[r][c]=text;
   }
   return cells;
+}
+
+/* ======================================================================
+   CELL PASS  ·  numeric and code columns read again, one cell at a time
+   Why: a line read as a whole lets the engine turn an 8 into a B, a 6
+   into a G or a 1 into an I wherever the context looks like a word.
+   Once the columns are known (a header rule or its vocabulary named
+   them), a cell in a numeric column can only hold digits and a few
+   marks, and a batch / pack cell only letters, digits and a few marks:
+   the engine is told so (a character whitelist) and reads the cell's
+   own crop. The cell's text is replaced when the whitelisted reading
+   is at least as confident as the words the line pass put there.
+   ====================================================================== */
+const CELL_CLASSES={
+  numeric:{ keys:new Set(['sl','qty','tp','vat','sp','op','bonus','batchQty','tpValue','vatValue','spValue','net','discountPct','discountValue','tpVat','invoiceNo','sbu','mfg','exp']),
+            whitelist:'0123456789.,-%/:' },
+  alnum:  { keys:new Set(['batch','pack','unit','code','type']),
+            whitelist:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'x×-./()" }
+};
+export async function refineCellsByColumn(recognition,textLines,characters,columns,W,H,params,onProgress){
+  if(!recognition || !recognition.available || !columns || !columns.band) return recognition;
+  const cols=columns.columns; if(!cols.some(c=>c.key)) return recognition;
+  let worker; try{ worker=await getWorker(params.language||'eng',()=>{}); }catch(e){ return recognition; }
+  const luma=textLines.luma||null, ink=textLines.cleanBinary, labels=textLines.labels;
+  const reference=textLines.stats.reference||20, slope=textLines.fullLines.slope||0;
+  const scale=Math.max(1,Math.min(5,(params.targetHeight||40)/Math.max(8,reference)));
+  const perCell=new Map();
+  for(const ch of characters.characters){ if(!ch.cell) continue; const k=ch.cell.row+','+ch.cell.col; if(!perCell.has(k)) perCell.set(k,[]); perCell.get(k).push(ch); }
+  const conf=new Map();                                        // line-pass confidence per cell: mean of its characters
+  for(const [k,chs] of perCell){ const withText=chs.filter(c=>c.text&&c.confidence!==undefined); conf.set(k, withText.length?withText.reduce((s,c)=>s+c.confidence,0)/withText.length:0); }
+
+  /* one cell's crop: its characters' members, sheared level, grey inside the outline */
+  const cellCrop=chs=>{
+    const memberLabels=new Set(); let x0=1/0,y0=1/0,x1=-1/0,y1=-1/0;
+    for(const ch of chs){ for(const m of ch.members) memberLabels.add(m.label); x0=Math.min(x0,ch.bb.x0); y0=Math.min(y0,ch.bb.y0); x1=Math.max(x1,ch.bb.x1); y1=Math.max(y1,ch.bb.y1); }
+    const pad=Math.round(0.4*reference), xc=(x0+x1)/2;
+    const cx0=Math.max(0,x0-pad), cx1=Math.min(W-1,x1+pad), cy0=Math.max(0,y0-pad), cy1=Math.min(H-1,y1+pad);
+    const cw=cx1-cx0+1, chh=cy1-cy0+1; if(cw<2||chh<2||cw*chh>4e6) return null;
+    const mask=new Uint8Array(cw*chh);
+    for(let x=x0;x<=x1;x++){ const shift=slope*(x-xc); for(let y=y0;y<=y1;y++){ const i=y*W+x; if(!ink[i]||!memberLabels.has(labels[i])) continue; const yy=Math.round(y-shift)-cy0, xx=x-cx0; if(yy>=0&&yy<chh&&xx>=0&&xx<cw) mask[yy*cw+xx]=1; } }
+    const grown=dilateCPU(mask,cw,chh,3,3);
+    let inkLevel=0, paperLevel=255;
+    if(luma){ const iv=[], pv=[]; for(let yy=0;yy<chh;yy++) for(let xx=0;xx<cw;xx++){ const x=cx0+xx, y=Math.round(cy0+yy+slope*(x-xc)); if(y<0||y>=H) continue; const v=luma[y*W+x]; if(mask[yy*cw+xx]) iv.push(v); else if(!grown[yy*cw+xx]) pv.push(v); }
+      iv.sort((a,b)=>a-b); pv.sort((a,b)=>a-b); if(iv.length) inkLevel=iv[Math.floor(iv.length*0.05)]; if(pv.length) paperLevel=pv[Math.floor(pv.length*0.9)]; }
+    const span=Math.max(24,paperLevel-inkLevel);
+    const img=new ImageData(cw,chh), d=img.data; d.fill(255);
+    for(let yy=0;yy<chh;yy++) for(let xx=0;xx<cw;xx++){ const k=yy*cw+xx; if(!grown[k]) continue; const o=k*4;
+      if(luma){ const x=cx0+xx, y=Math.round(cy0+yy+slope*(x-xc)); if(y<0||y>=H) continue; const t=Math.max(0,Math.min(1,(luma[y*W+x]-inkLevel)/span)); d[o]=d[o+1]=d[o+2]=Math.round(Math.pow(t,1.3)*255); }
+      else if(mask[k]) d[o]=d[o+1]=d[o+2]=0; }
+    const small=document.createElement('canvas'); small.width=cw; small.height=chh; small.getContext('2d').putImageData(img,0,0);
+    return small;
+  };
+
+  let changed=0, tried=0, calls=0, currentClass=null;
+  for(let ci=0;ci<cols.length;ci++){
+    const key=cols[ci].key; const cls=CELL_CLASSES.numeric.keys.has(key)?'numeric':CELL_CLASSES.alnum.keys.has(key)?'alnum':null;
+    if(!cls) continue;
+    /* all the column's cells stacked into ONE image, a clear gap between
+       them, read in one call as a block of lines; each result line is
+       mapped back to its cell by its centre. One call per column instead
+       of one per cell. */
+    const slots=[];
+    for(let ri=0;ri<columns.band.rows.length;ri++){ const chs=perCell.get(ri+','+ci); if(!chs||!chs.length) continue; const cv=cellCrop(chs); if(cv) slots.push({ri,cv}); }
+    if(!slots.length) continue;
+    if(onProgress) onProgress('cells · column '+(ci+1)+' / '+cols.length+' ('+slots.length+' cells)');
+    tried+=slots.length;
+    const gap=Math.round(1.2*reference*scale), margin=Math.round(0.8*reference*scale);
+    const wmax=Math.max(...slots.map(s=>Math.round(s.cv.width*scale)));
+    const heights=slots.map(s=>Math.round(s.cv.height*scale));
+    const total=margin*2+heights.reduce((a,b)=>a+b,0)+gap*(slots.length-1);
+    const sheet=document.createElement('canvas'); sheet.width=wmax+margin*2; sheet.height=total;
+    const sctx=sheet.getContext('2d'); sctx.fillStyle='#fff'; sctx.fillRect(0,0,sheet.width,sheet.height); sctx.imageSmoothingEnabled=true; sctx.imageSmoothingQuality='high';
+    let y=margin; const bands=[];
+    slots.forEach((s,i)=>{ const h=heights[i], w=Math.round(s.cv.width*scale); sctx.drawImage(s.cv,margin,y,w,h); bands.push({ri:s.ri,y0:y,y1:y+h}); y+=h+gap; });
+    if(cls!==currentClass){ await worker.setParameters({tessedit_char_whitelist:CELL_CLASSES[cls].whitelist, tessedit_pageseg_mode:'6'}); currentClass=cls; }
+    let data; try{ ({data}=await worker.recognize(sheet,{},{text:true,blocks:true})); calls++; }catch(e){ continue; }
+    // the engine's lines → cells by centre
+    const lines=[]; for(const block of data.blocks||[]) for(const para of block.paragraphs||[]) for(const line of para.lines||[]) lines.push(line);
+    const perBand=bands.map(()=>[]);
+    for(const line of lines){ const yc=(line.bbox.y0+line.bbox.y1)/2; let bi=-1,bd=1/0; bands.forEach((b,i)=>{ const d=yc<b.y0?b.y0-yc:yc>b.y1?yc-b.y1:0; if(d<bd){ bd=d; bi=i; } }); if(bi>=0 && bd<=gap/2) perBand[bi].push(line); }
+    bands.forEach((b,i)=>{
+      const words=perBand[i].flatMap(l=>l.words||[]).filter(w=>w.text&&w.text.trim());
+      if(!words.length) return;
+      const text=words.map(w=>w.text.trim()).join(' ').replace(/\s+/g,' ').trim();
+      const c=words.reduce((s,w)=>s+w.confidence,0)/words.length;
+      const before=recognition.cells[b.ri][ci]||'';
+      if(text && c>=Math.max(50,(conf.get(b.ri+','+ci)||0)-5) && text!==before){ recognition.cells[b.ri][ci]=text; changed++; }
+    });
+  }
+  if(currentClass!==null){ try{ await worker.setParameters({tessedit_char_whitelist:'', tessedit_pageseg_mode:'7'}); }catch(e){} }
+  recognition.cellPass={tried, changed, calls};
+  return recognition;
 }

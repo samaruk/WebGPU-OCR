@@ -31,6 +31,8 @@ export function loadImage(file){
     ctx.imageSmoothingQuality='high'; ctx.drawImage(img,0,0,W,H);
     S.origImageData=ctx.getImageData(0,0,W,H);
     S.origCanvas=canvas;
+    S.rawCanvas=canvas; S.rawImageData=S.origImageData; S.watermark=null;
+    $('removeWm').disabled=false; $('removeWm').textContent='Remove watermark';
 
     // meta panel
     const mb=(S.srcW*S.srcH*4/1048576).toFixed(1);
@@ -40,25 +42,35 @@ export function loadImage(file){
       : `<div><span class="k">working</span> <span class="v">${W}×${H}</span> · original size</div>`;
     meta.innerHTML=html; meta.style.display='block';
 
-    // reset every result and the viewer
-    runBtn.disabled=!S.device;
-    S.lensCanvas=null; S.workCanvas=null; S.workImageData=null; S.cleanCanvas=null; S.cleanImageData=null;
-    S.borders=null; S.textLines=null; S.columns=null; S.characters=null; S.recognition=null;
-    S.stageCv=null; S.thumbs=[]; S.stage=STAGES.length-1;
-    for(const id of ['statRules','statLines','statFullLines','statTable','statTilt','statChars','statRecognised']) $(id).textContent='—';
-    $('timing').innerHTML='';
-    $('gallery').innerHTML='<div class="gal-msg">Run the pipeline to populate stage outputs.</div>';
-    vpEmpty.style.display='none';
-    stageCap.style.display='block';
-    savePng.disabled=saveJson.disabled=true;
-    // preview the raw image in the viewport
-    const preview=document.createElement('canvas'); preview.width=W; preview.height=H;
-    preview.getContext('2d').drawImage(img,0,0,W,H);
-    S.stageCv=preview; resizeView(); fitView();
-    setStageCap(-1);
+    resetResults();
+    previewImage(S.origCanvas);
   };
   img.onerror=()=>showError('Could not decode that image file.');
   img.src=url;
+}
+
+/* every stage result and the gallery are dropped: the next run starts
+   from S.origCanvas again (called on load and when the watermark is
+   removed or restored) */
+export function resetResults(){
+  runBtn.disabled=!S.device;
+  S.lensCanvas=null; S.workCanvas=null; S.workImageData=null; S.cleanCanvas=null; S.cleanImageData=null;
+  S.borders=null; S.textLines=null; S.columns=null; S.characters=null; S.recognition=null; S.api=null; S.final=null;
+  S.stageCv=null; S.thumbs=[]; S.stage=STAGES.length-1;
+  for(const id of ['statRules','statLines','statFullLines','statTable','statTilt','statChars','statRecognised','statApi']) $(id).textContent='—';
+  $('timing').innerHTML='';
+  $('gallery').innerHTML='<div class="gal-msg">Run the pipeline to populate stage outputs.</div>';
+  vpEmpty.style.display='none';
+  stageCap.style.display='block';
+  savePng.disabled=saveJson.disabled=true;
+}
+
+/* show a canvas in the viewport before any run */
+export function previewImage(canvas,caption){
+  const preview=document.createElement('canvas'); preview.width=canvas.width; preview.height=canvas.height;
+  preview.getContext('2d').drawImage(canvas,0,0);
+  S.stageCv=preview; resizeView(); fitView();
+  setStageCap(-1,caption);
 }
 
 drop.onclick=()=>fileInput.click();

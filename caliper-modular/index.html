@@ -33,6 +33,13 @@
         </div>
         <input type="file" id="file" accept="image/*" hidden>
         <div class="meta" id="meta" style="display:none"></div>
+        <div class="ctl" style="margin-top:9px">
+          <label>Watermark contrast &le; <span class="val" id="wmContrastVal">0.15</span></label>
+          <input type="range" id="wmContrast" min="0.05" max="0.40" step="0.01" value="0.15">
+          <div class="hint">Pixels at most this much darker than the local paper tone are watermark and are returned to paper; pixels 1.8&times; darker or more are ink and stay. Raise it for a darker watermark, lower it if thin text fades.</div>
+        </div>
+        <button class="ghost" id="removeWm" disabled style="width:100%;margin-top:6px">Remove watermark</button>
+        <div class="hint">Removes a large low-contrast watermark (logo, PAID stamp) from the loaded image and shows the result. RUN PIPELINE then works on the cleaned image; the button turns into Restore original.</div>
       </div>
 
       <!-- 00b · rectification -->
@@ -40,6 +47,27 @@
         <h3><span class="ix">00b</span> Rectification</h3>
         <label class="chk"><input type="checkbox" id="rectify" checked> Rectify image (lens + perspective) before processing</label>
         <div class="hint">Checked: radial lens distortion is undone and the detected page quad is warped back to a rectangle; every later section works on that rectified image. Unchecked: both corrections are skipped and every section works on the original image as loaded.</div>
+      </div>
+
+      <!-- 00c · OCR API: PaddleOCR + Tesseract 5 + EasyOCR -->
+      <div class="grp">
+        <h3><span class="ix">00c</span> OCR API · PaddleOCR + Tesseract 5 + EasyOCR</h3>
+        <label class="chk"><input type="checkbox" id="apiEnable" checked> Send the rectified image to the OCR web API</label>
+        <div id="apiOptions" style="margin-top:9px">
+          <div class="ctl">
+            <label>Endpoint</label>
+            <input type="text" id="apiUrl" value="http://localhost:5080/api/invoice/analyze" spellcheck="false" style="width:100%;margin-top:4px;box-sizing:border-box">
+          </div>
+          <div class="ctl">
+            <label>Depth</label>
+            <select id="apiDepth" style="width:100%;margin-top:4px">
+              <option value="both" selected>both — regions + layout</option>
+              <option value="brief">brief — regions only</option>
+              <option value="deep">deep — layout only</option>
+            </select>
+          </div>
+          <div class="hint">POSTed as multipart <b>file</b> the moment the rectified image exists; the pipeline does not wait. The service reads the page with three engines at once — PaddleOCR (the layout comes from its regions), Tesseract 5 through the installed tesseract.exe, and EasyOCR through a Python worker (<code>pip install easyocr</code>) — and votes their words cell by cell; an engine that is not installed just reports so. The answer fills the API stage when it arrives and the FINAL stages then settle every cell by a vote among all four readings, the local one included. Start the service with <code>dotnet run</code> in <code>api/InvoiceOcrApi</code> (port 5080).</div>
+        </div>
       </div>
 
       <!-- 01 · binarisation -->
@@ -207,6 +235,8 @@
         <h3><span class="ix">04</span> Columns</h3>
         <label class="chk"><input type="checkbox" id="clEnable" checked> Detect the table band, gutters, columns and cells</label>
         <div id="clOptions" style="margin-top:9px">
+          <label class="chk"><input type="checkbox" id="clHeaderRules" checked> Match the title row against the header rules</label>
+          <div class="hint">After recognition the title words are compared with every layout in <code>js/config/headerrules.js</code>. An exact match (every title found, in order, boundaries on the page's gutters) fixes the columns: number, order, meaning. Anything less keeps the columns found from the coverage profile and only names them from the labels of all rules. Add or edit rules in that file.</div>
           <div class="hint" style="margin-bottom:8px">Works on the full lines of section 03 in the de-skewed frame. Rows with enough pieces form the table band; a glyph coverage profile across the band exposes the gutters; the intervals between gutters are the columns and every glyph goes to the column under its centre.</div>
           <div class="ctl">
             <label>Min pieces per table row <span class="val" id="clMinPiecesVal">3</span></label>
@@ -284,11 +314,21 @@
             </select>
           </div>
           <div class="ctl" style="margin-top:9px">
-            <label>Target glyph height <span class="val" id="rcTargetHeightVal">30 px</span></label>
-            <input type="range" id="rcTargetHeight" min="16" max="60" step="2" value="30">
+            <label>Target glyph height <span class="val" id="rcTargetHeightVal">40 px</span></label>
+            <input type="range" id="rcTargetHeight" min="16" max="60" step="2" value="40">
             <div class="hint">Small text is upscaled (integer factor, up to 4×) so the reference glyph height reaches about this many pixels before recognition.</div>
           </div>
-          <label class="chk"><input type="checkbox" id="rcGrayscale"> Grayscale edges around the ink</label>
+          <label class="chk"><input type="checkbox" id="rcCellPass" checked> Read numeric and code cells again with a character whitelist</label>
+          <div class="hint">After the columns are named, the cells of every numeric column (Sl.No, Qty, prices, amounts) are read again with digits only allowed, and batch / pack / unit cells with letters and digits only — one engine call per column, the cells stacked into one image; a reading at least as confident as the line's replaces it. Stops an 8 turning into a B or a 1 into an I.</div>
+          <div class="ctl">
+            <label>Row crop</label>
+            <select id="rcCrop" style="width:100%;margin-top:4px">
+              <option value="both">best of both — grayscale, then binary unless confident</option>
+              <option value="gray" selected>grayscale — the page's own grey inside the glyph outline</option>
+              <option value="binary">binary — the threshold's mask, solid black</option>
+            </select>
+            <div class="hint">Grayscale keeps the anti-aliased strokes the engine's LSTM was trained on and reads a JPEG-softened scan far better; binary is robust on a heavy watermark or a dark photo. Best of both runs the second only when the first is unsure.</div>
+          </div>
           <div class="hint">Adds a 2 px ring of contrast-normalised grayscale from the rules-erased image around every glyph, so the engine sees anti-aliased edges. Helps clean scans; on tight bold digits it can blur neighbours together, so it is off by default.</div>
         </div>
       </div>
@@ -311,9 +351,15 @@
           <div class="stat"><div class="n g" id="statTable">—</div><div class="l">table rows × cols</div></div>
           <div class="stat"><div class="n" id="statChars">—</div><div class="l">characters</div></div>
           <div class="stat"><div class="n g" id="statRecognised">—</div><div class="l">recognised</div></div>
-          <div class="stat" style="grid-column:1/-1"><div class="n" id="statTilt">—</div><div class="l">page tilt</div></div>
+          <div class="stat"><div class="n" id="statTilt">—</div><div class="l">page tilt</div></div>
+          <div class="stat"><div class="n g" id="statApi">—</div><div class="l">PaddleOCR API</div></div>
         </div>
         <div class="meta" id="timing" style="margin-top:8px"></div>
+        <details style="margin-top:9px;border:1px solid #2a2a2a;padding:8px;border-radius:6px" id="finalJsonBox">
+          <summary style="cursor:pointer;font-weight:bold;font-size:13px">Final table · JSON</summary>
+          <button class="ghost" id="copyFinalJson" style="width:100%;margin:6px 0" disabled>Copy JSON</button>
+          <pre id="finalJson" style="max-height:320px;overflow:auto;font-size:10px;line-height:1.35;white-space:pre-wrap;word-break:break-all;margin:0;padding:6px;background:#0a0e0f;border:1px solid #2a2a2a;border-radius:4px">no final table yet — run the pipeline</pre>
+        </details>
       </div>
     </aside>
 

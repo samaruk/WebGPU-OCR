@@ -21,7 +21,10 @@
                            below the box (a totals line) closes the body;
           · row-rules      ≥ 2 long horizontals stacked with no verticals
                            (header underline + totals line): table region
-                           from the outermost pair;
+                           from the outermost pair; ≥ 3 at a regular pitch
+                           (a rule under every item row) give the row
+                           bands outright and outrank a boxed customer
+                           block that would pose as a vertical grid;
           · sections       long horizontal rules outside the table;
      3. PRIORS for the column stage: table region and column boundaries.
    ====================================================================== */
@@ -54,25 +57,31 @@ export function analyseBorders(rules,W,H,params,binary=null){
   const parent=new Int32Array(nH+nV); for(let i=0;i<parent.length;i++) parent[i]=i;
   const find=i=>{ while(parent[i]!==i){ parent[i]=parent[parent[i]]; i=parent[i]; } return i; };
   const unite=(a,b)=>{ a=find(a); b=find(b); if(a!==b) parent[a]=b; };
-  const intersections=[];
+  const intersections=[], crossings=[];
   for(let i=0;i<nH;i++){ const h=horizontal[i];
     for(let j=0;j<nV;j++){ const v=vertical[j];
       const vx=xAt(v,h.y), hy=yAt(h,v.x);
       if(vx<h.x0-tolerance || vx>h.x1+tolerance) continue;
       if(hy<v.y0-tolerance || hy>v.y1+tolerance) continue;
-      unite(i,nH+j); intersections.push({x:vx,y:hy});
+      unite(i,nH+j); intersections.push({x:vx,y:hy}); crossings.push(i);
     } }
   const groups=new Map();
-  for(let i=0;i<nH+nV;i++){ const r=find(i); if(!groups.has(r)) groups.set(r,{hs:[],vs:[]});
+  for(let i=0;i<nH+nV;i++){ const r=find(i); if(!groups.has(r)) groups.set(r,{hs:[],vs:[],crossings:0,root:r});
     (i<nH?groups.get(r).hs:groups.get(r).vs).push(i<nH?horizontal[i]:vertical[i-nH]); }
+  for(const i of crossings) groups.get(find(i)).crossings++;
   const grids=[...groups.values()].filter(g=>g.hs.length>=2 && g.vs.length>=2);
   for(const g of grids){
     g.box={x0:Math.min(...g.hs.map(h=>h.x0),...g.vs.map(v=>v.x0)), y0:Math.min(...g.hs.map(h=>h.y0),...g.vs.map(v=>v.y0)),
            x1:Math.max(...g.hs.map(h=>h.x1),...g.vs.map(v=>v.x1)), y1:Math.max(...g.hs.map(h=>h.y1),...g.vs.map(v=>v.y1))};
     g.area=(g.box.x1-g.box.x0)*(g.box.y1-g.box.y0);
   }
-  grids.sort((a,b)=>b.area-a.area);
+  // the grid with the most rule CROSSINGS is the printed structure: a boxed
+  // title row crosses its separators dozens of times, while a pen line down
+  // the page edge meeting a signature underline and a section rule spans a
+  // huge box on two crossings
+  grids.sort((a,b)=>b.crossings-a.crossings || b.area-a.area);
   const grid=grids[0]||null;
+  const inAnyGrid=new Set(); for(const g of grids) for(const h of g.hs) inAnyGrid.add(h);
 
   // merge rules that lie within tolerance of each other (double lines)
   const dedupe=(arr,key)=>{ const sorted=arr.slice().sort((a,b)=>a[key]-b[key]); const out=[];
@@ -81,7 +90,7 @@ export function analyseBorders(rules,W,H,params,binary=null){
       else out.push(r); }
     return out; };
 
-  const layout={kind:'none', table:null, headerBox:null, colsX:[], rowsY:[], sections:[], grid:null};
+  const layout={kind:'none', table:null, headerBox:null, box:null, colsX:[], rowsY:[], sections:[], grid:null, rowRuled:false, rowPitch:0};
   if(grid){
     const hs=dedupe(grid.hs,'y'), vs=dedupe(grid.vs,'x');
     layout.grid={hs,vs,box:grid.box,intersections};
@@ -95,33 +104,75 @@ export function analyseBorders(rules,W,H,params,binary=null){
     else if(hs.length>=3){ layout.kind='full-grid'; layout.table={...grid.box}; layout.rowsY=rowsY; layout.colsX=colsX; }
     else { layout.kind='vertical-grid'; layout.table={...grid.box}; layout.colsX=colsX; layout.rowsY=rowsY; }
   }
-  /* --- stacked long horizontals with no verticals (open table) ---------- */
-  if(!layout.table){
-    const inGrid=new Set(grid?grid.hs:[]);
-    const longH=horizontal.filter(h=>h.long && !inGrid.has(h) && !h.isDashed).sort((a,b)=>a.y-b.y);
-    const stacks=[];                               // cluster by x-overlap ≥ 70 % of the shorter
-    for(const h of longH){
-      let home=null;
-      for(const s of stacks){ const ref=s[0];
-        const overlap=Math.min(ref.x1,h.x1)-Math.max(ref.x0,h.x0)+1;
-        if(overlap>=0.7*Math.min(lengthH(ref),lengthH(h))){ home=s; break; } }
-      if(home) home.push(h); else stacks.push([h]);
+  /* --- stacked long horizontals with no verticals (open table) ----------
+     Long horizontals outside the grid, clustered by x-overlap. Two rules
+     (header underline + totals line) bound an open table; a rule under
+     EVERY item row — three or more at a regular pitch — gives the row
+     bands outright, and such a stack outranks a two-rule box: a boxed
+     customer block (two horizontals, a few verticals) is not the item
+     table, however large it is.                                          */
+  const longH=horizontal.filter(h=>h.long && !inAnyGrid.has(h) && !h.isDashed).sort((a,b)=>a.y-b.y);   // rules of ANY grid are structure already
+  const stacks=[];                               // cluster by x-overlap ≥ 70 % of the shorter
+  for(const h of longH){
+    let home=null;
+    for(const s of stacks){ const ref=s[0];
+      const overlap=Math.min(ref.x1,h.x1)-Math.max(ref.x0,h.x0)+1;
+      if(overlap>=0.7*Math.min(lengthH(ref),lengthH(h))){ home=s; break; } }
+    if(home) home.push(h); else stacks.push([h]);
+  }
+  stacks.sort((a,b)=>b.length-a.length);
+  const stackAll=stacks[0]?dedupe(stacks[0],'y'):null;
+  let stack=stackAll, pitch=0, rowRuled=false;
+  // a rule under every row: the longest run of ≥ 4 consecutive rules whose
+  // gaps stay within 0.5–2.2 × the stack's median gap (a wrapped name
+  // doubles one gap); section rules further apart fall outside the run.
+  // Three evenly spaced rules are too little to outrank anything: a
+  // header underline with two section rules below can look just like it
+  if(stackAll && stackAll.length>=4){
+    const gaps=[]; for(let i=1;i<stackAll.length;i++) gaps.push(stackAll[i].y-stackAll[i-1].y);
+    const sorted=gaps.slice().sort((a,b)=>a-b); pitch=sorted[Math.floor(sorted.length/2)];
+    let bestA=0,bestB=0,cur=0;
+    for(let i=1;i<stackAll.length;i++){
+      if(gaps[i-1]>=0.5*pitch && gaps[i-1]<=2.2*pitch){ if(i-cur>bestB-bestA){ bestA=cur; bestB=i; } }
+      else cur=i;
     }
-    stacks.sort((a,b)=>b.length-a.length);
-    const stack=stacks[0];
+    if(bestB-bestA+1>=4){ stack=stackAll.slice(bestA,bestB+1); rowRuled=true; }
+  }
+  // a boxed block above a row-ruled table: the box is the table's own
+  // header only when the first ruled row hangs right under it (within
+  // 1.5 pitches); otherwise it is a customer / invoice block and is not
+  // the table, whatever its size or rule count
+  if(rowRuled && grid && (layout.kind==='vertical-grid' || layout.kind==='header-box')){
+    const gapBelow=stack[0].y-grid.box.y1;
+    const attached=gapBelow>-tolerance && gapBelow<=1.5*pitch;
+    if(!attached){
+      layout.box={...grid.box};                  // stays on record, but it is not the table
+      layout.table=null; layout.headerBox=null; layout.colsX=[]; layout.rowsY=[]; layout.headerRowsY=null; layout.kind='none';
+    } else if(layout.kind==='vertical-grid'){    // a boxed title row over ruled item rows
+      layout.kind='header-box'; layout.headerBox={...layout.table}; layout.table=null; layout.headerRowsY=layout.rowsY; layout.rowsY=[];
+    }
+  }
+  if(!layout.table){
     if(layout.kind==='header-box'){
       // only rules of the same width as the box (both ends match) can
-      // close it; a page-wide section rule below the table does not
+      // close it; a page-wide section rule below the table does not —
+      // with a rule under every row, the ruled run itself closes it
       const hb=layout.headerBox, endTolerance=Math.max(3*tolerance,0.05*(hb.x1-hb.x0));
-      const below=longH.filter(h=>h.y>hb.y1+tolerance && Math.abs(h.x0-hb.x0)<=endTolerance && Math.abs(h.x1-hb.x1)<=endTolerance).sort((a,b)=>a.y-b.y);
+      const below=(rowRuled ? stack.filter(h=>h.y>hb.y1-tolerance)
+        : longH.filter(h=>h.y>hb.y1+tolerance && Math.abs(h.x0-hb.x0)<=endTolerance && Math.abs(h.x1-hb.x1)<=endTolerance)).sort((a,b)=>a.y-b.y);
+      if(below.length && rowRuled){ layout.rowRuled=true; layout.rowPitch=pitch; }
       if(below.length){ const bottom=below[below.length-1];
         layout.table={x0:Math.min(hb.x0,bottom.x0), y0:hb.y0, x1:Math.max(hb.x1,bottom.x1), y1:bottom.y1};
         layout.rowsY=[{y:hb.y1,x0:hb.x0,x1:hb.x1}].concat(below.map(h=>({y:h.y,x0:h.x0,x1:h.x1}))); }
     } else if(stack && stack.length>=2){
       const top=stack[0], bottom=stack[stack.length-1];
       layout.kind='row-rules';
-      layout.table={x0:Math.min(top.x0,bottom.x0), y0:top.y0, x1:Math.max(top.x1,bottom.x1), y1:bottom.y1};
+      // with a rule under every row the first rule underlines the column
+      // titles: the table starts three quarters of a pitch above it
+      const y0=rowRuled ? Math.max(0,Math.round(top.y0-0.75*pitch)) : top.y0;
+      layout.table={x0:Math.min(top.x0,bottom.x0), y0, x1:Math.max(top.x1,bottom.x1), y1:bottom.y1};
       layout.rowsY=stack.map(h=>({y:h.y,x0:h.x0,x1:h.x1}));
+      layout.rowRuled=rowRuled; layout.rowPitch=pitch;
     }
   }
   /* --- section separators: long horizontals not in the table ------------ */
@@ -203,7 +254,7 @@ export function bordersToJson(B){
   return {
     detected:true,
     rules:{horizontal:B.horizontalRules.length, vertical:B.verticalRules.length, longH:B.longCounts.h, longV:B.longCounts.v},
-    layout:L.kind, table:box(L.table), headerBox:box(L.headerBox),
+    layout:L.kind, table:box(L.table), headerBox:box(L.headerBox), boxedBlock:box(L.box), rowRuled:!!L.rowRuled,
     columnBoundariesX:L.colsX.map(c=>Math.round(c.x)), rowBoundariesY:L.rowsY.map(r=>Math.round(r.y)),
     sectionsY:L.sections.map(s=>Math.round(s.y)), erasedPixels:B.erasedPixels
   };

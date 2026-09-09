@@ -31,6 +31,7 @@ export function sauvolaCPU(img,{radius,k,R,invert}){
 }
 
 export async function loadImage(url,maxPixels=32e6){
+  if(url instanceof HTMLCanvasElement) return url;          // a synthetic page drawn by the caller
   const blob=await (await fetch(url,{cache:'reload'})).blob(); const im=await createImageBitmap(blob);   // Image.decode() never settles in the test pane
   let W=im.width,H=im.height; const s=Math.min(1,Math.sqrt(maxPixels/(W*H))); W=Math.round(W*s); H=Math.round(H*s);
   const cv=document.createElement('canvas'); cv.width=W; cv.height=H; cv.getContext('2d').drawImage(im,0,0,W,H); return cv;
@@ -53,7 +54,7 @@ export async function runCPU(url,opts={}){
   const luma=new Uint8Array(W*H); for(let i=0,j=0;i<W*H;i++,j+=4) luma[i]=(0.299*clean.data[j]+0.587*clean.data[j+1]+0.114*clean.data[j+2])|0;
   if(eraseMask) for(let i=0;i<raw.length;i++) if(eraseMask[i]) raw[i]=0;
   const healed=T('dilate',()=>dilateCPU(raw,W,H,1,1));
-  const TL=T('textLines',()=>analyseTextLines(raw,healed,W,H,p,luma));
+  const TL=T('textLines',()=>analyseTextLines(raw,healed,W,H,p,luma)); TL.luma=luma;   // the app's detectTextLines sets this; the replica must too
   const C=T('columns',()=>detectColumns(TL,p.columns,(p.borders.feedColumns&&borders)?borders.layout:null));
   return {W,H,p,borders,TL,C,timing:t,canvas:cv};
 }

@@ -129,7 +129,7 @@ function runRespectsGutters(rows,gutters){
 
 /* textLines : the text-line stage result (S.textLines)
    params    : {minPieces, rowGap, mergeGap, minGutterWidth, maxGutterCoverage}
-   prior     : optional border layout (section 02): {kind, table:{x0,y0,x1,y1}|null,
+   prior     : optional border layout (section 02): {kind, rowRuled, table:{x0,y0,x1,y1}|null,
                colsX:[{x,y0,y1}]} in image space. A table box seeds the band;
                column boundaries are added as gutters where the coverage allows. */
 /* Column direction. The rows' slope de-skews y; the COLUMNS' slope
@@ -162,14 +162,53 @@ function estimateColumnSlope(rowSet,slope,clearFrac){
   return best;
 }
 
+/* ROW FRAGMENTS. On a curled page the full-line join leaves the right
+   half of an item row as a row of its own (the two halves overlap too
+   little vertically to be joined). Two rows that share no x range while
+   their de-skewed extents overlap by a third of the shorter — or whose
+   centres lie within one glyph height — are the two halves of one
+   physical row: the fragment's pieces go into the row with more pieces,
+   which is rebuilt, and the fragment row is removed from the full lines
+   (before any row index is handed out, so recognition sees whole rows).
+   Returns the number of fragments merged.                               */
+function mergeRowFragments(fullRows,slope,glyphHeight){
+  const xRange=r=>{ let a=1/0,b=-1/0; for(const p of r.lines){ const cy=(p.ink.y0+p.ink.y1)/2; a=Math.min(a,p.ink.x0+slope*cy); b=Math.max(b,p.ink.x1+1+slope*cy); } return [a,b]; };
+  let merged=0;
+  fullRows.sort((a,b)=>a.dy.y0-b.dy.y0 || a.ink.x0-b.ink.x0);
+  for(let i=0;i<fullRows.length;i++){
+    for(let j=i+1;j<fullRows.length;j++){
+      const a=fullRows[i], b=fullRows[j];
+      if(b.dy.y0 > a.dy.y1+glyphHeight) break;                        // rows are sorted: nothing further can touch a
+      const [ax0,ax1]=xRange(a), [bx0,bx1]=xRange(b);
+      if(Math.min(ax1,bx1)-Math.max(ax0,bx0) > 0) continue;            // they share x: different rows
+      const overlap=Math.min(a.dy.y1,b.dy.y1)-Math.max(a.dy.y0,b.dy.y0);
+      const shorter=Math.min(a.dy.y1-a.dy.y0,b.dy.y1-b.dy.y0);
+      const centres=Math.abs((a.dy.y0+a.dy.y1)/2-(b.dy.y0+b.dy.y1)/2);
+      if(overlap < 0.33*shorter && centres > glyphHeight) continue;
+      // the two halves of one row span at most two line heights together;
+      // a short continuation line next to the previous row's right half
+      // spans a pitch more and stays a row of its own
+      if(Math.max(a.dy.y1,b.dy.y1)-Math.min(a.dy.y0,b.dy.y0) > 2.1*glyphHeight) continue;
+      const host=a.lines.length>=b.lines.length?a:b, frag=host===a?b:a;
+      host.lines.push(...frag.lines); rebuildRow(host,slope);
+      fullRows.splice(j,1); merged++;
+      if(host===b){ fullRows[i]=host; }                                 // the survivor stays at position i
+      j=i;                                                              // re-check from the start of a's neighbourhood
+    }
+  }
+  fullRows.sort((a,b)=>a.dy.y0-b.dy.y0 || a.ink.x0-b.ink.x0);
+  return merged;
+}
+
 export function detectColumns(textLines,params,prior=null,limits=null){
   const full=textLines.fullLines||{}, slope=full.slope||0, fullRows=full.rows||[];
   const glyphHeight=textLines.stats.reference||10;
+  const fragmentsMerged=mergeRowFragments(fullRows,slope,glyphHeight);
   let colSlope=slope;                                   // refined against the table's own gutters below
   const toDeskewedX=(x,y)=>x+colSlope*y;
   const toDeskewedY=(x,y)=>y-slope*x;
   const toImage=(xp,yp)=>{ const x=xp-colSlope*yp; return {x, y:yp+slope*x}; };
-  const out={slope, columnSlope:slope, glyphHeight, toDeskewedX, toImage, rows:[], band:null, profile:null,
+  const out={slope, columnSlope:slope, glyphHeight, toDeskewedX, toImage, fragmentsMerged, rows:[], band:null, profile:null,
              gutters:[], columns:[], cells:[], reason:'', priorKind:prior?prior.kind:'none', runs:[]};
 
   /* --- 1 · rows -------------------------------------------------------- */
@@ -226,7 +265,7 @@ export function detectColumns(textLines,params,prior=null,limits=null){
   // a HINT that is folded into the band after the text-based search, never
   // a replacement for it: a boxed header mistaken for the table, or a box
   // that ends at a crease, must not hide the body rows
-  let boxRows=null;
+  let boxRows=null, foreignRows=0;
   if(prior && prior.table){
     const bx=(prior.table.x0+prior.table.x1)/2;
     const by0=toDeskewedY(bx,prior.table.y0), by1=toDeskewedY(bx,prior.table.y1);
@@ -285,6 +324,14 @@ export function detectColumns(textLines,params,prior=null,limits=null){
       if(f!==first || l!==last){ first=f; last=l; fromBorders=true; extend(); }
     }
   }
+  // a ROW-RULED table (the border stage found a rule under every row) is
+  // decisive evidence: rows outside its box are not table rows, however
+  // table-like a key-value block above it may look
+  if(prior && prior.rowRuled && boxRows){
+    const f=Math.max(first,boxRows.first), l=Math.min(last,boxRows.last);
+    if(f<=l && (f!==first || l!==last)){ foreignRows+= (f-first)+(last-l); first=f; last=l; fromBorders=true; }
+  }
+
   /* --- keep the largest gutter-respecting block --------------------------
      Trimming only peels rows off the band's ends, so a key-value block
      glued to the table (Client Name / Bill No. … whose long values run
@@ -295,7 +342,6 @@ export function detectColumns(textLines,params,prior=null,limits=null){
      rows. Non-tabular rows (a wrapped name, a section title, a row a fold
      merged into one piece) never break a block, so a damaged table stays
      whole.                                                               */
-  let foreignRows=0;
   for(let it=0;it<2;it++){
     gutters=relaxedGutters(rows.slice(first,last+1));
     if(!gutters.length) break;
@@ -355,6 +401,7 @@ export function detectColumns(textLines,params,prior=null,limits=null){
   let mergedRows=0, rescuedPieces=0;
   {
     const candidates=rows.slice(first,last+1), proper=candidates.filter(r=>isTabular[r.index]);
+    const merge=(host,r)=>{ host.glyphs.push(...r.glyphs); host.row.lines.push(...r.row.lines); host.pieces+=r.pieces; r.kind='merged'; mergedRows++; };
     for(const r of candidates){
       if(isTabular[r.index]) continue;
       // nearest proper row by the thin row's de-skewed centre (an offset of
@@ -363,7 +410,7 @@ export function detectColumns(textLines,params,prior=null,limits=null){
       let host=null, bestDist=1/0;
       for(const h of proper){ const d=h.row.dy; const dist=cy<d.y0?d.y0-cy:cy>d.y1?cy-d.y1:0; if(dist<bestDist){ bestDist=dist; host=h; } }
       if(!host || bestDist>0.6*glyphHeight) continue;
-      host.glyphs.push(...r.glyphs); host.row.lines.push(...r.row.lines); host.pieces+=r.pieces; r.kind='merged'; mergedRows++;
+      merge(host,r);
     }
   }
 
@@ -391,11 +438,11 @@ export function detectColumns(textLines,params,prior=null,limits=null){
         // (first-column entries, wrapped names allowed between) is a
         // SUB-total inside the table, not its end: the table continues.
         const continues=k=>{
-          let j=k+1, skipped=0;
-          while(j<=last && (!isTabular[j] || rows[j].kind==='merged')){ j++; if(++skipped>1) return false; }
-          let n=0;
-          for(;j<=last;j++){ if(rows[j].kind==='merged' || !isTabular[j]) continue;
-            if(hasFirst(rows[j])){ if(++n>=3) return true; } else break; }
+          // three of the next six tabular rows carry a first-column entry:
+          // the table goes on (a stray fragment between them does not end it)
+          let n=0, seen=0;
+          for(let j=k+1;j<=last && seen<6;j++){ if(rows[j].kind==='merged' || !isTabular[j]) continue;
+            seen++; if(hasFirst(rows[j]) && ++n>=3) return true; }
           return false;
         };
         let established=0;
@@ -465,6 +512,21 @@ export function detectColumns(textLines,params,prior=null,limits=null){
     }
     if(n) columns.push({x0:cx0,x1:cx1,gutterX0:a,gutterX1:b,glyphs:n});
   }
+  finishColumns(out,columns);
+  return out;
+}
+
+/* Cells, alignment and the spanning count for a set of columns given by
+   their gutter bounds {gutterX0, gutterX1} in de-skewed x. Used by the
+   profile columns above and by a matched header rule (headerrule.js),
+   which replaces the columns after recognition. A column's x0 / x1 are
+   the extent of the glyphs it holds (its bounds when it holds none).  */
+export function finishColumns(out,columns){
+  const band=out.band.rows, toDeskewedX=out.toDeskewedX;
+  for(const c of columns){ let cx0=1/0,cx1=-1/0,n=0;
+    for(const r of band) for(const g of r.glyphs){ const m=(g.x0+g.x1)/2;
+      if(m>=c.gutterX0 && m<=c.gutterX1+1){ n++; if(g.x0<cx0)cx0=g.x0; if(g.x1>cx1)cx1=g.x1; } }
+    c.glyphs=n; if(n){ c.x0=cx0; c.x1=cx1; } else { c.x0=c.gutterX0; c.x1=c.gutterX1; } }
   out.columns=columns;
 
   /* --- 5 · cells (row × column) ----------------------------------------- */
@@ -512,7 +574,8 @@ export function columnsToJson(C){
     footerRows:C.rows.filter(r=>r.kind==='footer').length,
     guttersFromBorders:C.guttersFromBorders||0,
     gutters:C.gutters.map(g=>({xDeskewed0:Math.round(g.x0), xDeskewed1:Math.round(g.x1), width:g.width})),
-    columns:C.columns.map((c,i)=>({index:i+1, xDeskewed0:Math.round(c.x0), xDeskewed1:Math.round(c.x1), align:c.align, cells:c.cells})),
+    headerRule:C.headerRule||null,
+    columns:C.columns.map((c,i)=>({index:i+1, key:c.key||null, label:c.label||null, xDeskewed0:Math.round(c.x0), xDeskewed1:Math.round(c.x1), align:c.align, cells:c.cells})),
     cells:C.cells.map((row,ri)=>row.map((cell,ci)=>cell?{row:ri+1,col:ci+1,bbox:box(cell.bb),glyphs:cell.glyphs}:null).filter(Boolean))
   };
 }

@@ -12,7 +12,7 @@ export function runSynthetic(cv,opts={}){
   const limits=opts.footerRows? {footerRows:opts.footerRows(TL)} : null;
   return {TL, C:detectColumns(TL,p.columns,null,limits)};
 }
-export function synthAcme(drift=0){ return canvasOf(1500,2000,(c,put)=>{ c.font='22px Arial';
+export function synthAcme(drift=0,curl=0){ return canvasOf(1500,2000,(c,put)=>{ c.font='22px Arial';
   put('The ACME Laboratories Ltd.',470,150); put('CUSTOMER COPY',1150,140);
   put('Corporate Office : Court de la ACME, 1/4, Kallayanpur, Mirpur Road, Dhaka-1207',190,195);
   put('Tel : 88-02-8091051-3, Fax : 88-02-9016515, E-mail: headoffice@acmeglobal.com',370,230);
@@ -25,7 +25,8 @@ export function synthAcme(drift=0){ return canvasOf(1500,2000,(c,put)=>{ c.font=
   put('NORMAL ITEM',75,665);
   const items=[['1306','ELODEP 5MG',"3X10'S",'T3061012','1','124.20','21.60','124.20','21.60','3','3.73','142.07'],['1307','ELODEP 10MG',"3x10's",'T3071008','1','225.60','39.30','225.60','39.30','3','6.77','258.13'],['1312','ORBAS PLUS 20/12.5',"3X10'S",'T3121006','1','180.60','31.50','180.60','31.50','3','5.42','206.68'],['1316','GLICLID MR 30MG',"3 x 10'S",'T3161007','1','135.30','23.40','135.30','23.40','3','4.06','154.64'],['1321','ARTH-A MAX',"3x10's",'T3211017','1','270.60','47.10','270.60','47.10','3','8.12','309.58'],['1322','LOSART 50 (50 PCS)',"5x10'S",'T3221060','1','301.00','52.50','301.00','52.50','3','9.03','344.47'],['1323','AMLOTEN 50 (50 PCS)',"5x10's",'T3232001','1','225.50','39.00','225.50','39.00','3','6.76','257.74'],['1327','AZIN 500 (12 PCS)',"2x6's",'T3271074','1','315.84','54.96','315.84','54.96','3','9.48','361.32'],['1333','DEFROL',"3x10's",'T3331009','1','45.00','7.80','45.00','7.80','3','1.35','51.45'],['1334','LIMBIX',"5X10's",'T3342005','3','281.00','49.00','843.00','147.00','3','25.29','964.71'],['1336','SEVEL 800MG',"2x6's",'T3361018','1','539.76','93.96','539.76','93.96','3','16.19','617.53'],['1337','JANMET 500 (30PCS)',"3x10's",'T3371066','1','360.60','62.70','360.60','62.70','3','10.82','412.48'],['1360','RABIZOL 20MG (140)',"10 x 14'S",'T3601017','1','526.40','91.00','526.40','91.00','3','15.79','601.61'],['1364','CORTIMAX 24MG',"2x10's",'T3641004','1','449.80','78.20','449.80','78.20','3','13.49','514.51'],['1365','PROTOCID 20MG (140 PCS)',"10 X 14'S",'T3651015','1','525.00','91.00','525.00','91.00','3','15.75','600.25'],['1381','MONAS 4 OFT',"3x10's",'T3812003','1','157.50','27.30','157.50','27.30','3','4.73','180.07']];
   const colX=[75,125,495,580,685,755,830,940,1060,1130,1200,1315];
-  items.forEach((r,i)=>{ const y=725+i*30; r.forEach((t,j)=>put(t,colX[j],y+((drift&&i===12&&j<2)?drift:0))); });
+  // curl: on every third item row the right half (Trade onward) sits `curl` px lower, as a curled page prints it
+  items.forEach((r,i)=>{ const y=725+i*30; r.forEach((t,j)=>put(t,colX[j],y+((drift&&i===12&&j<2)?drift:0)+((curl&&i%3===1&&j>=5)?curl:0))); });
   let y=725+items.length*30+150; put("Customer's Signature",55,y+55); put('Prepared By',630,y+55); put('Manager / Depot - in - charge',1115,y+45);
   y+=120; c.font='16px Arial'; put('WARRANTY : We do hereby give this warranty that the goods or classes of goods above described as sold by us, do not contravene in any way provisions of section of 18 of the Drugs Act, 1940.',120,y); put('Company is not responsible if payment is made Without money Receipt.',120,y+26); put("All orders shall be considered to have been accepted by the Head office. In case of litigation, etc. proceedings shall follow in areas under jurisdiction of the company's Dhaka Office.",120,y+52); }); }
 export function synthTotals(){ return canvasOf(1200,760,(c,put)=>{ c.font='24px Arial';

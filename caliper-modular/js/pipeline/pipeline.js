@@ -10,7 +10,10 @@
      6 · characters              (section 05)
      7 · recognition             (section 06, Tesseract.js on first use)
      8 · footer split by keywords (the table ends before "Sub Total" …)
-   and then renders the gallery.
+     8b · header rule            (a known title layout fixes the columns)
+     9 · final                   (best of local + API, see final.js)
+   and then renders the gallery. Step 2b, between rectification and the
+   borders, POSTs the rectified image to the PaddleOCR API without waiting.
    ====================================================================== */
 import { $, overlay, runBtn, stepLabel, savePng, saveJson, showError } from '../dom/dom.js';
 import { S } from '../state/state.js';
@@ -22,8 +25,12 @@ import { analyseBorders, inpaintRules } from '../borderlayout/borderlayout.js';
 import { detectTextLines } from '../textlines/textlines.js';
 import { detectColumns } from '../columns/columns.js';
 import { segmentCharacters, assignCells } from '../characters/characters.js';
-import { recognizeText, buildCellTexts } from '../recognition/recognition.js';
-import { buildGallery, showStage } from '../gallery/gallery.js';
+import { recognizeText, buildCellTexts, refineCellsByColumn } from '../recognition/recognition.js';
+import { buildGallery, showStage, refreshStages } from '../gallery/gallery.js';
+import { startApiAnalysis } from '../api/api.js';
+import { buildFinal } from '../final/final.js';
+import { matchHeaderRule, applyHeaderRule } from '../headerrule/headerrule.js';
+import { updateFinalJson } from '../ui/ui.js';
 import { fitView } from '../viewport/viewport.js';
 
 export const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve()));
@@ -45,11 +52,12 @@ export function readParams(){
               erase:on('bordersErase'), feedColumns:on('bordersFeedColumns') },
     textLines:{ enabled:on('tlEnable'), minGlyphHeight:num('tlMinGlyphHeight'), maxGlyphHeight:num('tlMaxGlyphHeight'),
                 maxGlyphAspect:num('tlMaxGlyphAspect'), chainGap:num('tlChainGap'), minOverlap:num('tlMinOverlap'), minGlyphs:num('tlMinGlyphs') },
-    columns:{ enabled:on('clEnable'), minPieces:num('clMinPieces'), rowGap:num('clRowGap'), mergeGap:num('clMergeGap'),
+    columns:{ enabled:on('clEnable'), headerRules:on('clHeaderRules'), minPieces:num('clMinPieces'), rowGap:num('clRowGap'), mergeGap:num('clMergeGap'),
               minGutterWidth:num('clGutterWidth'), maxGutterCoverage:num('clGutterCoverage') },
     characters:{ enabled:on('chEnable'), joinOverlap:num('chJoinOverlap'), splitRatio:num('chSplitRatio'),
                  valleyDepth:num('chValleyDepth'), minCharWidth:num('chMinWidth') },
-    recognition:{ enabled:on('rcEnable'), language:$('rcLanguage').value, targetHeight:num('rcTargetHeight'), grayscaleEdges:on('rcGrayscale') }
+    api:{ enabled:on('apiEnable'), url:$('apiUrl').value.trim(), depth:$('apiDepth').value },
+    recognition:{ enabled:on('rcEnable'), language:$('rcLanguage').value, targetHeight:num('rcTargetHeight'), cropStyle:$('rcCrop').value, cellPass:on('rcCellPass') }
   };
 }
 
@@ -75,6 +83,7 @@ export async function runPipeline(){
   if(!S.device || !S.origImageData) return;
   const p=readParams();
   overlay.classList.add('show'); runBtn.disabled=true;
+  S.pipelineDone=false; S.api=null; S.final=null;
   const timing={};
   const step=async(label)=>{ stepLabel.textContent=label; await nextFrame(); };
   const timed=async(name,fn)=>{ const t0=performance.now(); const r=await fn(); timing[name]=performance.now()-t0; return r; };
@@ -89,6 +98,23 @@ export async function runPipeline(){
       if(p.rectify){ await step('2 · perspective rectification'); try{ rectified=rectifyPerspective(S.lensCanvas); }catch(e){ rectified=null; } }
       S.workCanvas=rectified||S.lensCanvas;
       S.workImageData=(S.workCanvas===S.origCanvas)?S.origImageData:S.workCanvas.getContext('2d').getImageData(0,0,S.W,S.H); });
+
+    /* 2b · PaddleOCR API — fire and forget: the rectified image goes out
+          now; the stage and the FINAL stages fill in whenever the answer
+          arrives, whether the pipeline is still running or long done */
+    if(p.api.enabled && p.api.url){
+      const url=p.api.url+(p.api.url.includes('?')?'&':'?')+'depth='+encodeURIComponent(p.api.depth);
+      const entry=startApiAnalysis(S.workCanvas,url);
+      S.api=entry;
+      entry.promise.then(async()=>{
+        if(S.api!==entry) return;                          // a newer run replaced this request
+        if(S.galleryPromise) await S.galleryPromise;       // never race the gallery build
+        if(S.api!==entry) return;
+        if(S.pipelineDone){ S.final=buildFinal(); updateFinalJson(); }   // both sides are in: finalise
+        $('statApi').textContent = entry.status==='done' ? Math.round(entry.ms)+' ms' : 'failed';
+        refreshStages(['api-engine','api-ocr','final-compare','final-table']);
+      });
+    }
 
     /* 3 · borders → layout → rules-erased image */
     await timed('borders', async()=>{
@@ -160,8 +186,35 @@ export async function runPipeline(){
       }
     }
 
+    /* 8b · header rule — the recognised title words name the template:
+          when one of config/headerrules.js matches, its columns replace
+          the profile's (number, order, meaning; boundaries snapped to the
+          detected gutters) and the cells follow. No match: the arbitrary
+          columns stand. */
+    S.headerRuleMatch=null;
+    if(p.columns.headerRules && S.columns && S.columns.band){
+      const m=matchHeaderRule(S.columns,S.recognition,S.api);
+      if(m && applyHeaderRule(S.columns,m)){
+        S.headerRuleMatch=m;
+        if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,S.columns);
+          if(S.recognition && S.recognition.available) S.recognition.cells=buildCellTexts(S.characters,S.columns,S.textLines.stats.reference||20); }
+      }
+    }
+
+    /* 8c · cell pass — numeric and code columns read again cell by cell
+          with a character whitelist, now that the columns are named */
+    if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.columns && S.columns.band && S.characters){
+      await step('7 · recognition · cells');
+      await refineCellsByColumn(S.recognition,S.textLines,S.characters,S.columns,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='7 · '+label; });
+    }
+
+    /* 9 · final — the best of the local analysis and the API answer (the
+          local reading alone, with a note, while the answer is pending) */
+    S.pipelineDone=true; S.final=buildFinal(); updateFinalJson();
+
     /* readout */
     const B=S.borders, TL=S.textLines, C=S.columns, CH=S.characters, RC=S.recognition;
+    $('statApi').textContent = !S.api ? 'off' : S.api.status==='done' ? Math.round(S.api.ms)+' ms' : S.api.status==='error' ? 'failed' : 'pending';
     $('statChars').textContent = CH ? CH.stats.characters.toLocaleString() : '—';
     $('statRecognised').textContent = (RC&&RC.available) ? RC.recognised.toLocaleString() : '—';
     $('statRules').textContent = B ? B.horizontalRules.length+' / '+B.verticalRules.length : '—';
@@ -172,7 +225,7 @@ export async function runPipeline(){
     $('timing').innerHTML=Object.entries(timing).map(([k,v])=>`<span class="k">${k}</span> <span class="v">${v.toFixed(0)}ms</span>`).join(' · ');
 
     await step('6 · rendering stage outputs');
-    await buildGallery();
+    S.galleryPromise=buildGallery(); await S.galleryPromise;
     savePng.disabled=false; saveJson.disabled=false;
     showStage(S.stage); fitView();
   }catch(e){

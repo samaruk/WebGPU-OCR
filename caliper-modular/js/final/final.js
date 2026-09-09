@@ -1,0 +1,399 @@
+/* ======================================================================
+   FINAL  ·  the best of the local analysis and the OCR API answer
+   Why: independent readings of the same page — the local pipeline
+   (structure from glyphs, text from Tesseract.js) and the API's engines
+   (PaddleOCR with its own layout, Tesseract 5, EasyOCR) — fail in
+   different places: PaddleOCR keeps decimal points and reads a curled
+   row whole, Tesseract 5 spells codes better, EasyOCR reads faint print.
+   The final table is rebuilt from all of them:
+     · HEADER: one title row. Its labels are the matched header rule's
+       (the printed titles, spelled right), else the API's title words,
+       else the local ones. Local band rows above the title row (a
+       key-value block glued to the table) are not item rows and go.
+     · ROWS: the API's item rows below the title where the API found a
+       table (PaddleOCR reads a curled row as one row where the local
+       join splits or swallows it), each with the local rows it covers
+       attached; local rows no API row covers are rows of their own;
+       leading and trailing rows that fill hardly any column (a section
+       title, a reference number) go.
+     · COLUMNS: the local column structure, keyed by the rule when one
+       matched; every API region is split into words and each word goes
+       to the column under its centre.
+     · TEXT per cell by vote among the four readings — PaddleOCR, EasyOCR,
+       Tesseract 5 and the local one: a reading at least two of them
+       agree on wins (spelled the way the engine highest in that order
+       spelled it, in a numeric column the clean spelling); when no two
+       agree, PaddleOCR first: its text when it is confident, the local
+       reading only where it has none (in a numeric column only a
+       well-formed number) or where it is unsure and the local reading
+       is clearly more confident and no less plausible (chooseText); and
+       without a PaddleOCR reading the most confident other engine
+       stands in for it.
+   Without a local table the API table is taken as it is; while the API
+   answer is pending or failed, the local reading stands with a note.
+   ====================================================================== */
+import { S } from '../state/state.js';
+import { apiRegions, apiEngineList } from '../api/api.js';
+import { analyseNumbers } from '../numcheck/numcheck.js';
+
+const norm=s=>(s||'').replace(/\s+/g,' ').trim();
+const key=s=>norm(s).toLowerCase().replace(/[\s.,:;'"`·]/g,'');
+const numeric=s=>{ const t=norm(s).replace(/\s/g,''); return t.length>0 && /^[-+]?[\d,]*\.?\d+%?$/.test(t); };
+const wellFormed=s=>/^[-+]?\d[\d,]*(\.\d+)?%?$/.test(norm(s).replace(/\s/g,''));
+const shape=s=>norm(s).replace(/[0-9]/g,'d').replace(/[A-Za-z]/g,'a').replace(/[^da]/g,'p').replace(/(.)\1+/g,'$1');
+
+export function buildFinal(){
+  const C=S.columns, RC=S.recognition, A=S.api;
+  const api=(A&&A.status==='done')?A.response:null;
+  const localTable=(C&&C.band)?{rows:C.band.rows.length, cols:C.columns.length, footerCut:C.band.footerCut||'', headerRule:C.headerRule?C.headerRule.name:null}:null;
+  const apiTable=(api&&api.deep&&api.deep.table)?{rows:api.deep.table.rowCount, cols:api.deep.table.columnCount, footerCut:api.deep.table.footerCut||'', first:api.deep.table.firstRow, last:api.deep.table.lastRow}:null;
+  const out={apiStatus:A?A.status:'disabled', apiError:A?A.error:null, apiMs:A?A.ms:0, localTable, apiTable,
+             fields:(api&&api.deep)?api.deep.fields:null, source:null, header:null, grid:null, rows:null, stats:null, note:''};
+  const engines=apiEngineList(api);
+  out.engines=engines.map(e=>({name:e.name, label:e.label, status:e.status, ms:Math.round(e.ms||0), regions:e.regions.length, error:e.error}));
+  if(!A) out.note='API disabled (section 00c) — local reading only';
+  else if(A.status==='pending') out.note='API answer pending — local reading shown';
+  else if(A.status==='error') out.note='API failed: '+A.error;
+
+  /* no local table: the API table as it is */
+  if(!localTable){
+    if(apiTable){
+      out.source='api';
+      // the API's own vote among its engines when it ran more than one
+      const T=api.deep.table;
+      out.grid=T.cells.map((row,ri)=>row.map((t,ci)=>{
+        const layoutRow=api.deep.rows[T.firstRow+ri], cell=layoutRow&&layoutRow.cells?layoutRow.cells[ci]:null;
+        const others=Object.keys(T.engineCells||{}).map(name=>({name, text:T.engineCells[name][ri][ci], conf:100*((T.engineConfidence&&T.engineConfidence[name][ri][ci])||0)})).filter(o=>o.text);
+        const text=T.consensus?T.consensus[ri][ci]:t, src=T.consensusSource?T.consensusSource[ri][ci]:(t?'paddle':'');
+        const source=!text?'empty':src.startsWith('vote')?'vote':src==='paddle'?'api':src;
+        return {text, source, votes:src.startsWith('vote')?src.slice(5).split('+'):null, local:'', api:t, others, localConf:0, apiConf:100*(T.confidence[ri][ci]||0), bb:cell&&cell.bbox?cell.bbox:null};
+      }));
+      out.rows=out.grid.map((_,ri)=>({source:'api', y:api.deep.rows[api.deep.table.firstRow+ri].bbox.y0}));
+      out.stats=count(out.grid,out.rows);
+      out.note=(out.note?out.note+' · ':'')+'no local table — the API table stands';
+    } else out.note=(out.note?out.note+' · ':'')+'no table from either side';
+    return out;
+  }
+
+  out.source='local';
+  const cols=C.columns;
+  // the column under x, else the nearest one (a word whose centre falls in
+  // a gutter still belongs to the table); nothing when it is a column
+  // width away from every column
+  const colOf=xp=>{ let ci=-1, bd=1/0; cols.forEach((c,i)=>{ const d=xp<c.gutterX0?c.gutterX0-xp:xp>c.gutterX1+1?xp-c.gutterX1-1:0; if(d<bd){ bd=d; ci=i; } });
+    return ci>=0 && bd<=Math.max(8,0.5*(cols[ci].gutterX1-cols[ci].gutterX0)) ? ci : -1; };
+
+  /* ---- API words -------------------------------------------------------
+     A PaddleOCR region often spans several columns ("2x10's T3641004 1"),
+     so every region is split into its words, each placed along the box
+     by character count; every WORD then goes to the column under its
+     centre, and words in one cell are joined left to right.           */
+  const words=[], extraWords=[];                                  // PaddleOCR's words carry the rows and fills; the other engines' only compete per cell
+  const pushWord=(text,x0,x1,b,conf,engine='paddle')=>{
+    const sink=engine==='paddle'?words:extraWords;
+    // a word whose box straddles a column boundary ("VIALC0321007",
+    // "T30610121", "124.2021.60") is cut at the character under that
+    // boundary: unit | batch, batch | qty, trade | VAT
+    const cy=(b.y0+b.y1)/2, xp0=C.toDeskewedX(x0,cy), xp1=C.toDeskewedX(x1,cy), w=Math.max(1,xp1-xp0);
+    const hits=[]; cols.forEach((c,ci)=>{ const o=Math.min(xp1,c.gutterX1+1)-Math.max(xp0,c.gutterX0); if(o>=0.25*w && o>=3) hits.push(ci); });
+    if(hits.length>=2 && text.length>=2){
+      // where to cut the text: the local character boxes under the region
+      // count how many characters sit left of the boundary (a proportional
+      // guess only when the character stage has not covered the region —
+      // "VIAL" is narrower than a third of "VIALC0321007")
+      // a local box twice the median width holds two touching characters
+      // ("VI"): boxes count by their width, so the cut lands on the letter
+      const boxes=(S.characters?S.characters.characters:[]).filter(ch=>{ const cy2=(ch.bb.y0+ch.bb.y1)/2; if(cy2<b.y0-2||cy2>b.y1+2) return false; const cxp=C.toDeskewedX((ch.bb.x0+ch.bb.x1)/2,cy2); return cxp>=xp0-2 && cxp<=xp1+2; })
+        .map(ch=>({x:C.toDeskewedX((ch.bb.x0+ch.bb.x1)/2,(ch.bb.y0+ch.bb.y1)/2), w:ch.bb.x1-ch.bb.x0+1})).sort((p,q)=>p.x-q.x);
+      const widths=boxes.map(c=>c.w).sort((p,q)=>p-q), medW=widths.length?widths[widths.length>>1]:1;
+      const chars=boxes.map(c=>c.x), counts=boxes.map(c=>Math.max(1,Math.round(c.w/(1.4*medW))));
+      const total=counts.reduce((p,q)=>p+q,0);
+      const covered=total>=0.7*text.length && total<=1.3*text.length;
+      let start=0, sx0=xp0;
+      for(let k=0;k<hits.length-1;k++){
+        const xb=(cols[hits[k]].gutterX1+cols[hits[k+1]].gutterX0)/2;
+        // the cut falls in the widest gap between local characters near the
+        // boundary (the space the engine dropped), scaled to the text length
+        let cut;
+        if(covered){
+          let gi=-1, gw=-1;
+          for(let i=0;i<chars.length-1;i++){ const mid=(chars[i]+chars[i+1])/2; if(Math.abs(mid-xb)>0.15*w) continue; const gap=chars[i+1]-chars[i]; if(gap>gw){ gw=gap; gi=i; } }
+          let left=0; if(gi>=0){ for(let i=0;i<=gi;i++) left+=counts[i]; } else chars.forEach((x,i)=>{ if(x<xb) left+=counts[i]; });
+          cut=Math.round(text.length*left/total);
+        } else cut=Math.round(text.length*(xb-xp0)/w);
+        cut=Math.max(start+1,Math.min(text.length-1,cut));
+        if(cut<=start) continue;
+        const sx1=xp0+w*cut/text.length;
+        const cxp=(sx0+sx1)/2; const q=C.toImage(cxp,cy-C.slope*(x0+x1)/2);
+        sink.push({engine, text:text.slice(start,cut), confidence:conf, bbox:{x0:q.x-(sx1-sx0)/2,y0:b.y0,x1:q.x+(sx1-sx0)/2,y1:b.y1}, xp:cxp, yp:cy-C.slope*((x0+x1)/2)});
+        start=cut; sx0=sx1;
+      }
+      const cxp=(sx0+xp1)/2; const q=C.toImage(cxp,cy-C.slope*(x0+x1)/2);
+      sink.push({engine, text:text.slice(start), confidence:conf, bbox:{x0:q.x-(xp1-sx0)/2,y0:b.y0,x1:q.x+(xp1-sx0)/2,y1:b.y1}, xp:cxp, yp:cy-C.slope*((x0+x1)/2)});
+      return;
+    }
+    const cx=(x0+x1)/2;
+    sink.push({engine, text, confidence:conf, bbox:{x0,y0:b.y0,x1,y1:b.y1}, xp:C.toDeskewedX(cx,cy), yp:cy-C.slope*cx});
+  };
+  for(const eng of engines) for(const rg of eng.regions){
+    const b=rg.bbox; if(!b) continue;
+    const parts=(rg.text||'').split(/\s+/).filter(Boolean); const total=(parts.reduce((s,p)=>s+p.length,0)+Math.max(0,parts.length-1))||1; let acc=0;
+    for(const p of parts){ const x0=b.x0+(b.x1-b.x0)*acc/total, x1=b.x0+(b.x1-b.x0)*(acc+p.length)/total; acc+=p.length+1;
+      pushWord(p,x0,x1,b,rg.confidence,eng.name); }
+  }
+  const wordsIn=(yp0,yp1)=>words.filter(w=>w.yp>=yp0-1 && w.yp<=yp1+1);
+  const fillOf=(yp0,yp1)=>{ const hit=new Set(); for(const w of wordsIn(yp0,yp1)){ const ci=colOf(w.xp); if(ci>=0) hit.add(ci); } return hit.size; };
+  const localText=(ri,ci)=>norm(RC&&RC.available&&RC.cells?RC.cells[ri][ci]:'').replace(/·/g,'');
+
+  /* ---- title rows -------------------------------------------------------
+     The header rule knows which rows its titles came from; without a
+     rule, the leading band rows that carry no digit at all are titles. */
+  const band=C.band.rows;
+  const titleSet=new Set();
+  if(C.headerRule && C.headerRule.titleRows) for(const idx of C.headerRule.titleRows){ const bi=band.findIndex(r=>r.index===idx); if(bi>=0) titleSet.add(bi); }
+  if(!titleSet.size){                                              // no rule: digit-free rows among the first four are titles
+    for(let bi=0;bi<Math.min(4,band.length);bi++){ const r=band[bi];
+      const text=cols.map((c,ci)=>localText(bi,ci)).join(' ')+' '+wordsIn(r.row.dy.y0,r.row.dy.y1).map(w=>w.text).join(' ');
+      if(!/\d/.test(text) && /[a-z]{3}/i.test(text)) titleSet.add(bi); }
+  }
+  const titleRows=[...titleSet].sort((a,b)=>a-b);
+  const lastTitle=titleRows.length?titleRows[titleRows.length-1]:-1;
+
+  /* header labels: rule labels, else the API's title words per column, else the local ones */
+  const headerLabels=cols.map((c,ci)=>{
+    if(c.label) return c.label;
+    const apiWords=[]; for(const bi of titleRows) for(const w of wordsIn(band[bi].row.dy.y0,band[bi].row.dy.y1)) if(colOf(w.xp)===ci) apiWords.push(w);
+    if(apiWords.length) return norm(apiWords.sort((a,b)=>a.yp-b.yp||a.xp-b.xp).map(w=>w.text).join(' '));
+    return norm(titleRows.map(bi=>localText(bi,ci)).join(' '));
+  });
+  if(titleRows.length){
+    const y0=Math.min(...titleRows.map(bi=>band[bi].row.ink.y0)), y1=Math.max(...titleRows.map(bi=>band[bi].row.ink.y1)), ym=(y0+y1)/2;
+    out.header={labels:headerLabels, rule:C.headerRule?C.headerRule.name:null,
+      cells:cols.map(c=>{ const a=C.toImage(c.gutterX0,ym), b=C.toImage(c.gutterX1,ym); return {x0:Math.round(a.x),y0,x1:Math.round(b.x),y1}; })};
+  } else out.header={labels:headerLabels, rule:C.headerRule?C.headerRule.name:null, cells:null};
+
+  /* ---- rows -------------------------------------------------------------
+     The API's item rows come first where the API found a table: PaddleOCR
+     reads whole regions, so a curled row it saw is one row, while the
+     local join may have split it or swallowed it into a neighbour. Every
+     local band row below the title is attached to the API row holding
+     its centre (its recognised text then competes cell by cell); a local
+     row no API row covers is a row of its own. An API row has to fill
+     columns like an item row, else it is one of the API's own key-value
+     rows glued to its table. */
+  const rowList=[];
+  const localRows=[]; band.forEach((r,bi)=>{ if(bi>lastTitle) localRows.push({ri:bi, yp0:r.row.dy.y0, yp1:r.row.dy.y1, y0:r.row.ink.y0, y1:r.row.ink.y1}); });
+  const localTextFill=r=>{ const hit=new Set(); for(const w of wordsIn(r.yp0,r.yp1)){ const ci=colOf(w.xp); if(ci>=0) hit.add(ci); } cols.forEach((c,ci)=>{ if(localText(r.ri,ci)) hit.add(ci); }); return hit.size; };
+  const localFills=localRows.map(localTextFill).sort((a,b)=>a-b);
+  let itemFill=localFills.length?localFills[localFills.length>>1]:0;
+  const topY=lastTitle>=0?band[lastTitle].row.dy.y1:(band[0]?band[0].row.dy.y0:0);
+  if(api && api.deep && api.deep.table && api.deep.table.rowCount>=3){
+    const t=api.deep.table, cand=[];
+    for(let k=t.firstRow;k<=t.lastRow;k++){
+      const ar=api.deep.rows[k]; if(!ar || ar.kind!=='table' || !ar.bbox) continue;
+      const b=ar.bbox, cx=(b.x0+b.x1)/2, cy=(b.y0+b.y1)/2, yp=cy-C.slope*cx;
+      if(yp<=topY) continue;                                          // only below the title: the local top is trusted
+      if(!/\d/.test((ar.cells||[]).map(c=>c.text).join(' '))) continue;
+      cand.push({source:'api', ri:-1, apiRow:k, yp0:b.y0-C.slope*cx, yp1:b.y1-C.slope*cx, y0:b.y0, y1:b.y1, localRis:[]});
+    }
+    if(!itemFill && cand.length){ const f=cand.map(r=>fillOf(r.yp0,r.yp1)).sort((a,b)=>a-b); itemFill=f[f.length>>1]; }
+    for(const r of cand) if(fillOf(r.yp0,r.yp1)>=0.6*itemFill) rowList.push(r);
+  }
+  for(const lr of localRows){
+    const yc=(lr.yp0+lr.yp1)/2;
+    let host=null, bd=1/0;                                          // the API row whose centre is nearest among those holding this row's centre
+    for(const r of rowList){ if(r.source!=='api') continue;
+      const inside=yc>=r.yp0-1 && yc<=r.yp1+1, overlap=Math.min(r.yp1,lr.yp1)-Math.max(r.yp0,lr.yp0);
+      if(!inside && overlap<=0.5*(lr.yp1-lr.yp0)) continue;
+      const d=Math.abs(yc-(r.yp0+r.yp1)/2); if(d<bd){ bd=d; host=r; } }
+    if(host){ host.localRis.push(lr.ri); continue; }
+    rowList.push({source:'local', ri:lr.ri, yp0:lr.yp0, yp1:lr.yp1, y0:lr.y0, y1:lr.y1, localRis:[lr.ri]});
+  }
+  rowList.sort((a,b)=>a.yp0-b.yp0);
+  const rowFill=r=>{ const hit=new Set(); for(const w of wordsIn(r.yp0,r.yp1)){ const ci=colOf(w.xp); if(ci>=0) hit.add(ci); }
+    for(const ri of r.localRis) cols.forEach((c,ci)=>{ if(localText(ri,ci)) hit.add(ci); }); return hit.size; };
+  // leading / trailing rows that fill hardly any column (a section title
+  // under the header, a reference number under the table) are not items
+  while(rowList.length && rowFill(rowList[rowList.length-1])<0.4*itemFill) rowList.pop();
+  while(rowList.length && rowFill(rowList[0])<0.4*itemFill) rowList.shift();
+
+  // curled rows overlap in y: a word inside two rows' extents goes to
+  // the row whose centre is nearest
+  const rowOf=yp=>{ let best=-1,bd=1/0; rowList.forEach((r,i)=>{ if(yp<r.yp0-1||yp>r.yp1+1) return; const d=Math.abs(yp-(r.yp0+r.yp1)/2); if(d<bd){ bd=d; best=i; } }); return best; };
+  const apiCell=rowList.map(()=>cols.map(()=>[]));
+  for(const w of words){
+    const ri=rowOf(w.yp); if(ri<0) continue;
+    const ci=colOf(w.xp); if(ci<0) continue;
+    apiCell[ri][ci].push(w);
+  }
+  /* the other engines' words into the same cells */
+  const engCell={}; for(const eng of engines) if(eng.name!=='paddle' && eng.regions.length) engCell[eng.name]=rowList.map(()=>cols.map(()=>[]));
+  for(const w of extraWords){
+    if(!engCell[w.engine]) continue;
+    const ri=rowOf(w.yp); if(ri<0) continue;
+    const ci=colOf(w.xp); if(ci<0) continue;
+    engCell[w.engine][ri][ci].push(w);
+  }
+  /* local confidence per cell: mean of the characters' confidences */
+  const localConf=band.map(()=>cols.map(()=>({sum:0,n:0})));
+  if(S.characters) for(const ch of S.characters.characters){ if(!ch.cell || !ch.text || ch.confidence===undefined) continue;
+    const s=localConf[ch.cell.row]&&localConf[ch.cell.row][ch.cell.col]; if(s){ s.sum+=ch.confidence; s.n++; } }
+
+  const grid=rowList.map((row,i)=>cols.map((c,ci)=>{
+    const local=norm(row.localRis.map(ri=>localText(ri,ci)).filter(Boolean).join(' '));
+    const rgs=apiCell[i][ci].slice().sort((a,b)=>a.bbox.x0-b.bbox.x0);
+    const apiText=norm(rgs.map(g=>g.text).join(' '));
+    const apiConf=rgs.length?100*rgs.reduce((s,g)=>s+(g.confidence||0),0)/rgs.length:0;
+    let lsum=0,ln=0; for(const ri of row.localRis){ const lc=localConf[ri][ci]; lsum+=lc.sum; ln+=lc.n; } const lConf=ln?lsum/ln:0;
+    let bb=null; for(const ri of row.localRis){ const cell=C.cells[ri][ci]; if(cell){ bb=bb?{x0:Math.min(bb.x0,cell.bb.x0),y0:Math.min(bb.y0,cell.bb.y0),x1:Math.max(bb.x1,cell.bb.x1),y1:Math.max(bb.y1,cell.bb.y1)}:{...cell.bb}; } }
+    const ym=(row.y0+row.y1)/2, ca=C.toImage(c.gutterX0,ym), cb=C.toImage(c.gutterX1,ym);
+    const box={x0:Math.round(ca.x),y0:Math.round(row.y0),x1:Math.round(cb.x),y1:Math.round(row.y1)};   // the whole cell: row band × column span
+    if(!bb) bb=box;
+    const others=Object.keys(engCell).map(name=>{ const gs=engCell[name][i][ci].slice().sort((a,b)=>a.bbox.x0-b.bbox.x0);
+      return {name, text:norm(gs.map(g=>g.text).join(' ')), conf:gs.length?100*gs.reduce((s,g)=>s+(g.confidence||0),0)/gs.length:0}; }).filter(o=>o.text);
+    return {local, api:apiText, others, localConf:lConf, apiConf, bb, box, text:'', source:'empty'};
+  }));
+
+  /* ---- per-column statistics, then the choice --------------------------- */
+  const numericCol=cols.map((c,ci)=>{ let n=0,t=0; for(const row of grid){ const g=row[ci]; for(const s of [g.local,g.api].concat((g.others||[]).map(o=>o.text))) if(s){ t++; if(numeric(s)) n++; } } return t>0 && n>=0.6*t; });
+  const shapeFreq=cols.map((c,ci)=>{ const f=new Map(); for(const row of grid){ const g=row[ci]; for(const s of [g.local,g.api].concat((g.others||[]).map(o=>o.text))) if(s){ const sh=shape(s); f.set(sh,(f.get(sh)||0)+1); } } return f; });
+  grid.forEach(row=>row.forEach((g,ci)=>{
+    Object.assign(g, chooseCell(g,{apiPresent:!!api, numeric:numericCol[ci], shapeFreq:shapeFreq[ci]}));
+  }));
+  /* ---- repairs on the finished grid --------------------------------------
+     · a row the local join still left in two halves (the right half a row
+       of its own) shows as two neighbouring rows whose filled columns do
+       not overlap and together make one item row: they are joined;
+     · a row without any text at all (a dotted rule the text stage kept)
+       goes. */
+  const filled=row=>{ const f=new Set(); row.forEach((g,ci)=>{ if(g.text) f.add(ci); }); return f; };
+  const itemCols=(()=>{ const n=grid.map(r=>filled(r).size).filter(x=>x>0).sort((a,b)=>a-b); return n.length?n[n.length>>1]:cols.length; })();
+  for(let i=0;i<grid.length-1;i++){
+    const A=filled(grid[i]), B=filled(grid[i+1]);
+    if(!A.size || !B.size || A.size>=itemCols || B.size>=itemCols) continue;
+    if([...A].some(ci=>B.has(ci)) || A.size+B.size<0.6*itemCols) continue;
+    grid[i+1].forEach((g,ci)=>{ if(!grid[i][ci].text) grid[i][ci]=g; });
+    rowList[i].localRis=rowList[i].localRis.concat(rowList[i+1].localRis); if(rowList[i].source==='local' && rowList[i+1].source==='api') rowList[i].source='api';
+    rowList[i].yp1=Math.max(rowList[i].yp1,rowList[i+1].yp1); rowList[i].y1=Math.max(rowList[i].y1,rowList[i+1].y1);
+    grid.splice(i+1,1); rowList.splice(i+1,1); i--;
+  }
+  for(let i=grid.length-1;i>=0;i--) if(!filled(grid[i]).size){ grid.splice(i,1); rowList.splice(i,1); }
+
+  out.grid=grid; out.rows=rowList; out.stats=count(grid,rowList);
+  out.stats.titleRows=titleRows.length; out.stats.droppedTop=Math.max(0,lastTitle+1-titleRows.length);
+  return out;
+}
+
+/* The final table as plain data: the engines that took part, header
+   labels and keys, one object per row (cell texts by key, the source of
+   every cell — "vote:paddle+tesseract5", "agreed", "api", "local", … —
+   and every engine's reading of the cell), the statistics. */
+export function finalTableJson(F){
+  if(!F || !F.grid) return {table:false, note:F?F.note:'no run'};
+  const C=S.columns, keys=(C&&C.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
+  const labels=F.header?F.header.labels:keys;
+  const json={
+    table:true, rule:F.header?F.header.rule:null, note:F.note||'',
+    engines:(F.engines||[]).concat([{name:'local', label:'Tesseract.js (browser)', status:S.recognition&&S.recognition.available?'ok':'off'}]),
+    header:{labels, keys},
+    rows:F.grid.map((row,ri)=>{ const o={row:ri+1, source:F.rows?F.rows[ri].source:F.source, cells:{}, sources:{}, readings:{}};
+      row.forEach((g,ci)=>{ o.cells[keys[ci]]=g.text; o.sources[keys[ci]]=g.source+(g.votes?':'+g.votes.join('+'):'');
+        const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[keys[ci]]=r; }); return o; }),
+    stats:F.stats
+  };
+  /* the arithmetic check of the number columns (numcheck): per row the
+     status of every number cell and the corrected text where a value was
+     filled from the others or put right; the roles and relations used */
+  try{
+    const nc=analyseNumbers(json);
+    json.numberCheck={roles:nc.roles, model:nc.model, summary:nc.summary, note:nc.note};
+    json.rows.forEach((row,ri)=>{ const r=nc.rows[ri]; if(!r) return;
+      row.isTotal=r.isTotal; row.check={}; row.corrected={};
+      for(const k in r.cells){ const c=r.cells[k]; if(!nc.roles[k]) continue; row.check[k]=c.status+(c.note?' — '+c.note:'');
+        if((c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined) row.corrected[k]=c.fixedText; } });
+  }catch(e){ json.numberCheck={error:String(e&&e.message||e)}; }
+  return json;
+}
+
+/* One cell from all its readings. cands: PaddleOCR (api), the API's other
+   engines (others) and the local one, each with a confidence 0–100.
+     · a text at least two ENGINE FAMILIES agree on (same letters and
+       digits; spaces and punctuation aside) wins — Tesseract 5 on the
+       server and Tesseract.js in the browser are the same engine and
+       share their mistakes, so together they are one voice, not two;
+       the group with the most families, then the one holding PaddleOCR,
+       then the more confident; it is spelled the way the engine highest
+       in ENGINE_ORDER spelled it, in a numeric column the way that gives
+       one clean number;
+     · in a numeric column a reading that is not one clean number ("~187",
+       "7 1") does not vote while a clean one exists — a pen tick read as
+       a character is not a second opinion on the digits;
+     · otherwise the pairwise rule between the local reading and the
+       PaddleOCR one (chooseText) — with the most confident other engine
+       standing in when PaddleOCR read nothing there.                   */
+const ENGINE_ORDER=['paddle','easyocr','tesseract5','local'];
+const FAMILY={paddle:'paddle', easyocr:'easyocr', tesseract5:'tesseract', local:'tesseract'};
+export function chooseCell(g,ctx){
+  const cands=[];
+  if(g.api) cands.push({name:'paddle', text:g.api, conf:g.apiConf||0});
+  for(const o of g.others||[]) if(o.text) cands.push({name:o.name, text:o.text, conf:o.conf||0});
+  if(g.local) cands.push({name:'local', text:g.local, conf:g.localConf||0});
+  if(!cands.length) return {text:'', source:'empty', votes:null};
+  const voters=ctx.numeric && cands.some(c=>tidy(c.text)) ? cands.filter(c=>tidy(c.text)) : cands;
+  const groups=new Map();
+  for(const c of voters){ const k=key(c.text); if(!k) continue; if(!groups.has(k)) groups.set(k,[]); groups.get(k).push(c); }
+  const sum=arr=>arr.reduce((s,c)=>s+c.conf,0), hasPaddle=arr=>arr.some(c=>c.name==='paddle')?1:0;
+  const families=arr=>new Set(arr.map(c=>FAMILY[c.name]||c.name)).size;
+  const ranked=[...groups.values()].sort((a,b)=>families(b)-families(a) || b.length-a.length || hasPaddle(b)-hasPaddle(a) || sum(b)-sum(a));
+  if(ranked.length && families(ranked[0])>=2){
+    const grp=ranked[0].slice().sort((a,b)=>ENGINE_ORDER.indexOf(a.name)-ENGINE_ORDER.indexOf(b.name));
+    let pick=grp[0];
+    if(ctx.numeric && !tidy(pick.text)){ const t=grp.find(c=>tidy(c.text)); if(t) pick=t; }
+    const names=grp.map(c=>c.name);
+    return {text:pick.text, source:names.includes('paddle')&&names.includes('local')?'agreed':'vote', votes:names};
+  }
+  const eng=voters.find(c=>c.name==='paddle') || voters.filter(c=>c.name!=='local').sort((a,b)=>b.conf-a.conf)[0] || cands.find(c=>c.name==='paddle') || cands.filter(c=>c.name!=='local').sort((a,b)=>b.conf-a.conf)[0] || null;
+  const r=chooseText(g.local, eng?eng.text:'', g.localConf||0, eng?eng.conf:0, ctx);
+  if(r.source==='api' && eng && eng.name!=='paddle') r.source=eng.name;
+  r.votes=null;
+  return r;
+}
+
+/* One cell's text, API first:
+     · the API text when it has one and the local reading agrees or the
+       API is confident (≥ API_STRONG);
+     · the local reading when the API has none — in a numeric column only
+       a well-formed number (a pen tick makes Tesseract read "7 1", "17°");
+     · when the API is unsure, the local reading if it is clearly more
+       confident (by API_WEAK_MARGIN) and at least as plausible: in a
+       numeric column well-formed when the API's is, elsewhere a shape at
+       least as common in the column; otherwise the API still.          */
+const API_STRONG=85, API_WEAK_MARGIN=10;
+const tidy=t=>/^[-+]?\d[\d,]*(\.\d+)?%?$/.test(norm(t));   // one clean number, no inner spaces ("7 1" is a tick plus a digit)
+export function chooseText(L,A2,localConf,apiConf,ctx){
+  if(!L && !A2) return {text:'', source:'empty'};
+  if(!A2){
+    if(ctx.numeric && !tidy(L)) return {text:'', source:'empty', rejectedLocal:L};
+    return {text:L, source:ctx.apiPresent?'local':'local-only'};
+  }
+  if(!L) return {text:A2, source:'api'};
+  if(key(L)===key(A2)){                                            // same reading: in a numeric column the clean spelling ("337.20" over "337..20")
+    if(ctx.numeric && tidy(L)!==tidy(A2)) return {text:tidy(L)?L:A2, source:'agreed'};
+    return {text:A2.length>=L.length?A2:L, source:'agreed'}; }
+  if(apiConf>=API_STRONG) return {text:A2, source:'api'};
+  const plausible = ctx.numeric ? (tidy(L) || !tidy(A2))
+                                : ((ctx.shapeFreq.get(shape(L))||0) >= (ctx.shapeFreq.get(shape(A2))||0));
+  if(plausible && localConf>apiConf+API_WEAK_MARGIN) return {text:L, source:'local'};
+  return {text:A2, source:'api'};
+}
+
+function count(grid,rows){
+  const st={cells:0, empty:0, agreed:0, vote:0, local:0, api:0, easyocr:0, tesseract5:0, localOnly:0, both:0, localRows:0, apiRows:0};
+  for(const row of grid) for(const g of row){ st.cells++;
+    if(g.source==='empty') st.empty++; else if(g.source==='agreed') st.agreed++; else if(g.source==='vote') st.vote++; else if(g.source==='api') st.api++;
+    else if(g.source==='easyocr'||g.source==='tesseract5') st[g.source]++; else if(g.source==='local-only') st.localOnly++; else st.local++;
+    if(g.local && g.api) st.both++; }
+  for(const r of rows||[]) if(r.source==='api') st.apiRows++; else st.localRows++;
+  st.agreement=st.both?st.agreed/st.both:0;
+  return st;
+}

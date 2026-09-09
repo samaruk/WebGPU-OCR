@@ -21,24 +21,32 @@
      lines       full-line join (left → right, de-skewed)
      textlines   glyph chaining → text lines → clean binary
      columns     table band, gutters, columns, cells
+     headerrule  a known column-title layout (config/headerrules.js) fixes the columns
      characters  one symbol per box: join stacked parts, cut merged symbols
      recognition Tesseract.js per full line, symbols mapped onto the boxes
+     api         PaddleOCR web API request (fire and forget)
+     final       best of the local analysis and the API answer
      pipeline    the conductor
      render      one drawing routine per stage kind
      gallery     stage thumbnails
      viewport    pan / zoom blitter
      imageload   file decode with GPU-budget downscaling
+     watermark   large low-contrast watermark returned to the paper tone
      ui          slider bindings and export buttons
    ====================================================================== */
 import './config/config.js';
 import './state/state.js';
 import './dom/dom.js';
 import './webgpu/webgpu.js';
+import './api/api.js';
+import './final/final.js';
+import './headerrule/headerrule.js';
 import './pipeline/pipeline.js';
 import './render/render.js';
 import './gallery/gallery.js';
 import './viewport/viewport.js';
 import './imageload/imageload.js';
+import './watermark/watermark.js';
 import './ui/ui.js';
 
 import { initGPU } from './webgpu/webgpu.js';

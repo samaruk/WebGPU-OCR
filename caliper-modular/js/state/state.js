@@ -13,7 +13,9 @@ export const S={
 
   /* loaded image: source size, working size (after the pixel budget) */
   img:null, srcW:0, srcH:0, W:0, H:0, scaledFrom:null,
-  origCanvas:null, origImageData:null,          // working-size raster as loaded
+  rawCanvas:null, rawImageData:null,            // working-size raster exactly as loaded
+  origCanvas:null, origImageData:null,          // the image the pipeline starts from: raw, or raw with the watermark removed
+  watermark:null,                               // section 00 · {contrast, window, ms, watermarkPixels} once removed
 
   /* geometric correction (section 00b) */
   lensCanvas:null,                              // lens-distortion corrected
@@ -26,6 +28,9 @@ export const S={
   columns:null,                                 // section 04 · see columns.js
   characters:null,                              // section 05 · see characters.js
   recognition:null,                             // section 06 · see recognition.js
+  api:null,                                     // section 00c · PaddleOCR API request entry, see api.js
+  final:null,                                   // FINAL · best of local + API, see final.js
+  pipelineDone:false, galleryPromise:null,      // the API continuation needs both to know when to draw
 
   /* viewer */
   stage:STAGES.length-1, stageCv:null,          // current stage index + offscreen render target
