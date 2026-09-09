@@ -27,8 +27,42 @@ import { detectColumns } from '../columns/columns.js';
 import { segmentCharacters, assignCells } from '../characters/characters.js';
 import { recognizeText, buildCellTexts, refineCellsByColumn } from '../recognition/recognition.js';
 import { buildGallery, showStage, refreshStages } from '../gallery/gallery.js';
+import { STAGES } from '../config/config.js';
 import { startApiAnalysis } from '../api/api.js';
+import { startProductMatch } from '../products/products.js';
+
+/* the product match of the final table: like the API, an entry in
+   S.products that settles on its own; the PRODUCTS stage and the JSON
+   redraw when it does */
+function startProducts(){
+  const entry=startProductMatch(S.final); S.products=entry;
+  entry.promise.then(async()=>{ if(S.products!==entry) return; if(S.galleryPromise) await S.galleryPromise; if(S.products!==entry) return;
+    if(S.pipelineDone){ updateFinalJson(); refreshStages(['products-match']); } });
+}
 import { buildFinal } from '../final/final.js';
+
+/* 8b again, once the API answer is in: the header rule is matched on the
+   title words of BOTH engines. When the local words alone did not give an
+   exact match (the profile's columns stood, only named), the rule may match
+   now — its columns replace the profile's, the cells follow and the numeric
+   columns are read again cell by cell — before the final table is built.
+   Returns true when the columns changed. */
+async function headerRuleWithApi(p){
+  const C=S.columns;
+  if(!p.columns.headerRules || !C || !C.band || !S.api || S.api.status!=='done') return false;
+  if(C.headerRule && /^exact/.test(C.headerRule.mode||'')) return false;   // the rule already drove the columns
+  const before=JSON.stringify((C.columns||[]).map(c=>[c.key,Math.round(c.gutterX0),Math.round(c.gutterX1)]));
+  const m=matchHeaderRule(C,S.recognition,S.api);
+  if(!m || !applyHeaderRule(C,m)) return false;
+  S.headerRuleMatch=m;
+  const after=JSON.stringify((C.columns||[]).map(c=>[c.key,Math.round(c.gutterX0),Math.round(c.gutterX1)]));
+  if(after===before) return false;
+  if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,C);
+    if(S.recognition && S.recognition.available) S.recognition.cells=buildCellTexts(S.characters,C,S.textLines.stats.reference||20); }
+  if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.characters){
+    try{ await refineCellsByColumn(S.recognition,S.textLines,S.characters,C,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='7 · '+label; }); }catch(e){ console.warn('cell pass after the API answer failed', e); } }
+  return true;
+}
 import { matchHeaderRule, applyHeaderRule } from '../headerrule/headerrule.js';
 import { updateFinalJson } from '../ui/ui.js';
 import { fitView } from '../viewport/viewport.js';
@@ -83,7 +117,7 @@ export async function runPipeline(){
   if(!S.device || !S.origImageData) return;
   const p=readParams();
   overlay.classList.add('show'); runBtn.disabled=true;
-  S.pipelineDone=false; S.api=null; S.final=null;
+  S.pipelineDone=false; S.api=null; S.final=null; S.products=null;
   const timing={};
   const step=async(label)=>{ stepLabel.textContent=label; await nextFrame(); };
   const timed=async(name,fn)=>{ const t0=performance.now(); const r=await fn(); timing[name]=performance.now()-t0; return r; };
@@ -110,9 +144,12 @@ export async function runPipeline(){
         if(S.api!==entry) return;                          // a newer run replaced this request
         if(S.galleryPromise) await S.galleryPromise;       // never race the gallery build
         if(S.api!==entry) return;
-        if(S.pipelineDone){ S.final=buildFinal(); updateFinalJson(); }   // both sides are in: finalise
+        let columnsChanged=false;
+        if(S.pipelineDone){
+          columnsChanged=await headerRuleWithApi(p);         // the title words of both engines: a rule missed on the local words alone may match now
+          S.final=buildFinal(); updateFinalJson(); startProducts(); }   // both sides are in: finalise, match the products again
         $('statApi').textContent = entry.status==='done' ? Math.round(entry.ms)+' ms' : 'failed';
-        refreshStages(['api-engine','api-ocr','final-compare','final-table']);
+        refreshStages(columnsChanged ? STAGES.map(st=>st.kind) : ['api-engine','api-ocr','final-compare','final-table','num-columns','num-fields','num-rules','num-repair','products-match']);
       });
     }
 
@@ -210,7 +247,17 @@ export async function runPipeline(){
 
     /* 9 · final — the best of the local analysis and the API answer (the
           local reading alone, with a note, while the answer is pending) */
-    S.pipelineDone=true; S.final=buildFinal(); updateFinalJson();
+    S.pipelineDone=true;
+    if(S.api && S.api.status==='pending'){
+      /* the answer is still on its way: the final table, the number check and
+         the product match all wait for it — the API hook above builds them
+         the moment it lands; until then the FINAL stages say so */
+      S.final={grid:null, waitingApi:true, note:'waiting for the OCR API answer', localTable:S.columns&&S.columns.band?{rows:S.columns.band.rows.length, cols:S.columns.columns.length}:null};
+      S.products=null; updateFinalJson();
+    } else { S.final=buildFinal(); updateFinalJson();
+      /* 10 · products — the final table's items matched against the product
+            list in a worker; the PRODUCTS stage fills in when it answers */
+      startProducts(); }
 
     /* readout */
     const B=S.borders, TL=S.textLines, C=S.columns, CH=S.characters, RC=S.recognition;

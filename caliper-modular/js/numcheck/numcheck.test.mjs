@@ -2,7 +2,7 @@
 // Rows are transcribed from real invoices (Ibn Sina, Incepta, Square, Everest)
 // and an ACME-style discount layout; some cells are then corrupted the way
 // OCR does it (wrong digit, letter for digit, pen tick, blank cell).
-import { analyseNumbers, applyNumbers, parseNumber, plausibleMisread } from './numcheck.js';
+import { analyseNumbers, applyNumbers, parseNumber, plausibleMisread, ruleRelations } from './numcheck.js';
 
 let failures=0;
 const check=(cond,msg)=>{ if(!cond){ failures++; console.log('  FAIL', msg); } else console.log('  ok  ', msg); };
@@ -120,6 +120,37 @@ check(parseNumber('1 72.42')===null || parseNumber('1 72.42').value===172.42, 's
 check(plausibleMisread(112.86,'172.86') && plausibleMisread(412.30,'142.30')===false || true, 'misread heuristics run');
 check(plausibleMisread(593.30,'593.80'), 'one digit off is plausible');
 check(!plausibleMisread(9999.99,'12.00'), 'unrelated number is not plausible');
+
+
+/* ---- ACME with the rule's own relations: qty × unit TP, qty × unit VAT, total TP × % / 100, net = total TP + total VAT − discount */
+console.log('\n[R] ACME layout, relations written in the header rule');
+{
+  const keys=['name','pack','batch','qty','unittp','unitvat','totaltp','totalvat','discountpct','totaldiscount','net'];
+  const relations=[{key:'totaltp',formula:'{qty}*{unittp}'},{key:'totalvat',formula:'{qty}*{unitvat}'},{key:'totaldiscount',formula:'{totaltp}*{discountpct}/100'},{key:'net',formula:'{totaltp}+{totalvat}-{totaldiscount}'}];
+  const rows=[
+    ['1036 KETIFEN100ML','100ml','L0361040','2','41.23','7.17','82.46','14.34','3','2.48','94.32'],
+    ['1037FAST60ML','60ml','L0372020','3','15.51','2.70','46.53','8.10','3','1.41','53.22'],
+    ['1046DON-A60ML','60ML','L0461032','1','26.32','4.58','26.32','4.58','3','0.79','30.11'],
+    ['1055 X-COLD15MLDROPS','15ML','L0551005','1','22.56','3.93','22.56','393','3','0.68','25.81'],      // total VAT read without its point
+    ['1058 OXECONEMS200ML','200ml','L0581026','2','75.19','13.08','150.38','26.16','3','4.52',''],        // net missing
+    ['1019 ACLOBETN15GM','1x15gm','00191014','1','49.06','8.54','49.06','854','3','1.47','56.13'],        // total VAT read without its point
+    ['1021 DERMUPIN10GM','1x10gm','00211013','2','105.26','18.32','','36.64','3','6.32','240.84'],        // total TP missing
+  ];
+  const T=table(keys,rows); T.relations=relations;
+  const res=analyseNumbers(T); show(res);
+  check(res.roles.unittp==='unitTp' && res.roles.unitvat==='unitVat' && res.roles.totaltp==='totalTp' && res.roles.totalvat==='totalVat' && res.roles.discountpct==='discPct' && res.roles.totaldiscount==='discAmt' && res.roles.net==='net', 'the rule keys map to their roles');
+  const ids=res.model.relations.map(r=>r.id);
+  check(ids.includes('rule:totaltp') && ids.includes('rule:totalvat') && ids.includes('rule:totaldiscount') && ids.includes('rule:net'), 'the four rule relations are in force ('+ids.join(', ')+')');
+  check(!ids.some(id=>/^(ttp|tvat|tvatpct|discA|discB|net[1-5])$/.test(id)), 'the built-in variants of those targets stand aside');
+  check(cell(res,3,'totalvat').status==='fixed' && cell(res,3,'totalvat').value===3.93, 'row 4 total VAT 393 → 3.93');
+  check(cell(res,5,'totalvat').status==='fixed' && cell(res,5,'totalvat').value===8.54, 'row 6 total VAT 854 → 8.54');
+  check(cell(res,4,'net').status==='filled' && cell(res,4,'net').value===172.02, 'row 5 net filled 172.02');
+  check(cell(res,6,'totaltp').status==='filled' && cell(res,6,'totaltp').value===210.52, 'row 7 total TP filled 210.52 by qty × unit TP');
+  check(res.summary.conflicts===0, 'no conflicts');
+  const solved=ruleRelations(relations,{qty:'qty',unittp:'unitTp',totaltp:'totalTp',unitvat:'unitVat',totalvat:'totalVat',discountpct:'discPct',totaldiscount:'discAmt',net:'net'});
+  const ttp=solved.find(r=>r.id==='rule:totaltp');
+  check(Math.abs(ttp.solve('unitTp',{qty:3,totalTp:46.53})-15.51)<1e-6 && Math.abs(ttp.solve('qty',{unitTp:15.51,totalTp:46.53})-3)<1e-6, 'a rule relation solves for its other columns');
+}
 
 console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED');
 process.exit(failures?1:0);

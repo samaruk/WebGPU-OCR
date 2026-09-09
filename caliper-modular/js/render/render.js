@@ -117,6 +117,11 @@ export function renderStageInto(stage,ctx,W,H){
     case 'api-engine':      renderApiEngine(result,stage.engine,ctx,W,H,base,T); break;
     case 'final-compare':   renderFinalCompare(result,ctx,W,H,base,T); break;
     case 'final-table':     renderFinalTable(result,ctx,W,H,base,T); break;
+    case 'num-columns':     renderNumColumns(result,ctx,W,H,base,T); break;
+    case 'num-fields':      renderNumFields(result,ctx,W,H,base,T); break;
+    case 'num-rules':       renderNumRules(result,ctx,W,H,base,T,false); break;
+    case 'num-repair':      renderNumRepair(result,ctx,W,H,base,T); break;
+    case 'products-match':  renderProducts(result,ctx,W,H,base,T); break;
   }
   ctx.textBaseline='alphabetic';
 }
@@ -619,7 +624,7 @@ const SRC_COLOR={agreed:'rgba(240,245,245,.97)', vote:'rgba(255,225,130,.97)', l
 function finalHeader(F){
   const lt=F.localTable?F.localTable.rows+'×'+F.localTable.cols:'none', at=F.apiTable?F.apiTable.rows+'×'+F.apiTable.cols:'none';
   const st=F.stats||{};
-  return 'rows: '+(st.localRows||0)+' local + '+(st.apiRows||0)+' API'+(st.droppedTop?' ('+st.droppedTop+' above the title dropped)':'')+' · local table '+lt+' · API table '+at+(F.header&&F.header.rule?' · header from rule "'+F.header.rule+'"':'')+(F.note?' · '+F.note:'');
+  return 'rows: '+(st.localRows||0)+' local + '+(st.apiRows||0)+' API'+(st.droppedTop?' ('+st.droppedTop+' above the title dropped)':'')+' · local table '+lt+' · API table '+at+(F.header&&F.header.rule?' · header from rule "'+F.header.rule+'"':'')+(F.columnsMode?' · columns: '+F.columnsMode:'')+(F.keys?' · keys: '+F.keys.join(','):'')+(F.note?' · '+F.note:'');
 }
 /* the title row: the rule's labels (or the best title words) in the header cells */
 function drawFinalHeader(F,ctx,T){
@@ -630,7 +635,7 @@ function drawFinalHeader(F,ctx,T){
 }
 function renderFinalCompare(F,ctx,W,H,base,T){
   T.darken(base,0.65); ctx.textBaseline='alphabetic';
-  if(!F.grid){ T.badge('FINAL · compare · '+finalHeader(F)); return T.message('no table to compare'); }
+  if(!F.grid){ T.badge('FINAL · compare · '+finalHeader(F)); return T.message(F.waitingApi?'waiting for the OCR API answer — the final table is built from both readings once it is in':'no table to compare'); }
   const sw=T.strokeW; ctx.textBaseline='middle';
   drawFinalHeader(F,ctx,T);
   let disagree=0;
@@ -647,7 +652,7 @@ function renderFinalCompare(F,ctx,W,H,base,T){
 }
 function renderFinalTable(F,ctx,W,H,base,T){
   T.darken(base,0.65); ctx.textBaseline='alphabetic';
-  if(!F.grid){ T.badge('FINAL · '+finalHeader(F)); return T.message('no table from either side'); }
+  if(!F.grid){ T.badge('FINAL · '+finalHeader(F)); return T.message(F.waitingApi?'waiting for the OCR API answer — the final table is built from both readings once it is in':'no table from either side'); }
   const sw=T.strokeW; ctx.textBaseline='middle';
   // a real table: the header row, then every row as a band of full cells
   // (row extent × column span) with shared borders; text inside each cell
@@ -665,4 +670,202 @@ function renderFinalTable(F,ctx,W,H,base,T){
   const st=F.stats;
   const eng=(F.engines||[]).map(e=>e.name+' '+e.status).join(', ');
   T.badge('FINAL · '+F.grid.length+' rows × '+(F.grid[0]?F.grid[0].length:0)+' columns from the '+F.source+' structure · local+PaddleOCR agree '+st.agreed+', engines vote '+(st.vote||0)+', PaddleOCR '+st.api+(st.easyocr?', EasyOCR '+st.easyocr:'')+(st.tesseract5?', Tesseract 5 '+st.tesseract5:'')+', local '+st.local+', one side only '+st.localOnly+', empty '+st.empty+(eng?' · engines: '+eng+', local':'')+' · '+finalHeader(F));
+}
+
+/* ======================================================================
+   NUMBERS · number columns and row rules (js/numcheck/numcheck.js)
+   Four stages, one per step: the number columns and their roles; every
+   number field validated; the row rules on the values as read; the repair
+   (filled and fixed cells) with the rules re-run. All draw the final grid
+   (F.grid cell boxes) and read F.numbers, computed with the final table.
+   ====================================================================== */
+const ROLE_NAME={qty:'Qty', bonus:'Bonus', unitTp:'Unit TP', unitVat:'Unit VAT', vatPct:'VAT %', unitGross:'TP+VAT', unitSp:'Unit SP', totalSp:'Total SP',
+                 totalTp:'Total TP', totalVat:'Total VAT', discPct:'Disc %', discAmt:'Discount', unitDisc:'Unit disc', net:'Net', mrp:'MRP'};
+const NUM_COLOR={ok:'rgba(84,221,126,.97)', weak:'rgba(255,200,90,.97)', bad:'rgba(255,90,90,.97)', none:'rgba(150,165,170,.6)', filled:'rgba(110,200,255,.98)', fixed:'rgba(255,120,230,.98)',
+                 rowPass:'rgba(84,221,126,.22)', rowFail:'rgba(255,90,90,.26)', rowNone:'rgba(150,165,170,.14)', rowTotal:'rgba(110,160,255,.22)', column:'rgba(110,220,255,.16)'};
+/* the shared prelude: darken, bail out without a table or a check, the grid geometry */
+function numbersPrelude(F,ctx,W,H,base,T,step){
+  T.darken(base,0.65); ctx.textBaseline='alphabetic';
+  if(!F.grid){ T.badge('NUMBERS · '+step+' · '+finalHeader(F)); T.message(F.waitingApi?'waiting for the OCR API answer':'no final table yet'); return null; }
+  if(F.numbersPending){ T.badge('NUMBERS · '+step+' · waiting for the OCR API answer'); T.message('the number check runs once the API answer is in and the final table is rebuilt from both readings'); return null; }
+  const N=F.numbers;
+  if(!N || !N.rows || !N.rows.length){ T.badge('NUMBERS · '+step); T.message(N&&N.error?'number check failed: '+N.error:'number check: nothing to check'); return null; }
+  const keys=F.keys||(S.columns&&S.columns.columns||[]).map((c,i)=>c.key||('c'+(i+1)));   // F.keys: the names after the final stage's recheck
+  const rows=F.grid.map(r=>r.map(g=>g.box||g.bb));
+  const sw=T.strokeW;
+  // dark bands and cell borders, the header row with its labels
+  const bands=(F.header&&F.header.cells?[F.header.cells]:[]).concat(rows);
+  ctx.fillStyle='rgba(8,11,12,.5)';
+  for(const band of bands){ const bs=band.filter(Boolean); if(!bs.length) continue; const x0=Math.min(...bs.map(b=>b.x0)), x1=Math.max(...bs.map(b=>b.x1)), y0=Math.min(...bs.map(b=>b.y0)), y1=Math.max(...bs.map(b=>b.y1)); ctx.fillRect(x0,y0,x1-x0+1,y1-y0+1); }
+  ctx.lineWidth=sw*0.6; ctx.strokeStyle='rgba(110,200,255,.45)';
+  for(const band of bands) for(const b of band) if(b) T.rect(b);
+  if(F.header && F.header.cells){ ctx.textBaseline='middle'; F.header.cells.forEach((b,ci)=>{ const label=F.header.labels[ci]||''; if(label){ fitText(ctx,label,b,0.6); ctx.fillStyle='rgba(255,230,140,.9)'; ctx.fillText(label,b.x0+3,(b.y0+b.y1)/2); } }); }
+  const rowBand=ri=>{ const bs=rows[ri].filter(Boolean); if(!bs.length) return null; return {x0:Math.min(...bs.map(b=>b.x0)), x1:Math.max(...bs.map(b=>b.x1)), y0:Math.min(...bs.map(b=>b.y0)), y1:Math.max(...bs.map(b=>b.y1))}; };
+  const relText=N.model.relations.map(r=>r.id+(r.derived?'*':'')+' '+r.satisfied+'/'+r.testedRows).join(', ');
+  return {N, keys, rows, sw, rowBand, relText};
+}
+/* a cell's text in a colour, fitted */
+function numCellText(ctx,b,text,color,frac=0.7){ if(!b || !text) return; fitText(ctx,String(text),{x0:b.x0+2,y0:b.y0,x1:b.x1-2,y1:b.y1},frac); ctx.fillStyle=color; ctx.fillText(String(text),b.x0+3,(b.y0+b.y1)/2); }
+/* rule verdicts of one row → band colour and the failing ids */
+function rowVerdict(rules,isTotal){
+  if(isTotal) return {color:NUM_COLOR.rowTotal, label:'sub-total', fails:[]};
+  const ev=(rules||[]).filter(r=>r.status!=='skip'), fails=ev.filter(r=>r.status==='fail');
+  if(!ev.length) return {color:NUM_COLOR.rowNone, label:'no rule evaluable', fails:[]};
+  return fails.length?{color:NUM_COLOR.rowFail, label:'fail', fails}:{color:NUM_COLOR.rowPass, label:'pass', fails:[]};
+}
+
+/* step 1 · the number columns and their roles */
+function renderNumColumns(F,ctx,W,H,base,T){
+  const P=numbersPrelude(F,ctx,W,H,base,T,'number columns'); if(!P) return;
+  const {N,keys,rows,sw}=P; ctx.textBaseline='middle';
+  const nRoles=Object.keys(N.roles).length;
+  keys.forEach((k,ci)=>{
+    const role=N.roles[k]; const boxes=rows.map(r=>r[ci]).filter(Boolean); const hb=F.header&&F.header.cells?F.header.cells[ci]:null; if(hb) boxes.push(hb);
+    if(!boxes.length) return;
+    const x0=Math.min(...boxes.map(b=>b.x0)), x1=Math.max(...boxes.map(b=>b.x1)), y0=Math.min(...boxes.map(b=>b.y0)), y1=Math.max(...boxes.map(b=>b.y1));
+    if(role){ ctx.fillStyle=NUM_COLOR.column; ctx.fillRect(x0,y0,x1-x0+1,y1-y0+1); ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(110,220,255,.95)'; T.rect({x0,y0,x1,y1});
+      const lb=hb||{x0,y0:y0,x1,y1:y0+T.fontSize*1.6}; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`; T.tag(lb.x0+sw*2, Math.max(lb.y1, y0)+T.fontSize*1.3, ROLE_NAME[role]||role, 'rgba(110,220,255,.98)'); }
+    else { ctx.fillStyle='rgba(8,11,12,.35)'; ctx.fillRect(x0,y0,x1-x0+1,y1-y0+1); }
+  });
+  // the cell texts, number columns bright
+  F.grid.forEach((row,ri)=>row.forEach((g,ci)=>numCellText(ctx,rows[ri][ci],g.text,N.roles[keys[ci]]?'rgba(235,245,250,.95)':'rgba(150,165,170,.6)')));
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const roleList=keys.filter(k=>N.roles[k]).map(k=>k+' → '+(ROLE_NAME[N.roles[k]]||N.roles[k])).join(', ');
+  T.badge('NUMBERS · step 1 · '+nRoles+' number columns of '+keys.length+': '+(roleList||'none')+' · rules in force: '+(P.relText||'none')+(N.model.vatRate!==null&&N.model.vatRate!==undefined?' · VAT ratio from the rows '+N.model.vatRate+'%':'')+(N.note?' · '+N.note:''));
+}
+
+/* step 2 · every number field validated */
+function renderNumFields(F,ctx,W,H,base,T){
+  const P=numbersPrelude(F,ctx,W,H,base,T,'number fields'); if(!P) return;
+  const {N,keys,rows,sw}=P; ctx.textBaseline='middle';
+  const counts={ok:0, weak:0, bad:0, blank:0, none:0};
+  N.rows.forEach((nr,ri)=>keys.forEach((k,ci)=>{
+    const b=rows[ri]&&rows[ri][ci]; if(!b) return; const c=nr.cells[k]; if(!c) return;
+    const role=N.roles[k];
+    if(!role){ numCellText(ctx,b,c.text,'rgba(150,165,170,.55)'); return; }
+    let cls, shown;                                      // the value AS READ (c.raw); the repair stage shows the working value
+    if(c.raw!==null && c.raw!==undefined){ cls=c.weak?'weak':'ok'; shown=c.raw; }
+    else if(c.text){ cls='bad'; shown=c.text; }
+    else { cls=(c.status==='unchecked'||nr.isTotal)?'none':'bad'; shown=cls==='none'?'':'∅'; }   // a sub-total row is blank where it has nothing to total
+    counts[cls==='bad'&&!c.text?'blank':cls]++;
+    ctx.lineWidth=sw*(cls==='ok'?0.8:1.4); ctx.strokeStyle=NUM_COLOR[cls]; T.rect(b);
+    if(cls==='weak' && c.confidence!==undefined){ ctx.font=`600 ${Math.max(6,T.fontSize*0.7)}px "JetBrains Mono", monospace`; ctx.fillStyle=NUM_COLOR.weak; ctx.textAlign='right'; ctx.fillText(Math.round(c.confidence)+'%', b.x1-2, b.y0+T.fontSize*0.55); ctx.textAlign='left'; }
+    numCellText(ctx,b,shown,NUM_COLOR[cls]);
+  }));
+  drawLegend(ctx,T,W,H,[{label:'clean number '+counts.ok, color:NUM_COLOR.ok},{label:'low OCR confidence (< 60) '+counts.weak, color:NUM_COLOR.weak},{label:'not a number '+counts.bad, color:NUM_COLOR.bad},{label:'blank, number expected '+counts.blank, color:'rgba(255,90,90,.55)'},{label:'blank, no rule '+counts.none, color:NUM_COLOR.none}]);
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  T.badge('NUMBERS · step 2 · number fields: '+counts.ok+' clean, '+counts.weak+' low confidence, '+counts.bad+' not a number, '+counts.blank+' blank where a number is expected · letters O l I S B Z read as digits, thousands separators and % accepted');
+}
+
+/* step 3 (rules on the values as read) and, from the repair stage, the
+   rules re-run after the repair */
+function renderNumRules(F,ctx,W,H,base,T,after){
+  const P=numbersPrelude(F,ctx,W,H,base,T,'row rules'); if(!P) return;
+  const {N,keys,rows,sw,rowBand}=P; ctx.textBaseline='middle';
+  const tally={pass:0, fail:0, none:0, total:0};
+  N.rows.forEach((nr,ri)=>{
+    const band=rowBand(ri); if(!band) return;
+    const rules=after?nr.rules.after:nr.rules.before, v=rowVerdict(rules,nr.isTotal);
+    tally[nr.isTotal?'total':v.label==='pass'?'pass':v.label==='fail'?'fail':'none']++;
+    ctx.fillStyle=v.color; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
+    // cells of a failing rule outlined red; the failing rule ids at the right edge
+    const failCells=new Set(v.fails.flatMap(r=>r.cells||[]));
+    keys.forEach((k,ci)=>{ const b=rows[ri][ci]; if(!b) return; const c=nr.cells[k];
+      if(failCells.has(k)){ ctx.lineWidth=sw*1.4; ctx.strokeStyle=NUM_COLOR.bad; T.rect(b); }
+      numCellText(ctx,b,c&&c.value!==null&&N.roles[k]?(after&&(c.status==='fixed'||c.status==='filled')?c.fixedText:c.text):c?c.text:'', N.roles[k]?'rgba(235,245,250,.95)':'rgba(150,165,170,.55)'); });
+    if(v.fails.length){ ctx.font=`600 ${Math.max(7,T.fontSize*0.85)}px "JetBrains Mono", monospace`; ctx.textAlign='right'; ctx.fillStyle=NUM_COLOR.bad;
+      ctx.fillText(v.fails.map(r=>r.id+' ≠'+(r.expected!==undefined?' '+r.expected:'')).join(' · '), band.x1-sw*2, (band.y0+band.y1)/2); ctx.textAlign='left'; }
+  });
+  drawLegend(ctx,T,W,H,[{label:'all rules pass '+tally.pass, color:'rgba(84,221,126,.8)'},{label:'a rule fails '+tally.fail, color:'rgba(255,90,90,.85)'},{label:'no rule evaluable '+tally.none, color:'rgba(150,165,170,.6)'},{label:'sub-total row '+tally.total, color:'rgba(110,160,255,.8)'},{label:'cell of a failing rule', color:NUM_COLOR.bad}]);
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  T.badge('NUMBERS · step '+(after?'4b · rules re-run after the repair':'3 · row rules on the values as read')+': '+tally.pass+' rows pass, '+tally.fail+' fail, '+tally.none+' not evaluable, '+tally.total+' sub-total · rules (satisfied/tested on complete rows): '+(P.relText||'none')+(N.model.vatRate!=null?' · VAT ratio '+N.model.vatRate+'%':''));
+}
+
+/* step 4 · the repair: filled and fixed cells, verified / conflict, the rows banded by the rules re-run */
+function renderNumRepair(F,ctx,W,H,base,T){
+  const P=numbersPrelude(F,ctx,W,H,base,T,'repair'); if(!P) return;
+  const {N,keys,rows,sw,rowBand}=P; ctx.textBaseline='middle';
+  const S2=N.summary||{};
+  N.rows.forEach((nr,ri)=>{
+    const band=rowBand(ri); if(!band) return;
+    const v=rowVerdict(nr.rules.after,nr.isTotal); ctx.fillStyle=v.color; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
+    keys.forEach((k,ci)=>{ const b=rows[ri][ci]; if(!b) return; const c=nr.cells[k]; if(!c) return;
+      if(!N.roles[k]){ numCellText(ctx,b,c.text,'rgba(150,165,170,.55)'); return; }
+      const st=c.status;
+      const color=st==='filled'?NUM_COLOR.filled:st==='fixed'?NUM_COLOR.fixed:st==='verified'?NUM_COLOR.ok:st==='conflict'?NUM_COLOR.bad:NUM_COLOR.none;
+      if(st==='filled'||st==='fixed'||st==='conflict'){ ctx.lineWidth=sw*1.4; ctx.strokeStyle=color; T.rect(b); }
+      if(st==='fixed' && c.text){                         // the old text struck through above the new value
+        const h=b.y1-b.y0+1; ctx.font=`600 ${Math.max(6,Math.min(h*0.38,T.fontSize*0.8))}px "JetBrains Mono", monospace`; ctx.fillStyle='rgba(255,140,140,.9)';
+        ctx.fillText(c.text,b.x0+3,b.y0+h*0.27); const wdt=ctx.measureText(c.text).width; ctx.fillRect(b.x0+3,b.y0+h*0.27,wdt,Math.max(1,sw*0.5));
+        fitText(ctx,c.fixedText,{x0:b.x0+2,y0:b.y0+h/2,x1:b.x1-2,y1:b.y1},0.85); ctx.fillStyle=color; ctx.fillText(c.fixedText,b.x0+3,b.y0+h*0.74); }
+      else numCellText(ctx,b,st==='filled'?c.fixedText:(c.value!==null?c.text:(c.text||'')),color);
+    });
+  });
+  drawLegend(ctx,T,W,H,[{label:'verified by a rule '+(S2.verified||0), color:NUM_COLOR.ok},{label:'filled from the row '+(S2.filled||0), color:NUM_COLOR.filled},{label:'fixed (old text struck) '+(S2.fixed||0), color:NUM_COLOR.fixed},{label:'still in conflict '+(S2.conflicts||0), color:NUM_COLOR.bad},{label:'no rule reaches it '+((S2.unverified||0)+(S2.unchecked||0)), color:NUM_COLOR.none},{label:'row: rules pass / fail / sub-total', color:'rgba(84,221,126,.8)'}]);
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  const issues=N.rows.flatMap(r=>r.issues||[]);
+  T.badge('NUMBERS · step 4 · repair: '+(S2.filled||0)+' filled, '+(S2.fixed||0)+' fixed, '+(S2.verified||0)+' verified, '+(S2.conflicts||0)+' in conflict, '+((S2.unverified||0)+(S2.unchecked||0))+' unreached, '+(S2.blank||0)+' blank · '+issues.filter(i=>i.type==='fixed').map(i=>i.cell+': "'+i.was+'" by '+i.by).slice(0,6).join('; ')+(issues.filter(i=>i.type==='fixed').length>6?' …':''));
+}
+
+/* ======================================================================
+   PRODUCTS · match (js/products/products.js)
+   The final grid with every item row banded by its match against the
+   product list, the matched product written under the item name, an MRP
+   column beside the table, and the TP cell flagged where the invoice
+   price differs from the purchase price on file.
+   ====================================================================== */
+const PROD_COLOR={match:'rgba(84,221,126,.97)', uncertain:'rgba(255,200,90,.97)', none:'rgba(255,90,90,.97)', total:'rgba(110,160,255,.9)', price:'rgba(255,120,230,.98)',
+                  band:{match:'rgba(84,221,126,.22)', uncertain:'rgba(255,200,90,.22)', none:'rgba(255,90,90,.24)', total:'rgba(110,160,255,.2)'}};
+function renderProducts(F,ctx,W,H,base,T){
+  T.darken(base,0.65); ctx.textBaseline='alphabetic';
+  if(!F.grid){ T.badge('PRODUCTS · '+finalHeader(F)); T.message(F.waitingApi?'waiting for the OCR API answer':'no final table yet'); return; }
+  const P=S.products;
+  if(!P && S.api && S.api.status==='pending'){ T.badge('PRODUCTS · waiting for the OCR API answer'); T.message('the product match runs once the API answer is in and the final table is rebuilt from both readings'); return; }
+  if(!P){ T.badge('PRODUCTS · match not started'); T.message('the product match starts when the final table is built'); return; }
+  if(P.status==='pending'){ T.badge('PRODUCTS · matching '+P.rows.length+' rows against the product list …'); T.message('waiting for the product worker — this stage fills in when it answers'); return; }
+  if(P.status==='error'){ T.badge('PRODUCTS · failed after '+Math.round(P.ms)+' ms'); T.message(P.error); return; }
+  const keys=F.keys||(S.columns&&S.columns.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
+  const rows=F.grid.map(r=>r.map(g=>g.box||g.bb)), sw=T.strokeW;
+  const nameCi=(()=>{ const i=keys.indexOf('name'); if(i>=0) return i; let best=0,bw=-1; keys.forEach((k,ci)=>{ const w=F.grid.reduce((s,r)=>s+((r[ci]&&r[ci].text)||'').replace(/[\d.,]/g,'').length,0); if(w>bw){ bw=w; best=ci; } }); return best; })();
+  const roles=(F.numbers&&F.numbers.roles)||{}; let tpKey=Object.keys(roles).find(k=>roles[k]==='unitTp'); if(!tpKey && keys.includes('tp')) tpKey='tp'; const tpCi=tpKey?keys.indexOf(tpKey):-1;
+  // the grid: dark bands, borders, header
+  const bands=(F.header&&F.header.cells?[F.header.cells]:[]).concat(rows);
+  let tx0=1/0, tx1=-1/0; for(const band of bands) for(const b of band) if(b){ tx0=Math.min(tx0,b.x0); tx1=Math.max(tx1,b.x1); }
+  ctx.fillStyle='rgba(8,11,12,.5)';
+  for(const band of bands){ const bs=band.filter(Boolean); if(!bs.length) continue; const x0=Math.min(...bs.map(b=>b.x0)), x1=Math.max(...bs.map(b=>b.x1)), y0=Math.min(...bs.map(b=>b.y0)), y1=Math.max(...bs.map(b=>b.y1)); ctx.fillRect(x0,y0,x1-x0+1,y1-y0+1); }
+  ctx.lineWidth=sw*0.6; ctx.strokeStyle='rgba(110,200,255,.45)'; for(const band of bands) for(const b of band) if(b) T.rect(b);
+  ctx.textBaseline='middle';
+  if(F.header && F.header.cells) F.header.cells.forEach((b,ci)=>{ const label=F.header.labels[ci]||''; if(label){ fitText(ctx,label,b,0.6); ctx.fillStyle='rgba(255,230,140,.9)'; ctx.fillText(label,b.x0+3,(b.y0+b.y1)/2); } });
+  // the MRP column beside the table (inside the image when it does not fit)
+  const mrpW=Math.max(70, T.fontSize*7), gap=sw*4; let mx0=tx1+gap; if(mx0+mrpW>W-2) mx0=Math.max(2, W-2-mrpW); const mx1=mx0+mrpW;
+  const allY=bands.flat().filter(Boolean); const ty0=Math.min(...allY.map(b=>b.y0)), ty1=Math.max(...allY.map(b=>b.y1));
+  ctx.fillStyle='rgba(8,11,12,.75)'; ctx.fillRect(mx0,ty0,mrpW,ty1-ty0+1); ctx.lineWidth=sw*1.2; ctx.strokeStyle='rgba(110,220,255,.9)'; T.rect({x0:mx0,y0:ty0,x1:mx1,y1:ty1});
+  if(F.header && F.header.cells){ const hb=F.header.cells.find(Boolean); if(hb){ const b={x0:mx0,y0:hb.y0,x1:mx1,y1:hb.y1}; fitText(ctx,'MRP',b,0.6); ctx.fillStyle='rgba(110,220,255,.98)'; ctx.fillText('MRP',b.x0+3,(b.y0+b.y1)/2); } }
+  const counts={match:0, uncertain:0, none:0, total:0, priceDiff:0};
+  (P.results||[]).forEach((r,ri)=>{
+    const bs=(rows[ri]||[]).filter(Boolean); if(!bs.length || !r) return;
+    const st=r.status==='total'?'total':r.status||'none'; counts[st]=(counts[st]||0)+1;
+    const band={x0:Math.min(...bs.map(b=>b.x0)), x1:Math.max(...bs.map(b=>b.x1)), y0:Math.min(...bs.map(b=>b.y0)), y1:Math.max(...bs.map(b=>b.y1))};
+    ctx.fillStyle=PROD_COLOR.band[st]; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
+    F.grid[ri].forEach((g,ci)=>{ const b=rows[ri][ci]; if(!b || !g.text || ci===nameCi) return; numCellText(ctx,b,g.text,ci===tpCi?'rgba(235,245,250,.95)':'rgba(200,210,215,.8)'); });
+    // the item name over the matched product
+    const nb=rows[ri][nameCi];
+    if(nb){ const h=nb.y1-nb.y0+1, item=F.grid[ri][nameCi].text||'';
+      if(r.product){ fitText(ctx,item,{x0:nb.x0+2,y0:nb.y0,x1:nb.x1-2,y1:nb.y0+h*0.55},0.9); ctx.fillStyle='rgba(235,245,250,.95)'; ctx.fillText(item,nb.x0+3,nb.y0+h*0.3);
+        const pn=[r.product.name, r.product.strength, r.product.category].filter(Boolean).join(' · ')+' ('+r.score+')';
+        fitText(ctx,pn,{x0:nb.x0+2,y0:nb.y0+h*0.5,x1:nb.x1-2,y1:nb.y1},0.9); ctx.fillStyle=PROD_COLOR[st]; ctx.fillText(pn,nb.x0+3,nb.y0+h*0.76); }
+      else numCellText(ctx,nb,item,st==='total'?PROD_COLOR.total:PROD_COLOR.none); }
+    // the invoice TP against the purchase price on file
+    if(tpCi>=0 && r.price && rows[ri][tpCi]){ const b=rows[ri][tpCi];
+      if(r.price.differs){ counts.priceDiff++; ctx.lineWidth=sw*1.4; ctx.strokeStyle=PROD_COLOR.price; T.rect(b);
+        const h=b.y1-b.y0+1; ctx.font=`600 ${Math.max(6,Math.min(h*0.38,T.fontSize*0.8))}px "JetBrains Mono", monospace`; ctx.fillStyle=PROD_COLOR.price; ctx.textAlign='right'; ctx.fillText('≠ '+(+r.price.nearest).toFixed(2), b.x1-2, b.y1-h*0.22); ctx.textAlign='left'; }
+      else { ctx.lineWidth=sw*0.8; ctx.strokeStyle=PROD_COLOR.match; T.rect(b); } }
+    // MRP
+    const mb={x0:mx0,y0:band.y0,x1:mx1,y1:band.y1};
+    if(r.product && r.product.mrp!==null && r.product.mrp!==undefined){ numCellText(ctx,mb,(+r.product.mrp).toFixed(2),PROD_COLOR[st],0.7); }
+    else if(st!=='total'){ numCellText(ctx,mb,'—','rgba(150,165,170,.6)'); }
+  });
+  drawLegend(ctx,T,W,H,[{label:'matched '+counts.match, color:PROD_COLOR.match},{label:'uncertain '+counts.uncertain, color:PROD_COLOR.uncertain},{label:'no match '+counts.none, color:PROD_COLOR.none},{label:'TP differs from purchase price '+counts.priceDiff, color:PROD_COLOR.price},{label:'MRP = product UnitSalePrice', color:'rgba(110,220,255,.9)'}]);
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  T.badge('PRODUCTS · '+counts.match+' matched, '+counts.uncertain+' uncertain, '+counts.none+' unmatched of '+(P.rows.filter(r=>!r.isTotal).length)+' items · '+counts.priceDiff+' TP differ from the purchase price · matched in '+(P.matchMs||0)+' ms by the '+P.engine+', '+Math.round(P.ms)+' ms in all');
 }

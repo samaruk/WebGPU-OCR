@@ -47,11 +47,53 @@ export const ROLES = {
 };
 
 /* header-rule keys → roles ('vat' and 'discountValue' are ambiguous and are
-   settled by the relations the table satisfies) */
+   settled by the relations the table satisfies). Keys are read without case
+   or punctuation, so a rule may say tp / unittp / unit_tp, tpValue / totaltp,
+   discountValue / totaldiscount … for the same column. */
 const KEY_ROLE = {
-  qty:'qty', bonus:'bonus', tp:'unitTp', vat:'vat?', tpVat:'unitGross', tpValue:'totalTp', vatValue:'totalVat',
-  discountPct:'discPct', discountValue:'disc?', net:'net', sp:'unitSp', spValue:'totalSp', mrp:'mrp'
+  qty:'qty', quantity:'qty', bonus:'bonus',
+  tp:'unitTp', unittp:'unitTp', tradeprice:'unitTp', unitprice:'unitTp',
+  vat:'vat?', unitvat:'unitVat', vatpct:'vatPct',
+  tpvat:'unitGross', unitgross:'unitGross',
+  tpvalue:'totalTp', totaltp:'totalTp', vatvalue:'totalVat', totalvat:'totalVat',
+  discountpct:'discPct', discpct:'discPct', discountvalue:'disc?', totaldiscount:'discAmt', discountamount:'discAmt', discamt:'discAmt', unitdiscount:'unitDisc', unitdisc:'unitDisc',
+  net:'net', netamount:'net', netvalue:'net', sp:'unitSp', unitsp:'unitSp', spvalue:'totalSp', totalsp:'totalSp', mrp:'mrp'
 };
+const roleOfRuleKey=k=>KEY_ROLE[String(k||'').toLowerCase().replace(/[^a-z0-9]/g,'')]||null;
+
+/* ---- relations a header rule writes itself ---------------------------------
+   A rule column may carry `relation:'{qty}*{unittp}'` — its value from other
+   columns, keys in braces. Such a relation is the template's own word and
+   REPLACES the built-in variants for that column's role: it is scored,
+   verified, and used to fill or fix cells exactly like them. Solving for one
+   of the other columns is numeric (the formulas are affine in each column:
+   two evaluations give the value, a secant step or two confirm it).      */
+export function ruleRelations(list, roleOfKey){
+  const out=[];
+  for(const {key, formula} of list||[]){
+    const target=roleOfKey[key]; if(!target || target.endsWith('?')) continue;
+    const refs=[...String(formula).matchAll(/\{([^}]+)\}/g)].map(m=>m[1].trim());
+    if(!refs.length || refs.includes(key)) continue;
+    const vars=refs.map(k=>roleOfKey[k]); if(vars.some(v=>!v || v.endsWith('?'))) continue;
+    const body=String(formula).replace(/\{([^}]+)\}/g,(m,k)=>'v.'+roleOfKey[k.trim()]);
+    if(!/^[\sA-Za-z0-9_.+\-*/()]+$/.test(body)) continue;                 // numbers, operators, brackets and role names only
+    let f; try{ f=new Function('v','return ('+body+');'); }catch(e){ continue; }
+    const num=x=>(typeof x==='number' && isFinite(x))?x:null;
+    const solve=(r,v)=>{
+      if(r===target) return num(f(v));
+      const ev=x=>num(f({...v,[r]:x}));
+      const want=v[target]; if(want===undefined) return null;
+      let x0=1, x1=2, f0=ev(x0), f1=ev(x1); if(f0===null || f1===null || Math.abs(f1-f0)<1e-12) return null;
+      let x=x0+(want-f0)*(x1-x0)/(f1-f0);
+      for(let it=0; it<6; it++){ const fx=ev(x); if(fx===null) return null; if(Math.abs(fx-want)<=1e-9) break;
+        const h=Math.max(1e-3,Math.abs(x)*1e-3), fh=ev(x+h); if(fh===null || Math.abs(fh-fx)<1e-12) return null; x=x+(want-fx)*h/(fh-fx); }
+      return num(x); };
+    const shown=String(formula).replace(/\{([^}]+)\}/g,'$1').replace(/\*/g,' × ').replace(/\s+/g,' ');
+    const uniq=[target].concat(vars.filter((v,i)=>v!==target && vars.indexOf(v)===i));
+    out.push(rel('rule:'+key, key+' = '+shown, uniq, solve, {rule:true, perUnit:vars.includes('qty') && /\*/.test(formula)}));
+  }
+  return out;
+}
 
 /* label vocabulary for columns no rule named (keys c1, c2 …) */
 function roleFromLabel(label){
@@ -175,7 +217,7 @@ function tolerance(R, v, target){
 
 /* ---- the analysis --------------------------------------------------------- */
 export function analyseNumbers(table, opts={}){
-  const o=Object.assign({vatRateHint:15}, opts);
+  const o=Object.assign({vatRateHint:15, weakBelow:60}, opts);   // weakBelow: OCR confidence (0-100) under which a cell is "weak"
   const empty={roles:{}, model:{relations:[], vatRate:null}, rows:[], summary:{rows:0, itemRows:0, cells:0, verified:0, filled:0, fixed:0, conflicts:0, unverified:0}, note:''};
   if(!table || !table.rows || !table.rows.length) return Object.assign(empty,{note:'no table'});
   const keys=(table.header&&table.header.keys)||Object.keys(table.rows[0].cells||{});
@@ -183,7 +225,7 @@ export function analyseNumbers(table, opts={}){
 
   /* 1 · roles from keys / labels, then the numeric evidence ------------- */
   const roleOfKey={};
-  keys.forEach((k,i)=>{ const r=KEY_ROLE[k] || roleFromLabel(labels[i]) || roleFromLabel(k); if(r) roleOfKey[k]=r; });
+  keys.forEach((k,i)=>{ const r=roleOfRuleKey(k) || roleFromLabel(labels[i]) || roleFromLabel(k); if(r) roleOfKey[k]=r; });
   // a column whose values are numbers at least 60% of the time is numeric
   const parsedRows=table.rows.map(row=>{ const cells={}; for(const k of keys){ const txt=(row.cells&&row.cells[k])||''; cells[k]={text:txt, parsed:parseNumber(txt)}; } return cells; });
   const numericKey={}; for(const k of keys){ let n=0,t=0; for(const pr of parsedRows){ if(pr[k].text){ t++; if(pr[k].parsed) n++; } } numericKey[k]=t>0 && n>=0.6*t; }
@@ -193,6 +235,11 @@ export function analyseNumbers(table, opts={}){
     const pctShare=vals.filter(p=>p.pct).length/vals.length;
     if(roleOfKey[k]==='vat?' && pctShare>=0.5) roleOfKey[k]='vatPct';
     if(roleOfKey[k]==='disc?' && pctShare>=0.5) roleOfKey[k]='discPct'; }
+
+  // the rule's own relations first: they replace the built-in variants of their targets
+  const ruleRels=ruleRelations(table.relations, roleOfKey);
+  const ruleTargets=new Set(ruleRels.map(R=>R.vars[0]));
+  const REL=ruleRels.length ? RELATIONS.filter(R=>!ruleTargets.has(R.vars[0])).concat(ruleRels) : RELATIONS;
 
   /* 2 · total rows (a sub-total line inside the table) --------------------- */
   const isTotalRow=[];
@@ -223,7 +270,7 @@ export function analyseNumbers(table, opts={}){
   const scoreAssignment=asg=>{ const map={...roleOfKey}; for(const k in asg) map[k]=asg[k];
     const used=new Set(Object.values(map)); if(used.size<Object.values(map).length) return {score:-1};  // two columns, one role: impossible
     let score=0; const stats={};
-    for(const R of RELATIONS){ if(!R.vars.every(v=>used.has(v) || (R.optional||[]).includes(v))) continue; let n=0,k=0; const abs=optAbsent(R,used);
+    for(const R of REL){ if(!R.vars.every(v=>used.has(v) || (R.optional||[]).includes(v))) continue; let n=0,k=0; const abs=optAbsent(R,used);
       for(const ri of itemIdx){ const v=valsWith(ri,map); if(!R.vars.every(x=>v[x]!==undefined || abs.includes(x))) continue; for(const x of abs) v[x]=0;
         const t=R.solve(R.vars[0],v); if(t===null) continue; n++; if(Math.abs(t-v[R.vars[0]])<=tolerance(R,v,t)) k++; }
       stats[R.id]={n,k}; if(n) score+=k-0.5*(n-k); }
@@ -249,7 +296,7 @@ export function analyseNumbers(table, opts={}){
   // hold on most of the complete rows it can be tested on
   const active=[];
   const groups={};
-  for(const R of RELATIONS){ const ok=R.vars.every(v=>present.has(v) || (R.optional||[]).includes(v)); if(!ok) continue;
+  for(const R of REL){ const ok=R.vars.every(v=>present.has(v) || (R.optional||[]).includes(v)); if(!ok) continue;
     const st=stats[R.id]||{n:0,k:0}; const rate=st.n?st.k/st.n:0;
     const entry={R, n:st.n, k:st.k, rate};
     if(R.group){ const g=groups[R.group]||(groups[R.group]=[]); g.push(entry); } else if(st.n===0 || rate>=0.5) active.push(entry); }
@@ -270,10 +317,22 @@ export function analyseNumbers(table, opts={}){
   /* 4 · row by row: fill, fix, verify ------------------------------------- */
   const keyOfRole={}; for(const k in roles) keyOfRole[roles[k]]=k;
   const outRows=table.rows.map((row,ri)=>{
-    const cells={}; for(const k of keys){ const c=parsedRows[ri][k]; cells[k]={text:c.text, value:c.parsed?c.parsed.value:null, status:c.text?(roles[k]?(covered.has(roles[k])?'unverified':'unchecked'):'text'):'blank'}; }
-    if(isTotalRow[ri]) return {row:row.row||ri+1, isTotal:true, cells, issues:[]};
+    // a cell read with low confidence (table.rows[].confidence[key], 0-100,
+    // from the OCR vote) is "weak": its value may be replaced by what the
+    // relations compute without the misread test the others need
+    const conf=row.confidence||{};
+    // value: the working value (replaced when filled or fixed); raw: the number as read, kept for the record
+    const cells={}; for(const k of keys){ const c=parsedRows[ri][k]; cells[k]={text:c.text, value:c.parsed?c.parsed.value:null, raw:c.parsed?c.parsed.value:null, status:c.text?(roles[k]?(covered.has(roles[k])?'unverified':'unchecked'):'text'):'blank',
+      weak:!!(roles[k] && c.text && conf[k]!==undefined && conf[k]<o.weakBelow), confidence:conf[k]}; }
+    if(isTotalRow[ri]) return {row:row.row||ri+1, isTotal:true, cells, issues:[], rules:{before:[], after:[]}};
     const issues=[];
     const v=()=>{ const m={}; for(const r in keyOfRole){ const c=cells[keyOfRole[r]]; if(c.value!==null) m[r]=c.value; } return m; };
+    // every active relation on the row's current values: pass | fail | skip
+    const evalRules=()=>{ const m=v(); return active.map(e=>{ const R=e.R, abs=optAbsent(R,present);
+      if(!R.vars.every(x=>m[x]!==undefined || abs.includes(x)) || !applies(R,m)) return {id:R.id, formula:R.formula, status:'skip'};
+      const mm={...m}; for(const x of abs) mm[x]=0; const t=R.solve(R.vars[0],mm); if(t===null) return {id:R.id, formula:R.formula, status:'skip'};
+      return {id:R.id, formula:R.formula, status:Math.abs(t-mm[R.vars[0]])<=tolerance(R,mm,t)?'pass':'fail', expected:Math.round(t*100)/100, actual:mm[R.vars[0]], cells:R.vars.filter(x=>keyOfRole[x]).map(x=>keyOfRole[x])}; }); };
+    const rulesBefore=evalRules();
     const readingsOf=r=>{ const k=keyOfRole[r]; const rd=(row.readings&&row.readings[k])||{}; return Object.values(rd).map(parseNumber).filter(Boolean).map(p=>p.value); };
     const setVal=(r,val,status,note)=>{ const k=keyOfRole[r]; const c=cells[k]; c.value=val; c.status=status; c.fixedText=fmtLike(val,c.text||(r==='qty'?'0':'0.00')); if(note) c.note=note; };
     const eachRel=fn=>{ for(const e of active){ const R=e.R, m=v(); if(R.skipZero && R.skipZero.some(x=>m[x]===0)) continue; const abs=optAbsent(R,present); const missing=R.vars.filter(x=>m[x]===undefined && !abs.includes(x)); for(const x of abs) m[x]=0; fn(R,m,missing); } };
@@ -302,7 +361,8 @@ export function analyseNumbers(table, opts={}){
             if(ok && !status[R.id]) { gain++; agree++; } else if(!ok && status[R.id]) loss++; }
           if(loss>0 || gain===0) continue;
           const cell=cells[keyOfRole[x]];
-          const plausible=plausibleMisread(val, cell.text) || readingsOf(x).some(r=>Math.abs(r-val)<=0.006) || agree>=2;
+          // a weak (low-confidence) reading may be replaced outright by what the relations compute
+          const plausible=cell.weak || plausibleMisread(val, cell.text) || readingsOf(x).some(r=>Math.abs(r-val)<=0.006) || agree>=2;
           const score=gain*10 + (plausible?5:0) - (cell.status==='fixed'?100:0);
           if(!plausible) continue;
           if(!bestFix || score>bestFix.score) bestFix={x, val, score, R:cand.R, agree}; } }
@@ -317,7 +377,7 @@ export function analyseNumbers(table, opts={}){
         if(ok){ if(c.status==='unverified') c.status='verified'; c.checks=(c.checks||0)+1; }
         else { if(c.status==='unverified' || c.status==='verified') c.status='conflict'; (c.conflicts=c.conflicts||[]).push(R.id); } } }
     for(const k of keys) if(cells[k].status==='conflict') issues.push({cell:k, type:'conflict', relations:cells[k].conflicts});
-    return {row:row.row||ri+1, isTotal:false, cells, issues};
+    return {row:row.row||ri+1, isTotal:false, cells, issues, rules:{before:rulesBefore, after:evalRules()}};
   });
 
   /* 5 · sub-total rows: sums settle a lone doubtful cell --------------------- */
@@ -339,7 +399,7 @@ export function analyseNumbers(table, opts={}){
   const summary={rows:outRows.length, itemRows:outRows.filter(r=>!r.isTotal).length, cells:0, verified:0, filled:0, fixed:0, conflicts:0, unverified:0, unchecked:0, blank:0};
   for(const r of outRows) for(const k of keys){ if(!roles[k]) continue; const s=r.cells[k].status; summary.cells++; if(s==='verified') summary.verified++; else if(s==='filled') summary.filled++; else if(s==='fixed') summary.fixed++; else if(s==='conflict') summary.conflicts++; else if(s==='unverified') summary.unverified++; else if(s==='unchecked') summary.unchecked++; else if(s==='blank') summary.blank++; }
   return {
-    roles, model:{ vatRate, relations:active.map(e=>({id:e.R.id, formula:e.R.formula, testedRows:e.n, satisfied:e.k, derived:!!e.derived})) },
+    roles, model:{ vatRate, relations:active.map(e=>({id:e.R.id, formula:e.R.formula, testedRows:e.n, satisfied:e.k, derived:!!e.derived, rule:!!e.R.rule})) },
     rows:outRows, summary,
     note: active.length?'':'no relation could be formed from the recognised columns'
   };

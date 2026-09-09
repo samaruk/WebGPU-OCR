@@ -36,7 +36,7 @@ export const LABEL_VOCAB=(()=>{ const seen=new Map();
   return [...seen.values()]; })();
 
 /* "Batch No." → ['batch','no'];  "%" → ['pct'];  "TP(TK) /PACK" → ['tp','tk','pack'] */
-export const tokensOf=s=>(s||'').toLowerCase().replace(/%/g,' pct ').split(/[^a-z0-9]+/).filter(t=>t.length);
+export const tokensOf=s=>(s||'').toLowerCase().replace(/\b[0o]\s*\/\s*[0o6]\b/g,' pct ').replace(/%/g,' pct ').split(/[^a-z0-9]+/).filter(t=>t.length);   // "0/0", "o/o": a % the engine read as digits
 const weightOf=t=>t.length>=4?1:t.length===3?0.7:0.4;
 
 function levenshtein(a,b){
@@ -66,15 +66,22 @@ export function titleWords(C,recognition,api){
   const candidates=[];
   for(let k=Math.max(0,firstIdx-2);k<=Math.min(rowsAll.length-1,firstIdx+6);k++) candidates.push(rowsAll[k]);
   const words=[];
-  const takeRow=(r,ws)=>{ if(ws.length<2) return; let numeric=0; for(const w of ws) if(numericWord(w.text)) numeric++;
+  const takeRow=(r,ws,src)=>{ if(ws.length<2) return; let numeric=0; for(const w of ws) if(numericWord(w.text)) numeric++;
     if(numeric>0.3*ws.length) return;                              // an item row, not a title row
     for(const w of ws){ const cx=(w.bb.x0+w.bb.x1)/2, cy=(w.bb.y0+w.bb.y1)/2;
-      for(const t of tokensOf(w.text)) words.push({t, x:C.toDeskewedX(cx,cy), y:cy, row:r.index, text:w.text}); } };
+      for(const t of tokensOf(w.text)) words.push({t, x:C.toDeskewedX(cx,cy), y:cy, row:r.index, text:w.text, src}); } };
   if(recognition && recognition.available){
-    for(const r of candidates){ const res=recognition.lines.find(l=>l.rowIndex===r.index); if(res && res.words) takeRow(r,res.words.filter(w=>w.text&&w.bb)); }
+    for(const r of candidates){ const res=recognition.lines.find(l=>l.rowIndex===r.index); if(res && res.words) takeRow(r,res.words.filter(w=>w.text&&w.bb),'local'); }
   }
+  /* the API's regions in the same rows, split into words along their boxes,
+     JOIN the local words rather than only standing in for them: PaddleOCR
+     reads a title cleanly where Tesseract stumbles ("Per p ack") and the
+     other way round ("0/0" for "%"), and the alignment below may pick
+     either reading of a word — the pipeline calls this again once the
+     answer is in, so a rule missed on the local words alone gets a second
+     chance with both */
   const response=api&&api.status==='done'?api.response:null;       // S.api is the request entry; the regions live in its response
-  if(!words.length && response){                                   // API regions in the same rows: split each region into words along its box
+  if(response){
     const regions=apiRegions(response);
     for(const r of candidates){ const d=r.row.dy; const ws=[];
       for(const rg of regions){ const b=rg.bbox; if(!b) continue; const cy=(b.y0+b.y1)/2, cx=(b.x0+b.x1)/2, yp=cy-C.slope*cx;
@@ -82,11 +89,12 @@ export function titleWords(C,recognition,api){
         const parts=(rg.text||'').split(/\s+/).filter(Boolean); const total=parts.reduce((s,p)=>s+p.length,0)||1; let acc=0;
         for(const p of parts){ const x0=b.x0+(b.x1-b.x0)*acc/total, x1=b.x0+(b.x1-b.x0)*(acc+p.length)/total; acc+=p.length+1;
           ws.push({text:p, bb:{x0,y0:b.y0,x1,y1:b.y1}}); } }
-      takeRow(r,ws); }
+      takeRow(r,ws,'api'); }
   }
-  // a region that straddles two rows' extents is taken once
+  // a region that straddles two rows' extents is taken once; the same word
+  // read by both engines at the same place counts once too
   const seen=new Set();
-  const unique=words.filter(w=>{ const k=w.t+'@'+Math.round(w.x/4); if(seen.has(k)) return false; seen.add(k); return true; });
+  const unique=words.filter(w=>{ const k=w.t+'@'+Math.round(w.x/12); if(seen.has(k)) return false; seen.add(k); return true; });
   unique.sort((a,b)=>a.x-b.x);
   return unique;
 }
@@ -239,27 +247,56 @@ export function applyHeaderRule(C,match){
    label, so a lone "no" names nothing while "Sl.No" read whole does.
    Each label names one column. `closest` is the nearest rule, for the
    badge only.                                                          */
+/* The closest rule laid over the profile columns IN ORDER: walking left to
+   right, a column takes the next rule column whose label its title words
+   match (60 % of the label's tokens with a strong one, as below). The same
+   word printed twice — "Trade" under "Per pack", then "Trade" under "Value"
+   on the ACME invoice — is told apart by its order, where the vocabulary
+   alone named the first one "TP+VAT Per Pack" and the second "Trade".
+   colWords: per column, its title words [{t}]. Returns per column
+   {key, label} or null; trusted when it explains three columns at least. */
+export function ruleInOrder(rule, colWords){
+  const out=colWords.map(()=>null); let j=0;
+  colWords.forEach((inside,pi)=>{ if(!inside.length) return;
+    for(let jj=j; jj<rule.columns.length; jj++){ const c=rule.columns[jj], toks=tokensOf(c.label); let score=0,total=0,strong=false,n=0; const used=new Set();
+      for(const t of toks){ const wt=weightOf(t); total+=wt; let bi=-1,bsim=0; inside.forEach((w,i)=>{ if(used.has(i)) return; const sc=sim(t,w.t); if(sc>bsim){ bsim=sc; bi=i; } }); if(bi>=0&&bsim>=0.75){ used.add(bi); score+=bsim*wt; n++; if(t.length>=3||toks.length===1) strong=true; } }
+      if(n && strong && (total?score/total:0)>=0.6){ out[pi]={key:c.key, label:c.group?c.group+' '+c.label:c.label}; j=jj+1; break; } }
+  });
+  return out.filter(Boolean).length>=3 ? out : colWords.map(()=>null);
+}
+
 export function nameColumns(C,words,closest){
   words=words||[];
   const profileCols=C.columns.slice();
   if(!profileCols.length) return false;
   const colOf=x=>{ let ci=-1,bd=1/0; profileCols.forEach((pc,i)=>{ const d=x<pc.gutterX0?pc.gutterX0-x:x>pc.gutterX1?x-pc.gutterX1:0; if(d<bd){ bd=d; ci=i; } }); return ci; };
   const taken=new Set();
+  const inside0=profileCols.map((pc,pi)=>words.filter(w=>colOf(w.x)===pi));
+  // every rule is tried in order, not only the closest one: the closest is
+  // ranked by the share of its columns found, so a short rule with three
+  // hits can outrank the ACME rule with seven — the rule that explains the
+  // most columns names them, the closest rule breaking a tie
+  let inOrder=inside0.map(()=>null), orderRule=null, orderN=0;
+  for(const r of HEADER_RULES){ const o=ruleInOrder(r, inside0), n=o.filter(Boolean).length;
+    if(n>orderN || (n===orderN && n && closest&&closest.rule&&closest.rule.id===r.id)){ orderN=n; inOrder=o; orderRule=r; } }
+  const usedKeys=new Set(inOrder.filter(Boolean).map(o=>o.key));
   const named=profileCols.map((pc,pi)=>{
-    const inside=words.filter(w=>colOf(w.x)===pi);
+    const inside=inside0[pi];
+    if(inOrder[pi]) return {...pc, key:inOrder[pi].key, label:inOrder[pi].label, found:true, byRule:true, title:inside.map(w=>w.text).join(' ')};
     let best=-1,bs=0,bn=0;
-    LABEL_VOCAB.forEach((v,vi)=>{ if(taken.has(vi)) return; const toks=tokensOf(v.label); let score=0,total=0,strong=false,n=0; const used=new Set();
+    LABEL_VOCAB.forEach((v,vi)=>{ if(taken.has(vi) || usedKeys.has(v.key)) return; const toks=tokensOf(v.label); let score=0,total=0,strong=false,n=0; const used=new Set();
       for(const t of toks){ const wt=weightOf(t); total+=wt; let bi=-1,bsim=0; inside.forEach((w,i)=>{ if(used.has(i)) return; const sc=sim(t,w.t); if(sc>bsim){ bsim=sc; bi=i; } }); if(bi>=0&&bsim>=0.75){ used.add(bi); score+=bsim*wt; n++; if(t.length>=3||toks.length===1) strong=true; } }
       const frac=total?score/total:0;
       // the label that explains the most words wins: "Unit (T.P)" over "Unit" when "(T.P)" is printed below
       if((strong || frac>=0.95) && frac>=0.6 && (n>bn || (n===bn && frac>bs))){ bs=frac; bn=n; best=vi; } });
-    if(best>=0) taken.add(best);
+    if(best>=0){ taken.add(best); usedKeys.add(LABEL_VOCAB[best].key); }
     return {...pc, key:best>=0?LABEL_VOCAB[best].key:null, label:best>=0?LABEL_VOCAB[best].label:null, found:best>=0, title:inside.map(w=>w.text).join(' ')};
   });
+  const byRule=named.filter(c=>c.byRule).length;
   finishColumns(C,named);
   const rows=[...new Set(words.map(w=>w.row))].sort((p,q)=>p-q);
   C.headerRule={id:closest&&closest.rule?closest.rule.id:null, name:closest&&closest.rule?closest.rule.name:null, found:named.filter(c=>c.key).length, total:named.length,
-                boundariesFromGutters:(C.gutters||[]).length, mode:'profile columns, named from the header vocabulary'+(closest&&closest.rule?' (closest rule: '+closest.rule.name+')':''),
+                boundariesFromGutters:(C.gutters||[]).length, mode:'profile columns, named '+(byRule?byRule+' from the rule '+orderRule.id+' in order, the rest ':'')+'from the header vocabulary'+(closest&&closest.rule?' (closest rule: '+closest.rule.name+')':''),
                 titleRows:(closest&&closest.titleRows&&closest.titleRows.length)?closest.titleRows:rows};
   return true;
 }

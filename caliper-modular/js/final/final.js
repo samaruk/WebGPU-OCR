@@ -35,6 +35,8 @@
 import { S } from '../state/state.js';
 import { apiRegions, apiEngineList } from '../api/api.js';
 import { analyseNumbers } from '../numcheck/numcheck.js';
+import { resolveColumnKeys, titleAgreement } from './columnkeys.js';
+import { HEADER_RULES } from '../config/headerrules.js';
 
 const norm=s=>(s||'').replace(/\s+/g,' ').trim();
 const key=s=>norm(s).toLowerCase().replace(/[\s.,:;'"`·]/g,'');
@@ -96,7 +98,12 @@ export function buildFinal(){
     // boundary: unit | batch, batch | qty, trade | VAT
     const cy=(b.y0+b.y1)/2, xp0=C.toDeskewedX(x0,cy), xp1=C.toDeskewedX(x1,cy), w=Math.max(1,xp1-xp0);
     const hits=[]; cols.forEach((c,ci)=>{ const o=Math.min(xp1,c.gutterX1+1)-Math.max(xp0,c.gutterX0); if(o>=0.25*w && o>=3) hits.push(ci); });
-    if(hits.length>=2 && text.length>=2){
+    // one number with its unit or a pack size ("120ml", "0.5mg", "30's", "5X10'S")
+    // is one thing: never cut, it goes whole to the column under its centre;
+    // so is a word without any digit — a title over two columns ("Per pack")
+    // or a name running past its column is not a glued code
+    const atom=!/\d/.test(text) || /^\d+(\.\d+)?\s*(ML|MG|MCG|GM|G|L|IU|%|['’`]?S)?$/i.test(text) || /^\d+\s*X\s*\d+\s*['’`]?S?$/i.test(text);
+    if(hits.length>=2 && text.length>=2 && !atom){
       // where to cut the text: the local character boxes under the region
       // count how many characters sit left of the boundary (a proportional
       // guess only when the character stage has not covered the region —
@@ -159,18 +166,33 @@ export function buildFinal(){
   const titleRows=[...titleSet].sort((a,b)=>a-b);
   const lastTitle=titleRows.length?titleRows[titleRows.length-1]:-1;
 
-  /* header labels: rule labels, else the API's title words per column, else the local ones */
+  /* header labels: rule labels; else the API's title words per column; the
+     local title text only where the API read nothing there, read it with
+     little confidence (under 50) while the local text is not empty, or
+     agrees with the rules' vocabulary less well than the local text does
+     ("Category & Produdt Name" from PaddleOCR loses to the local "Category
+     & Product Name" by one exact token). */
+  // (two title rows whose bands overlap would hand the same word to both:
+  // every word counts once, and a word repeated in the label is collapsed)
+  const dedupeWords=s=>s.replace(/\b(\S+)(?: \1\b)+/gi,'$1');
+  const headerSource=[];
   const headerLabels=cols.map((c,ci)=>{
-    if(c.label) return c.label;
-    const apiWords=[]; for(const bi of titleRows) for(const w of wordsIn(band[bi].row.dy.y0,band[bi].row.dy.y1)) if(colOf(w.xp)===ci) apiWords.push(w);
-    if(apiWords.length) return norm(apiWords.sort((a,b)=>a.yp-b.yp||a.xp-b.xp).map(w=>w.text).join(' '));
-    return norm(titleRows.map(bi=>localText(bi,ci)).join(' '));
+    if(c.label){ headerSource[ci]='rule'; return c.group && !c.label.toLowerCase().startsWith(c.group.toLowerCase()) ? c.group+' '+c.label : c.label; }   // "Per pack Trade", "Discount %": the group the rule gives
+    const apiWords=[], seen=new Set(); for(const bi of titleRows) for(const w of wordsIn(band[bi].row.dy.y0,band[bi].row.dy.y1)) if(colOf(w.xp)===ci && !seen.has(w)){ seen.add(w); apiWords.push(w); }
+    const apiText=apiWords.length ? dedupeWords(norm(apiWords.sort((a,b)=>a.yp-b.yp||a.xp-b.xp).map(w=>w.text).join(' '))) : '';
+    const localT=dedupeWords(norm(titleRows.map(bi=>localText(bi,ci)).join(' ')));
+    if(!apiText){ headerSource[ci]=localT?'local':'none'; return localT; }
+    if(!localT){ headerSource[ci]='api'; return apiText; }
+    const apiConf=apiWords.reduce((a,w)=>a+(w.confidence||0),0)/apiWords.length;
+    const A=titleAgreement(apiText), L=titleAgreement(localT);
+    const localWins=(L.n>A.n) || (L.n===A.n && L.exact>A.exact) || (apiConf<50 && A.n===0);
+    headerSource[ci]=localWins?'local':'api'; return localWins?localT:apiText;
   });
   if(titleRows.length){
     const y0=Math.min(...titleRows.map(bi=>band[bi].row.ink.y0)), y1=Math.max(...titleRows.map(bi=>band[bi].row.ink.y1)), ym=(y0+y1)/2;
-    out.header={labels:headerLabels, rule:C.headerRule?C.headerRule.name:null,
+    out.header={labels:headerLabels, source:headerSource, rule:C.headerRule?C.headerRule.name:null,
       cells:cols.map(c=>{ const a=C.toImage(c.gutterX0,ym), b=C.toImage(c.gutterX1,ym); return {x0:Math.round(a.x),y0,x1:Math.round(b.x),y1}; })};
-  } else out.header={labels:headerLabels, rule:C.headerRule?C.headerRule.name:null, cells:null};
+  } else out.header={labels:headerLabels, source:headerSource, rule:C.headerRule?C.headerRule.name:null, cells:null};
 
   /* ---- rows -------------------------------------------------------------
      The API's item rows come first where the API found a table: PaddleOCR
@@ -279,9 +301,60 @@ export function buildFinal(){
   }
   for(let i=grid.length-1;i>=0;i--) if(!filled(grid[i]).size){ grid.splice(i,1); rowList.splice(i,1); }
 
+  /* ---- column names: recheck -------------------------------------------
+     A column the rule did not key and whose title the API words missed (a
+     narrow Qty column whose word landed in the gutter, a two-line title) is
+     named here from every title source at once: the label found above, the
+     local title text, every engine's words in the title rows and the API
+     table's own title row mapped onto our columns. A title token that is a
+     quantity word (qty, qnt, qnty, quantity, quan …, one letter off allowed)
+     keys the column qty; any other title is matched against the rules'
+     label vocabulary. Quantity is insisted on — every invoice has one — so
+     when no title names it, the column of small whole numbers that is not
+     a serial, a code or a bonus column (mostly zeros) is taken as Qty. */
+  const titleCands=cols.map((c,ci)=>{ const s=new Set();
+    if(headerLabels[ci]) s.add(headerLabels[ci]);
+    for(const bi of titleRows){ const t=localText(bi,ci); if(t) s.add(t);
+      const r=band[bi]; for(const w of words.concat(extraWords)) if(w.yp>=r.row.dy.y0-1 && w.yp<=r.row.dy.y1+1 && colOf(w.xp)===ci) s.add(w.text); }
+    if(api && api.deep && api.deep.table){ const t=api.deep.table, r0=api.deep.rows[t.firstRow];
+      if(r0 && r0.cells && !/\d/.test(r0.text||'')) for(const cell of r0.cells){ if(!cell.bbox || !cell.text) continue;
+        const cx=(cell.bbox.x0+cell.bbox.x1)/2, cy=(cell.bbox.y0+cell.bbox.y1)/2; if(colOf(C.toDeskewedX(cx,cy))===ci) s.add(cell.text); } }
+    return [...s]; });
+  const named=resolveColumnKeys({keys:cols.map(c=>c.key||null), labels:headerLabels, titleCands, columnValues:cols.map((c,ci)=>grid.map(r=>r[ci].text))});
+  out.keys=named.keys.map((k,i)=>k||('c'+(i+1))); out.header.labels=named.labels;
+  out.columnsMode=C.headerRule?C.headerRule.mode:null;               // how the columns stage named the columns (shown in the FINAL badge)
+  if(named.renamed.length) out.note=(out.note?out.note+' · ':'')+'columns named on recheck: '+named.renamed.map(r=>(r.column+1)+'→'+r.key+' by '+r.by).join(', ');
+  if(!named.keys.includes('qty')) out.note=(out.note?out.note+' · ':'')+'no quantity column found';
+
   out.grid=grid; out.rows=rowList; out.stats=count(grid,rowList);
   out.stats.titleRows=titleRows.length; out.stats.droppedTop=Math.max(0,lastTitle+1-titleRows.length);
+  // the arithmetic check of the number columns (numcheck) on the finished grid:
+  // roles, relations, per-row rule results, filled / fixed cells — drawn by
+  // the NUMBERS stages and written into the JSON
+  /* the number check waits for the API answer: run on the local reading
+     alone it would judge cells the answer is about to replace; the NUMBERS
+     stages show "waiting" until the final table is rebuilt with both sides */
+  if(S.api && S.api.status==='pending'){ out.numbers=null; out.numbersPending=true; }
+  else try{ out.numbers=analyseNumbers(tableForNumbers(out)); }catch(e){ out.numbers={error:String(e&&e.message||e), roles:{}, model:{relations:[]}, rows:[], summary:{}}; }
   return out;
+}
+
+/* the final table in the shape analyseNumbers reads: header keys and labels,
+   per row the cell texts, every engine's reading and the confidence of the
+   chosen text (the OCR vote's: the API's or the local one, whichever won) */
+export function tableForNumbers(F){
+  if(!F || !F.grid) return {header:{keys:[],labels:[]}, rows:[]};
+  const C=S.columns, keys=F.keys||(C&&C.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
+  const labels=F.header?F.header.labels:keys;
+  // the relations the header rule writes for its columns ({qty}*{unittp} …), for the columns the table has
+  const rule=C&&C.headerRule&&C.headerRule.id ? HEADER_RULES.find(r=>r.id===C.headerRule.id) : null;
+  const relations=rule ? rule.columns.filter(c=>c.relation && keys.includes(c.key)).map(c=>({key:c.key, formula:c.relation})) : [];
+  return {header:{labels, keys}, relations,
+    rows:F.grid.map((row,ri)=>{ const o={row:ri+1, cells:{}, readings:{}, confidence:{}};
+      row.forEach((g,ci)=>{ const k=keys[ci]; o.cells[k]=g.text;
+        const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[k]=r;
+        if(g.text) o.confidence[k]=g.source==='local'||g.source==='local-only'?(g.localConf||0):g.source==='api'?(g.apiConf||0):Math.max(g.apiConf||0,g.localConf||0); });
+      return o; })};
 }
 
 /* The final table as plain data: the engines that took part, header
@@ -290,7 +363,7 @@ export function buildFinal(){
    and every engine's reading of the cell), the statistics. */
 export function finalTableJson(F){
   if(!F || !F.grid) return {table:false, note:F?F.note:'no run'};
-  const C=S.columns, keys=(C&&C.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
+  const C=S.columns, keys=F.keys||(C&&C.columns||[]).map((c,i)=>c.key||('c'+(i+1)));   // F.keys: the names after the recheck (Qty insisted on)
   const labels=F.header?F.header.labels:keys;
   const json={
     table:true, rule:F.header?F.header.rule:null, note:F.note||'',
@@ -301,17 +374,42 @@ export function finalTableJson(F){
         const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[keys[ci]]=r; }); return o; }),
     stats:F.stats
   };
-  /* the arithmetic check of the number columns (numcheck): per row the
-     status of every number cell and the corrected text where a value was
-     filled from the others or put right; the roles and relations used */
+  /* The table AFTER the number check's repair (stage NM · Repair): a cell the
+     rules filled or fixed carries its corrected text in `cells`, with the text
+     as read kept in `asRead`; `check` gives every number cell's status
+     (verified, filled, fixed, conflict, unverified, unchecked, blank) with the
+     note of a repair; `rules` the row rules after the repair (ids that pass /
+     fail); `numberCheck` the roles, the relations in force and the summary. */
+  if(F.numbersPending){ json.numberCheck={pending:true, note:'waiting for the OCR API answer — the check and the repair run once it is in'}; return json; }
   try{
-    const nc=analyseNumbers(json);
-    json.numberCheck={roles:nc.roles, model:nc.model, summary:nc.summary, note:nc.note};
+    const nc=F.numbers && F.numbers.rows ? F.numbers : analyseNumbers(tableForNumbers(F));
+    json.numberCheck={roles:nc.roles, model:nc.model, summary:nc.summary, note:nc.note, repaired:true};
     json.rows.forEach((row,ri)=>{ const r=nc.rows[ri]; if(!r) return;
-      row.isTotal=r.isTotal; row.check={}; row.corrected={};
+      row.isTotal=r.isTotal; row.check={}; row.asRead={};
       for(const k in r.cells){ const c=r.cells[k]; if(!nc.roles[k]) continue; row.check[k]=c.status+(c.note?' — '+c.note:'');
-        if((c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined) row.corrected[k]=c.fixedText; } });
+        if((c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined){ row.asRead[k]=row.cells[k]; row.cells[k]=c.fixedText; } }
+      if(!Object.keys(row.asRead).length) delete row.asRead;
+      const after=(r.rules&&r.rules.after)||[];
+      row.rules={pass:after.filter(x=>x.status==='pass').map(x=>x.id), fail:after.filter(x=>x.status==='fail').map(x=>x.id)}; });
   }catch(e){ json.numberCheck={error:String(e&&e.message||e)}; }
+  /* The product match (stage PR · Product Match), when it has answered: per
+     row the product the item was matched to (status match / uncertain /
+     none / total, the score, id, code, name, strength, category, MRP =
+     UnitSalePrice, the purchase and trade prices) and the comparison of the
+     invoice TP with the purchase price on file; `products` sums it up. */
+  try{
+    const P=S.products;
+    if(P && P.status==='done' && P.results){
+      const counts={match:0, uncertain:0, none:0, priceDiff:0};
+      json.rows.forEach((row,ri)=>{ const r=P.results[ri]; if(!r) return;
+        const st=r.status; if(st in counts) counts[st]++;
+        const o={status:st, score:r.score||0};
+        if(r.product){ const p=r.product; Object.assign(o,{id:p.id, code:p.code, name:p.name, strength:p.strength, category:p.category, manufacturer:p.manufacturer, mrp:p.mrp, purchasePrice:p.purchasePrice, tradePrice:p.tradePrice, unitConversion:p.unitConversion}); }
+        if(r.price){ o.price={invoiceTp:r.price.invoiceTp, onFile:r.price.nearest, relDiff:r.price.relDiff, differs:r.price.differs}; if(r.price.differs) counts.priceDiff++; }
+        row.product=o; });
+      json.products={engine:P.engine, matchMs:P.matchMs, ms:Math.round(P.ms), ...counts};
+    } else if(P) json.products={status:P.status, error:P.error||undefined};
+  }catch(e){ json.products={error:String(e&&e.message||e)}; }
   return json;
 }
 

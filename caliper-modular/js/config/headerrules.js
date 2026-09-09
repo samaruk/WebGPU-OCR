@@ -13,10 +13,18 @@
        key      – semantic name (sl, code, name, pack, batch, unit, qty,
                   bonus, tp, vat, tpVat, tpValue, vatValue, discountPct,
                   discountValue, mfg, exp, sbu, net …) — free, but keep
-                  the same key for the same meaning across rules
+                  the same key for the same meaning across rules; the
+                  number check reads keys without case or punctuation, so
+                  tp / unittp, tpValue / totaltp, discountValue / totaldiscount
+                  name the same thing
        label    – the printed title exactly as on the page; it is split
                   into alphanumeric tokens for matching ("%" → "pct"),
                   so "Batch No." matches "Batch" over "No." on two lines
+       relation – optional: how this column's value follows from others,
+                  keys in braces — '{qty}*{unittp}', '{totaltp}*{discountpct}/100',
+                  '{totaltp}+{totalvat}-{totaldiscount}'. The number check
+                  uses it in place of its built-in guesses for that column:
+                  to verify the row, to fill a blank cell, to fix a misread
        x0, x1   – the column's left / right edge as a fraction of the
                   header strip width (0 = left edge, 1 = right edge),
                   measured on a sample page; they seed the boundaries
@@ -34,13 +42,13 @@ export const HEADER_RULES=[
       {key:'pack',          label:'Pack Size.',              x0:0.31, x1:0.37},
       {key:'batch',         label:'Batch No.',               x0:0.37, x1:0.45},
       {key:'qty',           label:'Qty',                     x0:0.45, x1:0.50},
-      {key:'tp',            label:'Trade',                   x0:0.50, x1:0.56, group:'Per pack'},
-      {key:'vat',           label:'VAT',                     x0:0.56, x1:0.62, group:'Per pack'},
-      {key:'tpValue',       label:'Trade',                   x0:0.62, x1:0.70, group:'Value'},
-      {key:'vatValue',      label:'VAT',                     x0:0.70, x1:0.79, group:'Value'},
-      {key:'discountPct',   label:'%',                       x0:0.79, x1:0.84, group:'Discount'},
-      {key:'discountValue', label:'Value',                   x0:0.84, x1:0.90, group:'Discount'},
-      {key:'net',           label:'Net Value',               x0:0.90, x1:1.00}
+      {key:'unittp',            label:'Trade',                   x0:0.50, x1:0.56, group:'Per pack'},
+        { key: 'unitvat', label: 'VAT', x0: 0.56, x1: 0.62, group: 'Per pack' },
+        { key: 'totaltp', label: 'Trade', x0: 0.62, x1: 0.70, group: 'Value', relation:'{qty}*{unittp}'},
+        { key: 'totalvat', label: 'VAT', x0: 0.70, x1: 0.79, group: 'Value', relation: '{qty}*{unitvat}' },
+      {key:'discountpct',   label:'%',                       x0:0.79, x1:0.84, group:'Discount'},
+        { key: 'totaldiscount', label: 'Value', x0: 0.84, x1: 0.90, group: 'Discount', relation: '{totaltp}*{discountpct}/100' },
+        { key: 'net', label: 'Net Value', x0: 0.90, x1: 1.00, relation: '{totaltp}+{totalvat}-{totaldiscount}' }
     ] },
     { id:'renata', name:'Renata (Code / Product Name / Trade Price)',
     columns:[
