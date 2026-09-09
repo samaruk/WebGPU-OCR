@@ -73,10 +73,12 @@ public sealed class InvoicePipeline
         long ocrMs = ocrWatch.ElapsedMilliseconds;
 
         IReadOnlyList<OcrLine> lines = ToLines(ocr, image.Width, image.Height);
-        var paddle = new EngineResult("paddle", "PaddleOCR PP-OCRv5 mobile", "ok", null, ocrMs, null);
+        // PaddleOCR reports region boxes only: its characters are interpolated
+        // along each region (Estimated), like EasyOCR's; Tesseract's are reported
+        var paddle = new EngineResult("paddle", "PaddleOCR PP-OCRv5 mobile", "ok", null, ocrMs, Symbols.EstimateAll(lines)) { Words = lines };
         var engines = new List<EngineResult> { paddle, tess, easy };
         var extra = new Dictionary<string, IReadOnlyList<OcrLine>>();
-        foreach (var e in new[] { easy, tess }) if (e.Status == "ok" && e.Lines is not null) extra[e.Name] = e.Lines;
+        foreach (var e in new[] { easy, tess }) if (e.Status == "ok" && e.Words is not null) extra[e.Name] = e.Words;
 
         BriefResult? brief = depth is AnalysisDepth.Brief or AnalysisDepth.Both
             ? new BriefResult(lines, string.Join("\n", lines.Select(l => l.Text)))
@@ -88,8 +90,8 @@ public sealed class InvoicePipeline
             : null;
         long layoutMs = layoutWatch.ElapsedMilliseconds;
 
-        _log.LogInformation("Analysed {W}x{H} image: {Regions} paddle regions, tesseract {Tess} ({TessN}), easyocr {Easy} ({EasyN}), ocr {Ocr} ms, layout {Layout} ms",
-            image.Width, image.Height, lines.Count, tess.Status, tess.Lines?.Count ?? 0, easy.Status, easy.Lines?.Count ?? 0, ocrMs, layoutMs);
+        _log.LogInformation("Analysed {W}x{H} image: {Regions} paddle regions ({PaddleC} chars), tesseract {Tess} ({TessN} words, {TessC} chars), easyocr {Easy} ({EasyN} fragments, {EasyC} chars), ocr {Ocr} ms, layout {Layout} ms",
+            image.Width, image.Height, lines.Count, paddle.Characters?.Count ?? 0, tess.Status, tess.Words?.Count ?? 0, tess.Characters?.Count ?? 0, easy.Status, easy.Words?.Count ?? 0, easy.Characters?.Count ?? 0, ocrMs, layoutMs);
 
         return new InvoiceAnalysis(
             depth.ToString().ToLowerInvariant(),

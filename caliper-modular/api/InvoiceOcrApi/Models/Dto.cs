@@ -48,12 +48,27 @@ public sealed record TableResult(
 }
 
 /// <summary>
-/// One engine's reading of the page. Name: paddle | tesseract5 | easyocr.
-/// Status: ok | unavailable | loading | error | disabled. Lines: the regions
-/// (Tesseract and EasyOCR: one per word / fragment, each with its own box);
-/// null for PaddleOCR, whose regions are brief.lines.
+/// One recognised character. Text is a single symbol; Confidence 0–1; Word is
+/// the index of the engine's word / region the symbol belongs to (so words
+/// can be rebuilt by grouping); Estimated is true when the engine reports
+/// only the word or region box and the symbol's box was interpolated along it
+/// by character count (PaddleOCR, EasyOCR), false when the engine reported
+/// the box itself (Tesseract, hOCR character boxes).
 /// </summary>
-public sealed record EngineResult(string Name, string Label, string Status, string? Error, long Ms, IReadOnlyList<OcrLine>? Lines);
+public sealed record OcrSymbol(int Index, string Text, double Confidence, Box Bbox, int Word, bool Estimated);
+
+/// <summary>
+/// One engine's reading of the page. Name: paddle | tesseract5 | easyocr.
+/// Status: ok | unavailable | loading | error | disabled. Characters: every
+/// recognised symbol with its own box (see <see cref="OcrSymbol"/>); null when
+/// the engine did not run. Words is the same reading grouped into the engine's
+/// words / regions, kept for the layout step and not serialised: a caller
+/// rebuilds words by grouping Characters on Word.
+/// </summary>
+public sealed record EngineResult(string Name, string Label, string Status, string? Error, long Ms, IReadOnlyList<OcrSymbol>? Characters)
+{
+    [JsonIgnore] public IReadOnlyList<OcrLine>? Words { get; init; }
+}
 
 /// <summary>A key field read from a row: the row's text after the label and the numbers in it.</summary>
 public sealed record Field(string Key, int Row, string Text, IReadOnlyList<string> Numbers);

@@ -83,7 +83,11 @@ public sealed class TesseractEngine
 
     public EngineResult Skipped() => new(EngineName, Label, Status, Error, 0, null);
 
-    /// <summary>Reads the image file; every word becomes one region.</summary>
+    /// <summary>
+    /// Reads the image file in hOCR mode with character boxes: every word
+    /// comes back with its box and confidence (x_wconf) and every character
+    /// inside it with its own box and confidence (ocrx_cinfo: x_bboxes, x_conf).
+    /// </summary>
     public async Task<EngineResult> RunAsync(string imagePath, int width, int height, CancellationToken ct)
     {
         if (Status != "ok" || _exe is null) return Skipped();
@@ -91,12 +95,12 @@ public sealed class TesseractEngine
         await _gate.WaitAsync(ct);
         try
         {
-            var args = new[] { imagePath, "stdout", "--psm", _psm.ToString(CultureInfo.InvariantCulture), "-l", _language, "tsv" };
+            var args = new[] { imagePath, "stdout", "--psm", _psm.ToString(CultureInfo.InvariantCulture), "-l", _language, "-c", "hocr_char_boxes=1", "hocr" };
             var (stdout, stderr, code) = await Task.Run(() => Run(_exe, args, TimeSpan.FromSeconds(180)), ct);
             if (code != 0)
                 return new EngineResult(EngineName, Label, "error", "tesseract exited with code " + code + ": " + Tail(stderr), watch.ElapsedMilliseconds, null);
-            var lines = ParseTsv(stdout, width, height);
-            return new EngineResult(EngineName, Label, "ok", null, watch.ElapsedMilliseconds, lines);
+            var (words, chars) = ParseHocr(stdout, width, height);
+            return new EngineResult(EngineName, Label, "ok", null, watch.ElapsedMilliseconds, chars) { Words = words };
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -107,26 +111,62 @@ public sealed class TesseractEngine
         finally { _gate.Release(); }
     }
 
-    /// <summary>TSV: level page block par line word left top width height conf text; level 5 = word.</summary>
-    private static IReadOnlyList<OcrLine> ParseTsv(string tsv, int width, int height)
+    private static readonly System.Text.RegularExpressions.Regex BoxRe = new(@"\b(?:bbox|x_bboxes) (\d+) (\d+) (\d+) (\d+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ConfRe = new(@"\bx_w?conf ([\d.]+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// hOCR is XHTML: every <c>ocrx_word</c> span (title "bbox x0 y0 x1 y1;
+    /// x_wconf N") holds one <c>ocrx_cinfo</c> span per character (title
+    /// "x_bboxes x0 y0 x1 y1; x_conf F"). Words keep the layout step working;
+    /// the characters are the reported symbols. A word without character spans
+    /// (a build without hocr_char_boxes) gets interpolated ones. hOCR boxes are
+    /// exclusive at the far edge; ours are inclusive.
+    /// </summary>
+    private static (IReadOnlyList<OcrLine> words, IReadOnlyList<OcrSymbol> chars) ParseHocr(string hocr, int width, int height)
     {
         var words = new List<OcrLine>();
-        foreach (string raw in tsv.Split('\n'))
+        var chars = new List<OcrSymbol>();
+        Box? boxOf(string? title)
         {
-            string line = raw.TrimEnd('\r');
-            string[] f = line.Split('\t');
-            if (f.Length < 12 || f[0] != "5") continue;
-            string text = f[11].Trim();
-            if (text.Length == 0) continue;
-            if (!double.TryParse(f[10], NumberStyles.Float, CultureInfo.InvariantCulture, out double conf) || conf < 0) continue;
-            int left = int.Parse(f[6], CultureInfo.InvariantCulture), top = int.Parse(f[7], CultureInfo.InvariantCulture);
-            int w = int.Parse(f[8], CultureInfo.InvariantCulture), h = int.Parse(f[9], CultureInfo.InvariantCulture);
-            int x0 = Math.Clamp(left, 0, width - 1), y0 = Math.Clamp(top, 0, height - 1);
-            int x1 = Math.Clamp(left + w - 1, 0, width - 1), y1 = Math.Clamp(top + h - 1, 0, height - 1);
-            var poly = new[] { new[] { x0, y0 }, new[] { x1, y0 }, new[] { x1, y1 }, new[] { x0, y1 } };
-            words.Add(new OcrLine(words.Count, text, Math.Round(conf / 100.0, 4), poly, new Box(x0, y0, x1, y1)));
+            var m = title is null ? null : BoxRe.Match(title);
+            if (m is null || !m.Success) return null;
+            int x0 = Math.Clamp(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), 0, width - 1), y0 = Math.Clamp(int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture), 0, height - 1);
+            int x1 = Math.Clamp(int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture) - 1, x0, width - 1), y1 = Math.Clamp(int.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture) - 1, y0, height - 1);
+            return new Box(x0, y0, x1, y1);
         }
-        return words;
+        double confOf(string? title)
+        {
+            var m = title is null ? null : ConfRe.Match(title);
+            return m is { Success: true } && double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double c) ? Math.Round(Math.Clamp(c, 0, 100) / 100.0, 4) : 0;
+        }
+        var settings = new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Ignore, XmlResolver = null };
+        using var sr = new StringReader(hocr);
+        using var xr = System.Xml.XmlReader.Create(sr, settings);
+        var doc = System.Xml.Linq.XDocument.Load(xr);
+        static string? cls(System.Xml.Linq.XElement e) => (string?)e.Attribute("class");
+        foreach (var w in doc.Descendants().Where(e => e.Name.LocalName == "span" && cls(e) == "ocrx_word"))
+        {
+            var box = boxOf((string?)w.Attribute("title"));
+            if (box is null) continue;
+            double wconf = confOf((string?)w.Attribute("title"));
+            var wordChars = new List<OcrSymbol>();
+            var sb = new System.Text.StringBuilder();
+            foreach (var c in w.Descendants().Where(e => e.Name.LocalName == "span" && cls(e) == "ocrx_cinfo"))
+            {
+                string ch = c.Value.Trim();
+                var cb = boxOf((string?)c.Attribute("title"));
+                if (ch.Length == 0 || cb is null) continue;
+                wordChars.Add(new OcrSymbol(0, ch, confOf((string?)c.Attribute("title")), cb, words.Count, false));
+                sb.Append(ch);
+            }
+            string text = wordChars.Count > 0 ? sb.ToString() : w.Value.Trim();
+            if (text.Length == 0) continue;
+            var poly = new[] { new[] { box.X0, box.Y0 }, new[] { box.X1, box.Y0 }, new[] { box.X1, box.Y1 }, new[] { box.X0, box.Y1 } };
+            words.Add(new OcrLine(words.Count, text, wconf, poly, box));
+            if (wordChars.Count > 0) foreach (var c in wordChars) chars.Add(c with { Index = chars.Count });
+            else Symbols.Estimate(chars, text, box, wconf, words.Count - 1);
+        }
+        return (words, chars);
     }
 
     private static (string stdout, string stderr, int code) Run(string exe, string[] args, TimeSpan timeout)

@@ -553,19 +553,49 @@ function renderApi(A,ctx,W,H,base,T){
       ctx.lineWidth=sw*0.8; ctx.strokeStyle='rgba(110,200,255,.85)';
       for(const c of t.columns.slice(1)){ const xTop=c.x0-0.5-s*t.bbox.y0, xBot=c.x0-0.5-s*t.bbox.y1; ctx.beginPath(); ctx.moveTo(xTop,t.bbox.y0); ctx.lineTo(xBot,t.bbox.y1); ctx.stroke(); }
       if(voted){
-        /* every table cell: the voted text in the colour of who agreed; the
-           cell box is PaddleOCR's when it read there, else row band × column span */
+        /* every table cell, CHARACTER by character: the engine that supplied
+           the cell's voted text is the anchor; each of its symbols is drawn
+           in its own box and coloured by which engines read the same symbol
+           at the same place (a symbol of another engine whose centre lies
+           within the anchor symbol's x span on the same row). So a cell that
+           two engines spell differently shows exactly which characters they
+           dispute, instead of one colour for the whole label. The anchor
+           symbol's box is the engine's own (Tesseract) or interpolated along
+           its region (PaddleOCR, EasyOCR). */
+        const engines=apiEngineList(A.response), byName={}; for(const e of engines) byName[e.name]=e;
+        const order=['paddle','easyocr','tesseract5'];
+        const inRow=(c,row)=>{ const cy=(c.bbox.y0+c.bbox.y1)/2; return cy>=row.bbox.y0-2 && cy<=row.bbox.y1+2; };
         for(let ri=0;ri<t.rowCount;ri++){
           const row=D.rows[t.firstRow+ri]; if(!row) continue;
           const cy=(row.bbox.y0+row.bbox.y1)/2;
+          // the symbols of every engine on this row, sorted by x
+          const rowChars={}; for(const e of engines) rowChars[e.name]=(e.characters||[]).filter(c=>c.bbox&&inRow(c,row)).sort((a,b)=>a.bbox.x0-b.bbox.x0);
           t.consensus[ri].forEach((text,ci)=>{
             if(!text) return;
-            const src=t.consensusSource[ri][ci], k=voteKey(src), vc=VOTE_COLORS.find(v=>v.key===k);
-            counts[k]=(counts[k]||0)+1;
+            const src=t.consensusSource[ri][ci]||'', names=(src.startsWith('vote:')?src.slice(5):src).split('+').filter(Boolean);
             const cell=row.cells&&row.cells[ci], col=t.columns[ci];
             const b=cell&&cell.bbox?cell.bbox:{x0:Math.round(col.x0-s*cy), y0:row.bbox.y0, x1:Math.round(col.x1-s*cy), y1:row.bbox.y1};
             ctx.fillStyle='rgba(8,11,12,.6)'; ctx.fillRect(b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
-            fitText(ctx,text,b); ctx.fillStyle=vc?vc.color:'rgba(200,210,215,.9)'; ctx.fillText(text,b.x0+2,(b.y0+b.y1)/2);
+            // the anchor: the engine that supplied the text, first in vote order, that has symbols in this cell
+            const inCell=c=>{ const cx=(c.bbox.x0+c.bbox.x1)/2; return cx>=b.x0-2 && cx<=b.x1+2; };
+            const anchorName=order.filter(n=>names.includes(n)).concat(order).find(n=>byName[n] && rowChars[n].some(inCell));
+            const anchor=anchorName?rowChars[anchorName].filter(inCell):[];
+            if(!anchor.length){                              // no symbols: the voted text as one label
+              const k=voteKey(src), vc=VOTE_COLORS.find(v=>v.key===k); counts[k]=(counts[k]||0)+text.length;
+              fitText(ctx,text,b); ctx.fillStyle=vc?vc.color:'rgba(200,210,215,.9)'; ctx.fillText(text,b.x0+2,(b.y0+b.y1)/2); return; }
+            for(const ch of anchor){
+              const cb=ch.bbox, cw=Math.max(3,cb.x1-cb.x0+1), cxm=(cb.x0+cb.x1)/2;
+              const agree=[anchorName];
+              for(const n of order){ if(n===anchorName || !byName[n] || byName[n].status!=='ok') continue;
+                // the other engine's symbol nearest in x within 0.6 of the anchor symbol's width
+                let best=null, bd=1/0; for(const o of rowChars[n]){ const d=Math.abs((o.bbox.x0+o.bbox.x1)/2-cxm); if(d<bd){ bd=d; best=o; } }
+                if(best && bd<=0.6*cw && best.text===ch.text) agree.push(n); }
+              const k=agree.slice().sort((a,b)=>order.indexOf(a)-order.indexOf(b)).join('+'), vc=VOTE_COLORS.find(v=>v.key===k);
+              counts[k]=(counts[k]||0)+1;
+              const h=cb.y1-cb.y0+1; ctx.font=`600 ${Math.max(6,Math.min(h*0.9,cw*1.6))}px "JetBrains Mono", monospace`;
+              ctx.fillStyle=vc?vc.color:'rgba(200,210,215,.9)'; ctx.textAlign='center'; ctx.fillText(ch.text,cxm,(cb.y0+cb.y1)/2); ctx.textAlign='left';
+              if(!ch.estimated){ ctx.lineWidth=Math.max(0.5,sw*0.3); ctx.strokeStyle='rgba(255,130,190,.35)'; ctx.strokeRect(cb.x0,cb.y0,cw,h); }
+            }
           });
         }
       }
@@ -574,10 +604,11 @@ function renderApi(A,ctx,W,H,base,T){
       tableNote=t.rowCount+' rows × '+t.columnCount+' columns'+(t.footerCut?' (footer cut by '+t.footerCut+')':'');
     }
   }
-  if(voted) drawLegend(ctx,T,W,H,VOTE_COLORS.map(v=>({label:v.label+(counts[v.key]?' '+counts[v.key]:''), color:v.color})));
+  if(voted) drawLegend(ctx,T,W,H,VOTE_COLORS.map(v=>({label:v.label.replace(' (most confident)','')+(counts[v.key]?' '+counts[v.key]:''), color:v.color})).concat([{label:'per character · pink box = engine-reported symbol box', color:'rgba(255,130,190,.35)'}]));
   ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
-  const engines=(R.engines||[]).map(e=>e.name+' '+e.status+(e.lines?' '+e.lines.length+'w':'')+(e.ms?' '+e.ms+'ms':'')).join(', ');
-  const votedN=voted?t.consensusSource.flat().filter(x=>x.startsWith('vote')).length+' of '+t.consensusSource.flat().filter(Boolean).length+' cells by agreement, the rest the most confident engine':'';
+  const engines=(R.engines||[]).map(e=>e.name+' '+e.status+(e.characters?' '+e.characters.length+'ch':e.lines?' '+e.lines.length+'w':'')+(e.ms?' '+e.ms+'ms':'')).join(', ');
+  const totalCh=Object.values(counts).reduce((a,b)=>a+b,0), agreedCh=Object.keys(counts).filter(k=>k.includes('+')).reduce((a,k)=>a+counts[k],0);
+  const votedN=voted?agreedCh+' of '+totalCh+' table characters read alike by two or more engines':'';
   T.badge('API · combined · '+R.depth+' · '+regions.length+' PaddleOCR regions · server '+R.timing.totalMs+' ms (ocr '+R.timing.ocrMs+'), round trip '+Math.round(A.ms)+' ms · table: '+tableNote+(engines?' · engines: '+engines:'')+(votedN?' · '+votedN:'')+(D?' · fields: '+D.fields.map(f=>f.key).join(', '):''));
 }
 

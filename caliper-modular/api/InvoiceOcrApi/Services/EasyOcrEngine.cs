@@ -181,7 +181,10 @@ public sealed class EasyOcrEngine : IDisposable
             var root = doc.RootElement;
             if (!(root.TryGetProperty("ok", out var ok) && ok.GetBoolean()))
                 return new EngineResult(EngineName, Label, "error", root.TryGetProperty("error", out var e) ? e.GetString() : "EasyOCR failed", watch.ElapsedMilliseconds, null);
+            // one region per fragment; EasyOCR reports no character boxes, so
+            // the characters are interpolated along each fragment (Estimated)
             var lines = new List<OcrLine>();
+            var chars = new List<OcrSymbol>();
             foreach (var item in root.GetProperty("items").EnumerateArray())
             {
                 string text = (item.GetProperty("text").GetString() ?? string.Empty).Trim();
@@ -192,9 +195,11 @@ public sealed class EasyOcrEngine : IDisposable
                     .ToArray();
                 if (poly.Length < 2) continue;
                 var box = new Box(poly.Min(p => p[0]), poly.Min(p => p[1]), poly.Max(p => p[0]), poly.Max(p => p[1]));
-                lines.Add(new OcrLine(lines.Count, text, Math.Round(Math.Clamp(conf, 0, 1), 4), poly, box));
+                double confidence = Math.Round(Math.Clamp(conf, 0, 1), 4);
+                lines.Add(new OcrLine(lines.Count, text, confidence, poly, box));
+                Symbols.Estimate(chars, text, box, confidence, lines.Count - 1);
             }
-            return new EngineResult(EngineName, Label, "ok", null, watch.ElapsedMilliseconds, lines);
+            return new EngineResult(EngineName, Label, "ok", null, watch.ElapsedMilliseconds, chars) { Words = lines };
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
