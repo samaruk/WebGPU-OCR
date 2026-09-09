@@ -141,7 +141,7 @@ console.log('\n[R] ACME layout, relations written in the header rule');
   check(res.roles.unittp==='unitTp' && res.roles.unitvat==='unitVat' && res.roles.totaltp==='totalTp' && res.roles.totalvat==='totalVat' && res.roles.discountpct==='discPct' && res.roles.totaldiscount==='discAmt' && res.roles.net==='net', 'the rule keys map to their roles');
   const ids=res.model.relations.map(r=>r.id);
   check(ids.includes('rule:totaltp') && ids.includes('rule:totalvat') && ids.includes('rule:totaldiscount') && ids.includes('rule:net'), 'the four rule relations are in force ('+ids.join(', ')+')');
-  check(!ids.some(id=>/^(ttp|tvat|tvatpct|discA|discB|net[1-5])$/.test(id)), 'the built-in variants of those targets stand aside');
+  check(!ids.some(id=>/^(ttp|tvat|discA|discB|net[1-5])$/.test(id)), 'the built-in variants of those targets stand aside ('+ids.join(', ')+')');
   check(cell(res,3,'totalvat').status==='fixed' && cell(res,3,'totalvat').value===3.93, 'row 4 total VAT 393 → 3.93');
   check(cell(res,5,'totalvat').status==='fixed' && cell(res,5,'totalvat').value===8.54, 'row 6 total VAT 854 → 8.54');
   check(cell(res,4,'net').status==='filled' && cell(res,4,'net').value===172.02, 'row 5 net filled 172.02');
@@ -150,6 +150,47 @@ console.log('\n[R] ACME layout, relations written in the header rule');
   const solved=ruleRelations(relations,{qty:'qty',unittp:'unitTp',totaltp:'totalTp',unitvat:'unitVat',totalvat:'totalVat',discountpct:'discPct',totaldiscount:'discAmt',net:'net'});
   const ttp=solved.find(r=>r.id==='rule:totaltp');
   check(Math.abs(ttp.solve('unitTp',{qty:3,totalTp:46.53})-15.51)<1e-6 && Math.abs(ttp.solve('qty',{unitTp:15.51,totalTp:46.53})-3)<1e-6, 'a rule relation solves for its other columns');
+}
+
+
+/* ---- the catalogue's relations, written with canonical keys, on a table a rule keyed tp / tpValue / vatValue */
+console.log('\n[C] catalogue relations resolve by meaning');
+{
+  const keys=['name','pack','tp','vat','tpVat','qty','bonus','tpValue','vatValue','discountValue','net'];
+  const rows=[
+    ['BACTIN D EYE & EAR DROP','5ml','56.43','9.82','66.25','2','0','112.86','19.64','0.00','132.50'],
+    ['BACTIN EYE DROP-5ML','5ml','26.34','4.58','30.92','2','0','52.68','9.16','0.00','61.84'],
+    ['FLOROMOX EYE DROPS','5ml','86.21','15.00','101.21','2','0','','30.00','0.00','202.42'],       // total TP missing
+  ];
+  const T=table(keys,rows); T.relations=[{key:'tpValue',formula:'{qty}*{unittp}',source:'catalogue'},{key:'net',formula:'{totaltp}+{totalvat}-{totaldiscount}',source:'catalogue'}];
+  const res=analyseNumbers(T); show(res);
+  const ids=res.model.relations.map(r=>r.id);
+  check(ids.includes('type:tpValue') && ids.includes('type:net'), 'the catalogue relations are in force on tp / tpValue keys ('+ids.join(', ')+')');
+  check(cell(res,2,'tpValue').status==='filled' && cell(res,2,'tpValue').value===172.42, 'row 3 total TP filled 172.42 by qty × unit TP');
+  // a relation that does not fit the table yields to the built-in variants
+  const T2=table(keys,rows); T2.relations=[{key:'net',formula:'{qty}*{unittp}',source:'catalogue'}];
+  const res2=analyseNumbers(T2); const ids2=res2.model.relations.map(r=>r.id);
+  check(!ids2.includes('type:net') && ids2.some(id=>/^net/.test(id)), 'a wrong catalogue relation for net is dropped, a built-in net variant stays ('+ids2.join(', ')+')');
+}
+
+
+/* ---- a quantity that is not a number, computed in several ways */
+console.log('\n[Q] a quantity read as a letter is computed from the other cells of the row');
+{
+  const keys=['name','pack','tp','vat','tpVat','qty','bonus','tpValue','vatValue','discountValue','net'];
+  const rows=[
+    ['BACTIN D EYE & EAR DROP','5ml','56.43','9.82','66.25','Z','0','112.86','19.64','0.00','132.50'],     // qty read as Z: total TP / unit TP = 2, total VAT / unit VAT = 2, net / (TP+VAT) = 2
+    ['BACTIN EYE DROP-5ML','5ml','26.34','4.58','30.92','2l','0','52.68','9.16','0.00','61.84'],           // qty read as 2l
+    ['BROMOFEN EYE DROPS','5ml','74.96','13.04','88.00','1','0','74.96','13.04','0.00','88.00'],
+    ['FLOROMOX EYE DROPS','5ml','86.21','15.00','101.21','','0','','30.00','0.00','202.42'],               // qty AND total TP blank: qty from total VAT / unit VAT, then total TP
+    ['SINAFRESH LIQUIGEL','10ml','187.41','32.61','220.02','~','0','374.82','65.22','0.00','440.04'],
+  ];
+  const res=analyseNumbers(table(keys,rows)); show(res);
+  check(cell(res,0,'qty').status==='filled' && cell(res,0,'qty').value===2 && /ways agree/.test(cell(res,0,'qty').note||''), 'row 1 qty "Z" → 2, several ways agree ('+(cell(res,0,'qty').note||'')+')');
+  check(cell(res,1,'qty').status==='filled' && cell(res,1,'qty').value===2, 'row 2 qty "2l" → 2');
+  check(cell(res,3,'qty').status==='filled' && cell(res,3,'qty').value===2 && cell(res,3,'tpValue').status==='filled' && cell(res,3,'tpValue').value===172.42, 'row 4 qty blank → 2 by the VAT, then total TP 172.42');
+  check(cell(res,4,'qty').status==='filled' && cell(res,4,'qty').value===2, 'row 5 qty "~" → 2');
+  check(res.summary.conflicts===0, 'no conflicts');
 }
 
 console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED');

@@ -70,12 +70,16 @@ const roleOfRuleKey=k=>KEY_ROLE[String(k||'').toLowerCase().replace(/[^a-z0-9]/g
    two evaluations give the value, a secant step or two confirm it).      */
 export function ruleRelations(list, roleOfKey){
   const out=[];
-  for(const {key, formula} of list||[]){
+  // a key in braces is the table's own key, else any key of the same meaning
+  // ('{unittp}' on a table a rule keyed tp): the role is what the formula reads
+  const present=new Set(Object.values(roleOfKey));
+  const roleOf=k=>{ if(roleOfKey[k]) return roleOfKey[k]; const r=roleOfRuleKey(k); return r && present.has(r) ? r : null; };
+  for(const {key, formula, source} of list||[]){
     const target=roleOfKey[key]; if(!target || target.endsWith('?')) continue;
     const refs=[...String(formula).matchAll(/\{([^}]+)\}/g)].map(m=>m[1].trim());
     if(!refs.length || refs.includes(key)) continue;
-    const vars=refs.map(k=>roleOfKey[k]); if(vars.some(v=>!v || v.endsWith('?'))) continue;
-    const body=String(formula).replace(/\{([^}]+)\}/g,(m,k)=>'v.'+roleOfKey[k.trim()]);
+    const vars=refs.map(roleOf); if(vars.some(v=>!v || v.endsWith('?'))) continue;
+    const body=String(formula).replace(/\{([^}]+)\}/g,(m,k)=>'v.'+roleOf(k.trim()));
     if(!/^[\sA-Za-z0-9_.+\-*/()]+$/.test(body)) continue;                 // numbers, operators, brackets and role names only
     let f; try{ f=new Function('v','return ('+body+');'); }catch(e){ continue; }
     const num=x=>(typeof x==='number' && isFinite(x))?x:null;
@@ -90,7 +94,7 @@ export function ruleRelations(list, roleOfKey){
       return num(x); };
     const shown=String(formula).replace(/\{([^}]+)\}/g,'$1').replace(/\*/g,' × ').replace(/\s+/g,' ');
     const uniq=[target].concat(vars.filter((v,i)=>v!==target && vars.indexOf(v)===i));
-    out.push(rel('rule:'+key, key+' = '+shown, uniq, solve, {rule:true, perUnit:vars.includes('qty') && /\*/.test(formula)}));
+    out.push(rel((source==='catalogue'?'type:':'rule:')+key, key+' = '+shown, uniq, solve, {rule:true, source:source||'rule', perUnit:vars.includes('qty') && /\*/.test(formula)}));
   }
   return out;
 }
@@ -236,10 +240,13 @@ export function analyseNumbers(table, opts={}){
     if(roleOfKey[k]==='vat?' && pctShare>=0.5) roleOfKey[k]='vatPct';
     if(roleOfKey[k]==='disc?' && pctShare>=0.5) roleOfKey[k]='discPct'; }
 
-  // the rule's own relations first: they replace the built-in variants of their targets
-  const ruleRels=ruleRelations(table.relations, roleOfKey);
-  const ruleTargets=new Set(ruleRels.map(R=>R.vars[0]));
-  const REL=ruleRels.length ? RELATIONS.filter(R=>!ruleTargets.has(R.vars[0])).concat(ruleRels) : RELATIONS;
+  // the rule's (and the column catalogue's) own relations: each competes with
+  // the built-in variants of its target in one group per target and wins the
+  // group whenever it holds on the rows — a written relation that does not
+  // fit a table yields to the check's own guesses instead of silencing them
+  // (built per role assignment: a written relation may name a column whose role is still ambiguous)
+  const relsFor=map=>{ const rr=ruleRelations(table.relations, map); if(!rr.length) return RELATIONS;
+    const tg=new Set(rr.map(R=>R.vars[0])); return RELATIONS.map(R=>tg.has(R.vars[0])?{...R, group:'tgt:'+R.vars[0]}:R).concat(rr.map(R=>({...R, group:'tgt:'+R.vars[0]}))); };
 
   /* 2 · total rows (a sub-total line inside the table) --------------------- */
   const isTotalRow=[];
@@ -270,7 +277,7 @@ export function analyseNumbers(table, opts={}){
   const scoreAssignment=asg=>{ const map={...roleOfKey}; for(const k in asg) map[k]=asg[k];
     const used=new Set(Object.values(map)); if(used.size<Object.values(map).length) return {score:-1};  // two columns, one role: impossible
     let score=0; const stats={};
-    for(const R of REL){ if(!R.vars.every(v=>used.has(v) || (R.optional||[]).includes(v))) continue; let n=0,k=0; const abs=optAbsent(R,used);
+    for(const R of relsFor(map)){ if(!R.vars.every(v=>used.has(v) || (R.optional||[]).includes(v))) continue; let n=0,k=0; const abs=optAbsent(R,used);
       for(const ri of itemIdx){ const v=valsWith(ri,map); if(!R.vars.every(x=>v[x]!==undefined || abs.includes(x))) continue; for(const x of abs) v[x]=0;
         const t=R.solve(R.vars[0],v); if(t===null) continue; n++; if(Math.abs(t-v[R.vars[0]])<=tolerance(R,v,t)) k++; }
       stats[R.id]={n,k}; if(n) score+=k-0.5*(n-k); }
@@ -296,11 +303,17 @@ export function analyseNumbers(table, opts={}){
   // hold on most of the complete rows it can be tested on
   const active=[];
   const groups={};
+  const REL=relsFor(roles);
   for(const R of REL){ const ok=R.vars.every(v=>present.has(v) || (R.optional||[]).includes(v)); if(!ok) continue;
     const st=stats[R.id]||{n:0,k:0}; const rate=st.n?st.k/st.n:0;
     const entry={R, n:st.n, k:st.k, rate};
     if(R.group){ const g=groups[R.group]||(groups[R.group]=[]); g.push(entry); } else if(st.n===0 || rate>=0.5) active.push(entry); }
-  for(const g of Object.values(groups)){ g.sort((a,b)=>b.rate-a.rate || b.k-a.k); const top=g[0]; if(top && (top.n===0 || top.rate>=0.5)) active.push(top); }
+  const written=e=>e.R.rule && (e.n===0 || e.rate>=0.5) ? (e.R.source==='rule'?2:1) : 0;   // a template's own relation first, then the catalogue's, when it holds
+  for(const g of Object.values(groups)){ g.sort((a,b)=>written(b)-written(a) || b.rate-a.rate || b.k-a.k); const top=g[0]; if(top && (top.n===0 || top.rate>=0.5)) active.push(top); }
+  // reserve: the variants that hold on the rows (tested, half or more) but lost their group
+  // — not used to judge a row, but to COMPUTE a missing value when the winner cannot
+  const activeSet=new Set(active.map(e=>e.R));
+  const reserve=[]; for(const g of Object.values(groups)) for(const e of g) if(!activeSet.has(e.R) && e.n>0 && e.rate>=0.5) reserve.push(e);
   // the implied VAT rate turns unit/total TP into unit/total VAT checks
   if(vatRate!==null){
     if(present.has('unitTp') && present.has('unitVat')) active.push({R:rel('uvat*',`unitVat = unitTp × ${vatRate}%`,['unitVat','unitTp'],(r,v)=>r==='unitVat'?v.unitTp*vatRate/100:div(v.unitVat*100,vatRate),{skipZero:['unitVat']}), n:0, k:0, rate:1, derived:true});
@@ -338,10 +351,29 @@ export function analyseNumbers(table, opts={}){
     const eachRel=fn=>{ for(const e of active){ const R=e.R, m=v(); if(R.skipZero && R.skipZero.some(x=>m[x]===0)) continue; const abs=optAbsent(R,present); const missing=R.vars.filter(x=>m[x]===undefined && !abs.includes(x)); for(const x of abs) m[x]=0; fn(R,m,missing); } };
     for(let iter=0; iter<4; iter++){
       let changed=false;
-      // fill: exactly one value missing
-      eachRel((R,m,missing)=>{ if(missing.length!==1) return; const x=missing[0]; const val=R.solve(x,m); if(val===null || !isFinite(val) || val<-1e-9) return;
-        const rounded=x==='qty'||x==='bonus'?Math.round(val):Math.round(val*100)/100; if((x==='qty') && Math.abs(val-rounded)>0.05) return;
-        setVal(x, rounded, 'filled', 'from '+R.formula); issues.push({cell:keyOfRole[x], type:'filled', by:R.id}); changed=true; });
+      /* fill: a value no relation can see — a blank cell, or a reading that is
+         not a number ("Z", "2l", "~") — is computed by EVERY relation that has
+         all its other values (the active ones and the reserve variants), in
+         as many ways as the row allows: a quantity from total TP / unit TP,
+         from total VAT / unit VAT, from the net …; the value the most of
+         them agree on is written (two agreeing ways beat one), an even
+         split between different values is left alone and noted */
+      const fillCand=new Map();                                     // role -> [{val, R, active}]
+      for(const e of active.concat(reserve)){ const R=e.R, m=v(); if(R.skipZero && R.skipZero.some(x=>m[x]===0)) continue; const abs=optAbsent(R,present);
+        const missing=R.vars.filter(x=>m[x]===undefined && !abs.includes(x)); if(missing.length!==1) continue; for(const x of abs) m[x]=0;
+        const x=missing[0]; if(!keyOfRole[x]) continue; const val=R.solve(x,m); if(val===null || !isFinite(val) || val<-1e-9) continue;
+        const rounded=x==='qty'||x==='bonus'?Math.round(val):Math.round(val*100)/100; if((x==='qty'||x==='bonus') && Math.abs(val-rounded)>0.05) continue;
+        (fillCand.get(x)||fillCand.set(x,[]).get(x)).push({val:rounded, R, active:activeSet.has(R)}); }
+      for(const [x,list] of fillCand){
+        const near=(a,b)=>x==='qty'||x==='bonus' ? a===b : Math.abs(a-b)<=Math.max(0.011,0.005*Math.abs(a));
+        const votes=[]; for(const c of list){ const g=votes.find(g=>near(g.val,c.val)); if(g){ g.n++; g.rels.push(c.R); g.active=g.active||c.active; } else votes.push({val:c.val, n:1, rels:[c.R], active:c.active}); }
+        votes.sort((a,b)=>b.n-a.n || (b.active?1:0)-(a.active?1:0) || (b.rels.some(R=>R.rule)?1:0)-(a.rels.some(R=>R.rule)?1:0));
+        let top=votes[0];
+        if(votes.length>1 && votes[1].n===top.n){ const act=votes.filter(g=>g.active); if(act.length===1) top=act[0];
+          else { const c=cells[keyOfRole[x]]; c.note='relations disagree: '+votes.map(g=>g.rels.map(R=>R.id).join('+')+' → '+g.val).join(', '); continue; } }
+        const c=cells[keyOfRole[x]], was=c.text;
+        setVal(x, top.val, 'filled', 'from '+top.rels.map(R=>R.id).join(', ')+(top.n>1?' ('+top.n+' ways agree)':'')+(was?' — was "'+was+'"':''));
+        issues.push({cell:keyOfRole[x], type:'filled', by:top.rels.map(R=>R.id).join('+'), ways:top.n, was}); changed=true; }
       if(changed) continue;
       // fix: violated relations vote for the value to change
       const m=v(); const status={}; const candidates=new Map();  // role -> [{val, rel}]
@@ -399,7 +431,7 @@ export function analyseNumbers(table, opts={}){
   const summary={rows:outRows.length, itemRows:outRows.filter(r=>!r.isTotal).length, cells:0, verified:0, filled:0, fixed:0, conflicts:0, unverified:0, unchecked:0, blank:0};
   for(const r of outRows) for(const k of keys){ if(!roles[k]) continue; const s=r.cells[k].status; summary.cells++; if(s==='verified') summary.verified++; else if(s==='filled') summary.filled++; else if(s==='fixed') summary.fixed++; else if(s==='conflict') summary.conflicts++; else if(s==='unverified') summary.unverified++; else if(s==='unchecked') summary.unchecked++; else if(s==='blank') summary.blank++; }
   return {
-    roles, model:{ vatRate, relations:active.map(e=>({id:e.R.id, formula:e.R.formula, testedRows:e.n, satisfied:e.k, derived:!!e.derived, rule:!!e.R.rule})) },
+    roles, model:{ vatRate, relations:active.map(e=>({id:e.R.id, formula:e.R.formula, testedRows:e.n, satisfied:e.k, derived:!!e.derived, rule:!!e.R.rule, source:e.R.source||'builtin'})) },
     rows:outRows, summary,
     note: active.length?'':'no relation could be formed from the recognised columns'
   };

@@ -37,6 +37,7 @@ import { apiRegions, apiEngineList } from '../api/api.js';
 import { analyseNumbers } from '../numcheck/numcheck.js';
 import { resolveColumnKeys, titleAgreement } from './columnkeys.js';
 import { HEADER_RULES } from '../config/headerrules.js';
+import { catalogueRelations } from '../config/columntypes.js';
 
 const norm=s=>(s||'').replace(/\s+/g,' ').trim();
 const key=s=>norm(s).toLowerCase().replace(/[\s.,:;'"`·]/g,'');
@@ -177,7 +178,7 @@ export function buildFinal(){
   const dedupeWords=s=>s.replace(/\b(\S+)(?: \1\b)+/gi,'$1');
   const headerSource=[];
   const headerLabels=cols.map((c,ci)=>{
-    if(c.label){ headerSource[ci]='rule'; return c.group && !c.label.toLowerCase().startsWith(c.group.toLowerCase()) ? c.group+' '+c.label : c.label; }   // "Per pack Trade", "Discount %": the group the rule gives
+    if(c.label){ headerSource[ci]=c.manual?'manual':'rule'; return c.group && !c.label.toLowerCase().startsWith(c.group.toLowerCase()) ? c.group+' '+c.label : c.label; }   // "Per pack Trade", "Discount %": the group the rule gives
     const apiWords=[], seen=new Set(); for(const bi of titleRows) for(const w of wordsIn(band[bi].row.dy.y0,band[bi].row.dy.y1)) if(colOf(w.xp)===ci && !seen.has(w)){ seen.add(w); apiWords.push(w); }
     const apiText=apiWords.length ? dedupeWords(norm(apiWords.sort((a,b)=>a.yp-b.yp||a.xp-b.xp).map(w=>w.text).join(' '))) : '';
     const localT=dedupeWords(norm(titleRows.map(bi=>localText(bi,ci)).join(' ')));
@@ -320,7 +321,7 @@ export function buildFinal(){
       if(r0 && r0.cells && !/\d/.test(r0.text||'')) for(const cell of r0.cells){ if(!cell.bbox || !cell.text) continue;
         const cx=(cell.bbox.x0+cell.bbox.x1)/2, cy=(cell.bbox.y0+cell.bbox.y1)/2; if(colOf(C.toDeskewedX(cx,cy))===ci) s.add(cell.text); } }
     return [...s]; });
-  const named=resolveColumnKeys({keys:cols.map(c=>c.key||null), labels:headerLabels, titleCands, columnValues:cols.map((c,ci)=>grid.map(r=>r[ci].text))});
+  const named=resolveColumnKeys({keys:cols.map(c=>c.key||null), labels:headerLabels, titleCands, columnValues:cols.map((c,ci)=>grid.map(r=>r[ci].text)), locked:cols.map(c=>!!c.manual)});
   out.keys=named.keys.map((k,i)=>k||('c'+(i+1))); out.header.labels=named.labels;
   out.columnsMode=C.headerRule?C.headerRule.mode:null;               // how the columns stage named the columns (shown in the FINAL badge)
   if(named.renamed.length) out.note=(out.note?out.note+' · ':'')+'columns named on recheck: '+named.renamed.map(r=>(r.column+1)+'→'+r.key+' by '+r.by).join(', ');
@@ -348,7 +349,9 @@ export function tableForNumbers(F){
   const labels=F.header?F.header.labels:keys;
   // the relations the header rule writes for its columns ({qty}*{unittp} …), for the columns the table has
   const rule=C&&C.headerRule&&C.headerRule.id ? HEADER_RULES.find(r=>r.id===C.headerRule.id) : null;
-  const relations=rule ? rule.columns.filter(c=>c.relation && keys.includes(c.key)).map(c=>({key:c.key, formula:c.relation})) : [];
+  const relations=rule ? rule.columns.filter(c=>c.relation && keys.includes(c.key)).map(c=>({key:c.key, formula:c.relation, source:'rule'})) : [];
+  // the column catalogue's relations for the other keys (a column named by hand follows its type's rule)
+  for(const cr of catalogueRelations(keys)) if(!relations.some(r=>r.key===cr.key)) relations.push(cr);
   return {header:{labels, keys}, relations,
     rows:F.grid.map((row,ri)=>{ const o={row:ri+1, cells:{}, readings:{}, confidence:{}};
       row.forEach((g,ci)=>{ const k=keys[ci]; o.cells[k]=g.text;

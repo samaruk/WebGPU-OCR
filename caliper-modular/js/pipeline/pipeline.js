@@ -34,7 +34,7 @@ import { startProductMatch } from '../products/products.js';
 /* the product match of the final table: like the API, an entry in
    S.products that settles on its own; the PRODUCTS stage and the JSON
    redraw when it does */
-function startProducts(){
+export function startProducts(){
   const entry=startProductMatch(S.final); S.products=entry;
   entry.promise.then(async()=>{ if(S.products!==entry) return; if(S.galleryPromise) await S.galleryPromise; if(S.products!==entry) return;
     if(S.pipelineDone){ updateFinalJson(); refreshStages(['products-match']); } });
@@ -51,6 +51,7 @@ async function headerRuleWithApi(p){
   const C=S.columns;
   if(!p.columns.headerRules || !C || !C.band || !S.api || S.api.status!=='done') return false;
   if(C.headerRule && /^exact/.test(C.headerRule.mode||'')) return false;   // the rule already drove the columns
+  if(C.edits && C.edits.length) return false;                                // the operator has named or split columns by hand: those stand
   const before=JSON.stringify((C.columns||[]).map(c=>[c.key,Math.round(c.gutterX0),Math.round(c.gutterX1)]));
   const m=matchHeaderRule(C,S.recognition,S.api);
   if(!m || !applyHeaderRule(C,m)) return false;

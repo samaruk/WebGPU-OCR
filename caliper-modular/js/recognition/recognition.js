@@ -392,7 +392,7 @@ export function buildCellTexts(characters,columns,reference){
    ====================================================================== */
 const CELL_CLASSES={
   numeric:{ keys:new Set(['sl','qty','tp','vat','sp','op','bonus','batchQty','tpValue','vatValue','spValue','net','discountPct','discountValue','tpVat','invoiceNo','sbu','mfg','exp',
-                          'unittp','unitvat','totaltp','totalvat','discountpct','totaldiscount','unitgross','unitsp','totalsp','vatpct','unitdiscount']),
+                          'unittp','unitvat','totaltp','totalvat','discountpct','totaldiscount','unitgross','unitsp','totalsp','vatpct','unitdiscount','mrp']),
             whitelist:'0123456789.,-%/:' },
   alnum:  { keys:new Set(['batch','pack','unit','code','type']),
             whitelist:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'x×-./()" }

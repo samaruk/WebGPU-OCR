@@ -94,7 +94,7 @@ export function ruleInOrder(rule, K, titleCands){
   return out;
 }
 
-export function resolveColumnKeys({keys, labels, titleCands, columnValues}){
+export function resolveColumnKeys({keys, labels, titleCands, columnValues, locked}){
   const K=keys.map(k=>k||null), L=labels.map(l=>l||''), renamed=[];
   // the rule that explains the most unnamed columns in order (three at least) names them first
   let bestRule=null;
@@ -104,7 +104,7 @@ export function resolveColumnKeys({keys, labels, titleCands, columnValues}){
     for(const t of titleCands[ci]||[]){ const r=keyFromTitle(t); if(r && !K.includes(r.key)){ K[ci]=r.key; if(!L[ci] || r.key==='qty') L[ci]=r.label; renamed.push({column:ci, key:r.key, by:'title "'+t+'"'}); break; } } });
   if(!K.includes('qty')){
     // a column the vocabulary keyed otherwise but whose title also says quantity ("Inv. Qty" keyed as invoiceNo) is set right
-    K.forEach((k,ci)=>{ if(!k || k==='qty' || K.includes('qty')) return; if((titleCands[ci]||[]).some(t=>tokensOf(t).some(isQtyToken))){ renamed.push({column:ci, key:'qty', by:'title over '+k}); K[ci]='qty'; if(!/qty|quantity/i.test(L[ci])) L[ci]='Qty'; } });
+    K.forEach((k,ci)=>{ if(!k || k==='qty' || K.includes('qty') || (locked&&locked[ci])) return; if((titleCands[ci]||[]).some(t=>tokensOf(t).some(isQtyToken))){ renamed.push({column:ci, key:'qty', by:'title over '+k}); K[ci]='qty'; if(!/qty|quantity/i.test(L[ci])) L[ci]='Qty'; } });
   }
   if(!K.includes('qty')){
     const ci=qtyByNumbers(K, columnValues||[]);
