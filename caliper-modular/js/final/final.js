@@ -38,6 +38,9 @@ import { analyseNumbers } from '../numcheck/numcheck.js';
 import { resolveColumnKeys, titleAgreement } from './columnkeys.js';
 import { HEADER_RULES } from '../config/headerrules.js';
 import { catalogueRelations } from '../config/columntypes.js';
+import { respace } from './respace.js';
+import { rowConversion } from '../products/products.js';
+import { looksLikePack, packFromName, packColumnIndex, resolvePackCell } from './pack.js';
 
 const norm=s=>(s||'').replace(/\s+/g,' ').trim();
 const key=s=>norm(s).toLowerCase().replace(/[\s.,:;'"`·]/g,'');
@@ -324,6 +327,18 @@ export function buildFinal(){
   const named=resolveColumnKeys({keys:cols.map(c=>c.key||null), labels:headerLabels, titleCands, columnValues:cols.map((c,ci)=>grid.map(r=>r[ci].text)), locked:cols.map(c=>!!c.manual)});
   out.keys=named.keys.map((k,i)=>k||('c'+(i+1))); out.header.labels=named.labels;
   out.columnsMode=C.headerRule?C.headerRule.mode:null;               // how the columns stage named the columns (shown in the FINAL badge)
+  /* the pack size is sometimes printed at the end of the name instead of in
+     its own column: a pack cell that is blank, or reads like nothing a pack
+     size looks like (a stray mark, one character), takes the pack the name
+     ends with — the name keeps it, the matcher strips it on its own */
+  { const pi=packColumnIndex(out.keys, grid), ni=out.keys.indexOf('name');
+    if(pi>=0){ const counts={}; grid.forEach((row,ri)=>{ const pc=row[pi]; if(!pc) return; const nameText=ni>=0&&row[ni]?row[ni].text||'':'';
+        // the engines' readings of the cell by the shape of a pack size, then the name, then a repaired count
+        const r=resolvePackCell(pc, nameText); if(!r || r.text===pc.text) return;
+        pc.packWas=pc.text; pc.text=r.text; pc.source=r.source==='name'?'name':r.source==='repair'?'manual':r.source; pc.packFrom=r.source;
+        if(r.source==='name') pc.packFromName=true; counts[r.source]=(counts[r.source]||0)+1; });
+      const parts=Object.entries(counts).map(([k,v])=>v+' '+(k==='name'?'from the name':k==='repair'?'repaired (308 → 30S)':'from '+k));
+      if(parts.length) out.note=(out.note?out.note+' · ':'')+'pack sizes: '+parts.join(', '); } }
   if(named.renamed.length) out.note=(out.note?out.note+' · ':'')+'columns named on recheck: '+named.renamed.map(r=>(r.column+1)+'→'+r.key+' by '+r.by).join(', ');
   if(!named.keys.includes('qty')) out.note=(out.note?out.note+' · ':'')+'no quantity column found';
 
@@ -353,8 +368,8 @@ export function tableForNumbers(F){
   // the column catalogue's relations for the other keys (a column named by hand follows its type's rule)
   for(const cr of catalogueRelations(keys)) if(!relations.some(r=>r.key===cr.key)) relations.push(cr);
   return {header:{labels, keys}, relations,
-    rows:F.grid.map((row,ri)=>{ const o={row:ri+1, cells:{}, readings:{}, confidence:{}};
-      row.forEach((g,ci)=>{ const k=keys[ci]; o.cells[k]=g.text;
+    rows:F.grid.map((row,ri)=>{ const o={row:ri+1, cells:{}, readings:{}, confidence:{}, locked:{}};
+      row.forEach((g,ci)=>{ const k=keys[ci]; o.cells[k]=g.text; if(g.edited) o.locked[k]=true;   // typed by hand: the check never changes it
         const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[k]=r;
         if(g.text) o.confidence[k]=g.source==='local'||g.source==='local-only'?(g.localConf||0):g.source==='api'?(g.apiConf||0):Math.max(g.apiConf||0,g.localConf||0); });
       return o; })};
@@ -377,6 +392,9 @@ export function finalTableJson(F){
         const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[keys[ci]]=r; }); return o; }),
     stats:F.stats
   };
+  if(F.edits && F.edits.length) json.edits=F.edits;                   // cells typed by hand in the editable table (stage 38)
+  // the unit conversion per row: the invoice's column of that meaning, the operator's entry, or the pack size rule (4X10'S → 40)
+  try{ json.rows.forEach((row,ri)=>{ const c=rowConversion(F,ri); row.unitConversion=c.value; row.unitConversionFrom=c.source; }); }catch(e){}
   /* The table AFTER the number check's repair (stage NM · Repair): a cell the
      rules filled or fixed carries its corrected text in `cells`, with the text
      as read kept in `asRead`; `check` gives every number cell's status
@@ -406,9 +424,11 @@ export function finalTableJson(F){
       const counts={match:0, uncertain:0, none:0, priceDiff:0};
       json.rows.forEach((row,ri)=>{ const r=P.results[ri]; if(!r) return;
         const st=r.status; if(st in counts) counts[st]++;
-        const o={status:st, score:r.score||0};
+        const o={status:st, score:r.score||0}; if(r.manual) o.manual=true;   // picked by hand in the editable table's product popup
         if(r.product){ const p=r.product; Object.assign(o,{id:p.id, code:p.code, name:p.name, strength:p.strength, category:p.category, manufacturer:p.manufacturer, mrp:p.mrp, purchasePrice:p.purchasePrice, tradePrice:p.tradePrice, unitConversion:p.unitConversion}); }
-        if(r.price){ o.price={invoiceTp:r.price.invoiceTp, onFile:r.price.nearest, relDiff:r.price.relDiff, differs:r.price.differs}; if(r.price.differs) counts.priceDiff++; }
+        if(r.price){ o.price={invoiceTp:r.price.invoiceTp, onFile:r.price.nearest, expected:r.price.expected, unitConversion:r.price.unitConversion, relDiff:r.price.relDiff, differs:r.price.differs}; if(r.price.differs) counts.priceDiff++; }
+        // the pack's MRP (UnitSalePrice × the row's conversion) and the profit on the invoice's unit TP
+        if(r.product && r.product.mrp!=null){ try{ const conv=rowConversion(F,ri).value||1; o.mrpPack=Math.round(+r.product.mrp*conv*100)/100; const tp=r.price?r.price.invoiceTp:null; if(tp>0) o.profitPct=Math.round((o.mrpPack-tp)/tp*1000)/10; }catch(e){} }
         row.product=o; });
       json.products={engine:P.engine, matchMs:P.matchMs, ms:Math.round(P.ms), ...counts};
     } else if(P) json.products={status:P.status, error:P.error||undefined};
@@ -435,6 +455,12 @@ export function finalTableJson(F){
 const ENGINE_ORDER=['paddle','easyocr','tesseract5','local'];
 const FAMILY={paddle:'paddle', easyocr:'easyocr', tesseract5:'tesseract', local:'tesseract'};
 export function chooseCell(g,ctx){
+  const r=chooseCellRaw(g,ctx);
+  // a text cell gets its word gaps back: from another reading of the cell that kept them, else from the words themselves (js/final/respace.js)
+  if(!ctx.numeric && r.text){ const donors=[g.api].concat((g.others||[]).map(o=>o.text), [g.local]).filter(Boolean); const t=respace(r.text, donors); if(t!==r.text){ r.text=t; r.respaced=true; } }
+  return r;
+}
+function chooseCellRaw(g,ctx){
   const cands=[];
   if(g.api) cands.push({name:'paddle', text:g.api, conf:g.apiConf||0});
   for(const o of g.others||[]) if(o.text) cands.push({name:o.name, text:o.text, conf:o.conf||0});

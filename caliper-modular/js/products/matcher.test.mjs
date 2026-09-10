@@ -1,6 +1,6 @@
 // node matcher.test.mjs — the product matcher against the real product list
 import { PRODUCTS, PRODUCT_COLUMNS } from './products-data.js';
-import { buildIndex, matchItem, matchRows, parseName, tokenSim } from './matcher.js';
+import { buildIndex, matchItem, matchRows, parseName, tokenSim, searchProducts, priceOf, segmentToken } from './matcher.js';
 
 let failures=0;
 const check=(cond,msg)=>{ if(!cond){ failures++; console.log('  FAIL', msg); } else console.log('  ok  ', msg); };
@@ -92,7 +92,43 @@ console.log('[3c] the pack column beside a concentration strength');
   const mg=matchRows(index,[{name:"Maganta Plus Tab 100's T"}],{})[0]; show("Maganta Plus Tab 100's T",mg);
   check(mg.status==='match' && /^Maganta Plus$/i.test(mg.product.name) && /TABLET/i.test(mg.product.category||''), "Maganta Plus Tab 100's T is the chewable tablet (the stray T is dropped, 100's is the pack of 100)");
   check(parseName('Bactin D Eye Drop').brand.join(' ')==='BACTIN D' && parseName("Zif Cl Cap 60's").brand.join(' ')==='ZIF CL', 'a one-letter qualifier before the form stays');
+  const cz=matchRows(index,[{name:'CEFAZIDIV/IM 250MG INJ', pack:'VIAL'},{name:'Cefazid iv/im 250mg'}],{}); cz.forEach((m,i)=>show(['CEFAZIDIV/IM 250MG INJ / VIAL','Cefazid iv/im 250mg'][i],m));
+  check(cz.every(m=>m.status==='match' && /^Cefazid iv\/im$/i.test(m.product.name) && /250/.test(m.product.strength||'')), 'CEFAZIDIV/IM 250MG INJ is Cefazid iv/im 250mg Injection (the route glued to the brand)');
+  const eg=matchRows(index,[{name:"E-GELCAP200MG10X10'S", pack:'100S'},{name:"E-GEL CAP 200MG 10X10'S"}],{}); eg.forEach((m,i)=>show(["E-GELCAP200MG10X10'S / 100S","E-GEL CAP 200MG 10X10'S"][i],m));
+  check(eg.every(m=>m.status==='match' && /^E-GEL 200GM$/i.test(m.product.name)), "E-GELCAP200MG10X10'S is E-GEL 200GM capsule (GEL kept in the brand, CAP cut off, 200GM read as 200 mg)");
+  const pe=parseName("E-GELCAP200MG10X10'S"); check(pe.brand.join(' ')==='E GEL' && pe.form==='CAPSULE' && pe.strength[0].v===200, 'E-GELCAP parses as E GEL + capsule + 200 mg');
+  const ds=matchRows(index,[{name:"E-GEL DSCAP 400MG 5X10'S", pack:'50S'}],{})[0]; show("E-GEL DSCAP 400MG 5X10'S / 50S",ds);
+  check(ds.status==='match' && /^E-GEL DS$/i.test(ds.product.name) && /400/.test(ds.product.strength||''), 'E-GEL DSCAP 400MG is E-GEL DS 400 MG capsule (CAP cut off the DS)');
+  const fx=matchRows(index,[{name:'Fexo Susp 5Oml'},{name:'Fexo Susp 5 Oml'}],{}); fx.forEach((m,i)=>show(['Fexo Susp 5Oml','Fexo Susp 5 Oml'][i],m));
+  check(fx.every(m=>m.status==='match' && /^FEXO/i.test(m.product.name) && /50/.test((m.product.name+' '+(m.product.strength||''))) ), 'Fexo Susp 5Oml (and 5 Oml) is the Fexo 50 ml suspension');
+  const fl=matchRows(index,[{name:'Flacol P-Drop 15ml'},{name:'Flacol PD Drops', pack:'15ml'},{name:'Lytex P/D 15ml'}],{}); fl.forEach((m,i)=>show(['Flacol P-Drop 15ml','Flacol PD Drops / 15ml','Lytex P/D 15ml'][i],m));
+  check(fl[0].status==='match' && /PEDIATRIC DROP/i.test(fl[0].product.name) && fl[1].status==='match' && /PEDIATRIC DROP/i.test(fl[1].product.name), 'Flacol P-Drop / PD Drops is FLACOL PEDIATRIC DROP 15ML (P-Drop: paediatric drops)');
+  check(fl[2].product && /^LYTEX/i.test(fl[2].product.name) && /drop/i.test(fl[2].product.name+' '+(fl[2].product.category||'')), 'Lytex P/D is a Lytex drop');
+  check((segmentToken(index,'FILWELTEEN')||[]).join(' ')==='FILWEL TEEN' && (segmentToken(index,'HRTAB')||[]).join(' ')==='HR TAB' && segmentToken(index,'SECLO')===null, 'run-together words are cut into vocabulary words ('+(segmentToken(index,'FILWELTEEN')||[]).join('+')+', '+(segmentToken(index,'HRTAB')||[]).join('+')+')');
+  const fw=matchRows(index,[{name:"FilwelTeen hrTab 30's"},{name:"FILWELTEEN HRTAB 30'S"},{name:"Filwel Teen hr Tab 30's"}],{}); fw.forEach((m,i)=>show(["FilwelTeen hrTab 30's","FILWELTEEN HRTAB 30'S","Filwel Teen hr Tab 30's"][i],m));
+  check(fw.every(m=>m.status==='match' && /^FILWEL TEEN HR$/i.test(m.product.name)), "FilwelTeen hrTab, run together, is FILWEL TEEN HR like the spaced reading");
+  const hb=matchRows(index,[{name:'Halobet O.05%Crm 20g', tp:111.25},{name:'Halobet 0.05% Crm 20g'}],{}); hb.forEach((m,i)=>show(['Halobet O.05%Crm 20g / tp 111.25','Halobet 0.05% Crm 20g'][i],m));
+  check(hb.every(m=>m.status==='match' && /^Halobet$/i.test(m.product.name) && /CREAM/i.test(m.product.category||'')), 'Halobet O.05%Crm (an O for the zero, the form glued to the %) is the Halobet 0.05% cream');
+  check(hb[0].price && hb[0].price.differs===false, 'and its TP agrees with the price on file');
+  const ip=matchRows(index,[{name:'Iprex Resp Saln 20ml'},{name:'Iprex Resp Soln 20ml'}],{}); ip.forEach((m,i)=>show(['Iprex Resp Saln 20ml','Iprex Resp Soln 20ml'][i],m));
+  check(ip.every(m=>m.status==='match' && /^IPREX RESPIROTY SOLUTION$/i.test(m.product.name)), 'Iprex Resp Saln 20ml (Saln for Soln, Resp for respiratory) is IPREX RESPIROTY SOLUTION 20ML');
+  check(parseName('Iprex Resp Saln 20ml').form==='SOLUTION' && parseName('Napa Crean').form==='CREAM' && parseName('Zolax').form===null, 'a form word one letter off is the form; a brand is not');
+  const al=matchRows(index,[{name:'Alacot DS E-Drop 5ml'},{name:'Alacot DS Eye Drop 5ml'}],{}); al.forEach((m,i)=>show(['Alacot DS E-Drop 5ml','Alacot DS Eye Drop 5ml'][i],m));
+  check(al.every(m=>m.status==='match' && /^ALACOT DS$/i.test(m.product.name) && /5\s*ML/i.test(m.product.strength||'')), 'Alacot DS E-Drop 5ml is ALACOT DS 5 ML Eye Drop (E-Drop: eye drops)');
+  const ap=matchRows(index,[{name:'Apsol O-Paste 5g'}],{})[0]; show('Apsol O-Paste 5g',ap);
+  check(ap.status==='match' && /^APSOL$/i.test(ap.product.name) && /paste/i.test(ap.product.category||''), 'Apsol O-Paste 5g is the APSOL oral paste (O-Paste: oral paste)');
   const st=parseName('(200 mg+125 mg)/5 ml'); check(st.brand.length===0 && st.strength.length===2, '"/5 ml" is neither a strength nor a brand word');
+}
+
+console.log('[3d] the popup search: the matches first, then every product holding the words');
+{
+  const r=searchProducts(index,'seclo 20',300);
+  check(r.length>0 && r[0].by==='match' && /SECLO/i.test(r[0].product.name), 'seclo 20: a SECLO match on top ('+(r[0]&&r[0].product.name)+')');
+  check(r.every(it=>/SECLO|OMEPRAZOLE|20/i.test(it.product.name+' '+(it.product.generic||'')+' '+(it.product.strength||''))||it.by==='match'), 'every listed product holds the words or is a match');
+  const t=searchProducts(index,'square',300); check(t.length>10 && t.every(it=>it.by!=='match' || it.score>0), 'a manufacturer name lists its products');
+  check(searchProducts(index,'',50).length===50, 'an empty search lists the first products');
+  const pr=priceOf(r[0].product, 7); check(pr && typeof pr.differs==='boolean', 'priceOf compares a TP with the product on file');
+  const p0=r[0].product, pc=priceOf(p0, Math.round(p0.purchasePrice*40*100)/100, 40); check(pc && pc.expected===Math.round(p0.purchasePrice*40*10000)/10000 && pc.differs===false && pc.invoiceConversion===40, "with the invoice's conversion: UnitConversion × UnitPurchasePrice is the unit TP (40 × "+p0.purchasePrice+')');
 }
 
 console.log('[4] price comparison');

@@ -13,7 +13,7 @@
    the one whose gutter bounds hold the de-skewed x.
    ====================================================================== */
 import { S } from '../state/state.js';
-import { viewCv, viewport } from '../dom/dom.js';
+import { viewCv, viewport, overlay, stepLabel } from '../dom/dom.js';
 import { COLUMN_TYPES } from '../config/columntypes.js';
 import { STAGES } from '../config/config.js';
 import { finishColumns } from '../columns/columns.js';
@@ -53,20 +53,28 @@ function columnAt(clientX,clientY){
 
 /* ---- after an edit: cells, cell pass, final table, products, stages ------ */
 let busy=false;
-async function rebuild(what){
+const nextFrame=()=>new Promise(r=>requestAnimationFrame(()=>r()));
+/* what: the note for the badge; touched: the indices of the columns the
+   edit changed — only those are read again cell by cell, and only the
+   stages from the columns on are redrawn, one per frame, the overlay up
+   meanwhile so the page never looks hung */
+async function rebuild(what, touched){
   const C=S.columns; if(!C) return;
   C.edits=(C.edits||[]).concat([what]);
   if(C.headerRule) C.headerRule.mode=(C.headerRule.mode||'').replace(/ · edited.*$/,'')+' · edited: '+C.edits.join('; ');
-  busy=true;
+  busy=true; overlay.classList.add('show'); stepLabel.textContent='column edit · cells'; await nextFrame();
   try{
     const p=readParams();
     if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,C);
       if(S.recognition && S.recognition.available && S.textLines) S.recognition.cells=buildCellTexts(S.characters,C,S.textLines.stats.reference||20); }
-    if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.characters && S.textLines){
-      try{ await refineCellsByColumn(S.recognition,S.textLines,S.characters,C,S.W,S.H,p.recognition,()=>{}); }catch(e){ console.warn('cell pass after the edit failed', e); } }
+    if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.characters && S.textLines && touched && touched.length){
+      stepLabel.textContent='column edit · reading the column again'; await nextFrame();
+      try{ await refineCellsByColumn(S.recognition,S.textLines,S.characters,C,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='column edit · '+label; },{only:touched}); }catch(e){ console.warn('cell pass after the edit failed', e); } }
+    stepLabel.textContent='column edit · final table'; await nextFrame();
     if(S.pipelineDone && !(S.api && S.api.status==='pending')){ S.final=buildFinal(); updateFinalJson(); startProducts(); }
-    refreshStages(STAGES.map(st=>st.kind));
-  } finally { busy=false; }
+    overlay.classList.remove('show');
+    await refreshStages(STAGES.filter(st=>['CL','CH','RC','FN'].includes(st.pass)).map(st=>st.kind));
+  } finally { busy=false; overlay.classList.remove('show'); }
 }
 
 /* ---- Set name ------------------------------------------------------------- */
@@ -84,7 +92,7 @@ function setName(ci){
     // the same key on another column is released: one meaning, one column
     C.columns.forEach((o,i)=>{ if(i!==ci && key && o.key===key){ o.key=null; o.label=null; o.manual=true; } });
     c.key=key; c.label=t?t.label:null; c.group=null; c.manual=true;
-    hideMenu(); await rebuild('column '+(ci+1)+' → '+(key||'unnamed')); };
+    hideMenu(); await rebuild('column '+(ci+1)+' → '+(key||'unnamed'), [ci]); };
   menu.appendChild(sel);
   menu.appendChild(item('Cancel',hideMenu));
   sel.focus();
@@ -102,7 +110,7 @@ async function splitColumn(ci){
   const cols=C.columns.slice(0,ci).concat([left,right],C.columns.slice(ci+1));
   finishColumns(C,cols);
   C.gutters=(C.gutters||[]).concat([{x0:gap.x0, x1:gap.x1, width:gap.width, relative:false, manual:true}]).sort((p,q)=>p.x0-q.x0);
-  hideMenu(); await rebuild('column '+(ci+1)+' split at x='+Math.round((gap.x0+gap.x1)/2));
+  hideMenu(); await rebuild('column '+(ci+1)+' split at x='+Math.round((gap.x0+gap.x1)/2), [ci,ci+1]);
 }
 
 /* ---- the right-click ------------------------------------------------------- */

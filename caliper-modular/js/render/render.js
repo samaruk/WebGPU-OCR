@@ -117,6 +117,7 @@ export function renderStageInto(stage,ctx,W,H){
     case 'api-engine':      renderApiEngine(result,stage.engine,ctx,W,H,base,T); break;
     case 'final-compare':   renderFinalCompare(result,ctx,W,H,base,T); break;
     case 'final-table':     renderFinalTable(result,ctx,W,H,base,T); break;
+    case 'final-edit':      renderFinalEdit(result,ctx,W,H,base,T); break;
     case 'num-columns':     renderNumColumns(result,ctx,W,H,base,T); break;
     case 'num-fields':      renderNumFields(result,ctx,W,H,base,T); break;
     case 'num-rules':       renderNumRules(result,ctx,W,H,base,T,false); break;
@@ -620,7 +621,7 @@ function renderApi(A,ctx,W,H,base,T){
 /* ======================================================================
    FINAL · best analysis
    ====================================================================== */
-const SRC_COLOR={agreed:'rgba(240,245,245,.97)', vote:'rgba(255,225,130,.97)', local:'rgba(84,221,126,.97)', api:'rgba(255,170,70,.97)', easyocr:'rgba(200,150,255,.97)', tesseract5:'rgba(255,130,190,.97)', 'local-only':'rgba(110,200,255,.97)', empty:'rgba(150,165,170,.5)'};
+const SRC_COLOR={agreed:'rgba(240,245,245,.97)', vote:'rgba(255,225,130,.97)', local:'rgba(84,221,126,.97)', api:'rgba(255,170,70,.97)', easyocr:'rgba(200,150,255,.97)', tesseract5:'rgba(255,130,190,.97)', 'local-only':'rgba(110,200,255,.97)', manual:'rgba(110,220,255,.98)', name:'rgba(127,208,255,.97)', empty:'rgba(150,165,170,.5)'};
 function finalHeader(F){
   const lt=F.localTable?F.localTable.rows+'×'+F.localTable.cols:'none', at=F.apiTable?F.apiTable.rows+'×'+F.apiTable.cols:'none';
   const st=F.stats||{};
@@ -670,6 +671,19 @@ function renderFinalTable(F,ctx,W,H,base,T){
   const st=F.stats;
   const eng=(F.engines||[]).map(e=>e.name+' '+e.status).join(', ');
   T.badge('FINAL · '+F.grid.length+' rows × '+(F.grid[0]?F.grid[0].length:0)+' columns from the '+F.source+' structure · local+PaddleOCR agree '+st.agreed+', engines vote '+(st.vote||0)+', PaddleOCR '+st.api+(st.easyocr?', EasyOCR '+st.easyocr:'')+(st.tesseract5?', Tesseract 5 '+st.tesseract5:'')+', local '+st.local+', one side only '+st.localOnly+', empty '+st.empty+(eng?' · engines: '+eng+', local':'')+' · '+finalHeader(F));
+}
+
+/* the fixed table: the Final Table drawing with the number check's repaired
+   values in the cells; the editable HTML table of the same stage lies over
+   the viewport (js/edit/htmltable.js) */
+function renderFinalEdit(F,ctx,W,H,base,T){
+  if(!F || !F.grid) return renderFinalTable(F,ctx,W,H,base,T);
+  const N=F.numbers, keys=F.keys||[];
+  const grid=F.grid.map((row,ri)=>row.map((g,ci)=>{ const c=N&&N.rows&&N.rows[ri]&&N.rows[ri].cells?N.rows[ri].cells[keys[ci]]:null;
+    return c && (c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined ? {...g, text:c.fixedText, source:c.status==='fixed'?'manual':'local-only'} : g; }));
+  renderFinalTable({...F, grid},ctx,W,H,base,T);
+  ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
+  T.badge('FINAL · editable table · the values after the repair · select this stage to edit the table in the panel'+(F.edits&&F.edits.length?' · '+F.edits.length+' cell'+(F.edits.length>1?'s':'')+' typed by hand':''));
 }
 
 /* ======================================================================

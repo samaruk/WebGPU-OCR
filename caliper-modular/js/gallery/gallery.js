@@ -51,12 +51,18 @@ export async function buildGallery(){
 /* Re-render the thumbnails of the stages whose kind is listed, and the
    view if one of them is on screen — used when the API answer arrives
    after the gallery was built. */
-export function refreshStages(kinds){
+export async function refreshStages(kinds){
   if(!S.thumbs.length || !S.W) return;
   const cv=getStageCanvas(), ctx=cv.getContext('2d');
-  STAGES.forEach((st,i)=>{ if(!kinds.includes(st.kind) || !S.thumbs[i]) return;
-    renderStageInto(st,ctx,S.W,S.H); S.thumbs[i].src=cv.toDataURL('image/png'); });
+  // the stage on screen first, so the operator sees the change at once;
+  // the thumbnails follow one per frame — a full-page render and a PNG
+  // encode each, which back to back would freeze the page for seconds
   renderStage(S.stage); drawView(); setStageCap(S.stage);
+  const gen=(refreshStages.gen=(refreshStages.gen||0)+1);
+  for(let i=0;i<STAGES.length;i++){ const st=STAGES[i]; if(!kinds.includes(st.kind) || !S.thumbs[i]) continue;
+    if(refreshStages.gen!==gen || !S.thumbs.length) return;    // a newer refresh or a new run took over
+    renderStageInto(st,ctx,S.W,S.H); S.thumbs[i].src=cv.toDataURL('image/png');
+    await nextFrame(); }
 }
 
 export function showStage(i){
@@ -64,4 +70,5 @@ export function showStage(i){
   document.querySelectorAll('.gitem').forEach(g=>
     g.classList.toggle('on',+g.dataset.idx===i));
   renderStage(i); drawView(); setStageCap(i);
+  document.dispatchEvent(new CustomEvent('stagechange',{detail:i}));   // the editable-table panel shows itself on its stage
 }

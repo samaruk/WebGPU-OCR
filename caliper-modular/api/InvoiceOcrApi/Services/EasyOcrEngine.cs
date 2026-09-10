@@ -28,6 +28,11 @@ public sealed class EasyOcrEngine : IDisposable
     private readonly object _lock = new();
     private readonly string _python, _languages, _script;
     private readonly bool _gpu;
+    private readonly int _threads, _canvasSize, _batchSize;
+    /// <summary>Recognise inside PaddleOCR's regions instead of running EasyOCR's own detector
+    /// (Ocr:EasyOcr:UsePaddleBoxes, default true): the CRAFT detector is what costs most of
+    /// EasyOCR's time on a CPU and the two detectors find the same regions.</summary>
+    public bool UsePaddleBoxes { get; }
 
     private Process? _proc;
     private TaskCompletionSource<bool>? _ready;
@@ -46,6 +51,13 @@ public sealed class EasyOcrEngine : IDisposable
         _python = configuration.GetValue("Ocr:EasyOcr:Python", "python") ?? "python";
         _languages = configuration.GetValue("Ocr:EasyOcr:Languages", "en") ?? "en";
         _gpu = configuration.GetValue("Ocr:EasyOcr:Gpu", false);
+        // CPU torch threads (leave cores for the engines running alongside), the
+        // detector's canvas (the page is shrunk to this long side for DETECTION only;
+        // the crops are recognised from the full image) and the recognition batch
+        _threads = Math.Max(0, configuration.GetValue("Ocr:EasyOcr:Threads", 4));
+        _canvasSize = Math.Max(640, configuration.GetValue("Ocr:EasyOcr:CanvasSize", 1600));
+        _batchSize = Math.Max(1, configuration.GetValue("Ocr:EasyOcr:BatchSize", 8));
+        UsePaddleBoxes = configuration.GetValue("Ocr:EasyOcr:UsePaddleBoxes", true);
         string configured = configuration.GetValue("Ocr:EasyOcr:Script", string.Empty) ?? string.Empty;
         _script = configured.Length > 0 ? configured
                 : File.Exists(Path.Combine(AppContext.BaseDirectory, "easyocr_worker.py")) ? Path.Combine(AppContext.BaseDirectory, "easyocr_worker.py")
@@ -72,6 +84,9 @@ public sealed class EasyOcrEngine : IDisposable
             psi.ArgumentList.Add(_script);
             psi.ArgumentList.Add("--langs"); psi.ArgumentList.Add(_languages);
             psi.ArgumentList.Add("--gpu"); psi.ArgumentList.Add(_gpu ? "1" : "0");
+            psi.ArgumentList.Add("--threads"); psi.ArgumentList.Add(_threads.ToString());
+            psi.ArgumentList.Add("--canvas"); psi.ArgumentList.Add(_canvasSize.ToString());
+            psi.ArgumentList.Add("--batch"); psi.ArgumentList.Add(_batchSize.ToString());
             psi.Environment["PYTHONIOENCODING"] = "utf-8";
             psi.Environment["PYTHONUNBUFFERED"] = "1";
             var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -138,7 +153,8 @@ public sealed class EasyOcrEngine : IDisposable
 
     public EngineResult Skipped() => new(EngineName, Label, Status, Error, 0, null);
 
-    public async Task<EngineResult> RunAsync(string imagePath, int width, int height, CancellationToken ct)
+    /// <param name="boxes">when given, the regions to read (recognition only, no detection)</param>
+    public async Task<EngineResult> RunAsync(string imagePath, int width, int height, CancellationToken ct, IReadOnlyList<Box>? boxes = null)
     {
         if (!Enabled) return Skipped();
         var watch = Stopwatch.StartNew();
@@ -161,7 +177,10 @@ public sealed class EasyOcrEngine : IDisposable
         try
         {
             var proc = _proc!;
-            await proc.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { path = imagePath }));
+            object request = boxes is { Count: > 0 }
+                ? new { path = imagePath, boxes = boxes.Select(b => new[] { b.X0, b.Y0, b.X1, b.Y1 }).ToArray() }
+                : new { path = imagePath };
+            await proc.StandardInput.WriteLineAsync(JsonSerializer.Serialize(request));
             await proc.StandardInput.FlushAsync();
             var readTask = proc.StandardOutput.ReadLineAsync();
             var finished = await Task.WhenAny(readTask, Task.Delay(TimeSpan.FromSeconds(300), ct));

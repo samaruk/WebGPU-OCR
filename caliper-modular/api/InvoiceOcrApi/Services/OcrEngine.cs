@@ -16,6 +16,7 @@ namespace InvoiceOcrApi.Services;
 public sealed class OcrEngine : IDisposable
 {
     private readonly QueuedPaddleOcrAll _queue;
+    private readonly int _recognizeBatch;
     private readonly ILogger<OcrEngine> _log;
 
     public OcrEngine(IConfiguration configuration, ILogger<OcrEngine> log)
@@ -23,6 +24,11 @@ public sealed class OcrEngine : IDisposable
         _log = log;
         int consumers = Math.Max(1, configuration.GetValue("Ocr:Consumers", 1));
         int maxSide = Math.Max(960, configuration.GetValue("Ocr:MaxSide", 2560));
+        // MKL-DNN math threads: Paddle Inference defaults to ONE, and the detector on a
+        // 2560 px page then takes tens of seconds; four threads leave room for the
+        // other engines that run at the same time (Ocr:Threads, 0 = the library default)
+        int threads = Math.Max(0, configuration.GetValue("Ocr:Threads", 4));
+        _recognizeBatch = Math.Max(0, configuration.GetValue("Ocr:RecognizeBatchSize", 16));
 
         _queue = new QueuedPaddleOcrAll(() =>
         {
@@ -31,14 +37,14 @@ public sealed class OcrEngine : IDisposable
             // only v5 pair the local package carries (its English rec model
             // is not embedded). Ocr:Model may name any LocalFullModels member.
             FullOcrModel model = ResolveModel(configuration.GetValue("Ocr:Model", "ChineseV5"));
-            var all = new PaddleOcrAll(model, PaddleDevice.Mkldnn())
+            var all = new PaddleOcrAll(model, PaddleDevice.Mkldnn(cacheCapacity: 10, cpuMathThreadCount: threads))
             {
                 AllowRotateDetection = false,     // upright pages: axis-aligned crops (the rotated-crop path flips
                                                   // near-horizontal boxes upside down with this OpenCV's angle convention)
                 Enable180Classification = false   // invoices are never upside down
             };
             all.Detector.MaxSize = maxSide;       // do not shrink a 1500–2600 px page before detection
-            _log.LogInformation("PaddleOCR engine ready ({Model}, MKL-DNN, max side {MaxSide}px)", model.GetType().Name, maxSide);
+            _log.LogInformation("PaddleOCR engine ready ({Model}, MKL-DNN {Threads} threads, max side {MaxSide}px, recognition batch {Batch})", model.GetType().Name, threads == 0 ? "default" : threads.ToString(), maxSide, _recognizeBatch);
             return all;
         }, consumers, boundedCapacity: 64);
     }
@@ -59,7 +65,7 @@ public sealed class OcrEngine : IDisposable
 
     /// <summary>Runs detection + recognition on a BGR image.</summary>
     public Task<PaddleOcrResult> RunAsync(Mat image, CancellationToken ct) =>
-        _queue.Run(image, recognizeBatchSize: 0, configure: null, cancellationToken: ct);
+        _queue.Run(image, recognizeBatchSize: _recognizeBatch, configure: null, cancellationToken: ct);   // the region crops are recognised in batches, not one by one
 
     public void Dispose() => _queue.Dispose();
 }

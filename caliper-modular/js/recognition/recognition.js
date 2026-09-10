@@ -43,19 +43,41 @@ function loadLibrary(){
   });
   return libraryPromise;
 }
+async function makeWorker(Tesseract,language,onProgress){
+  const worker=await Tesseract.createWorker(language,1,{logger:m=>{ if(onProgress && m.status) onProgress(m.status, m.progress||0); }},
+    {load_system_dawg:'0', load_freq_dawg:'0'});            // init-time: no dictionary bias on codes and amounts
+  await worker.setParameters({tessedit_pageseg_mode:'7', preserve_interword_spaces:'1', user_defined_dpi:'300'});
+  return worker;
+}
 async function getWorker(language,onProgress){
   const Tesseract=await loadLibrary();
   if(workerPromise && workerLanguage===language) return workerPromise;
   if(workerPromise){ const old=await workerPromise; try{ await old.terminate(); }catch(e){} }
+  await dropExtraWorkers();
   workerLanguage=language;
-  workerPromise=(async()=>{
-    const worker=await Tesseract.createWorker(language,1,{logger:m=>{ if(onProgress && m.status) onProgress(m.status, m.progress||0); }},
-      {load_system_dawg:'0', load_freq_dawg:'0'});          // init-time: no dictionary bias on codes and amounts
-    await worker.setParameters({tessedit_pageseg_mode:'7', preserve_interword_spaces:'1', user_defined_dpi:'300'});
-    return worker;
-  })();
+  workerPromise=makeWorker(Tesseract,language,onProgress);
   return workerPromise;
 }
+/* A POOL for the line pass: one engine reads the page's lines one after
+   another, and a page has sixty of them; with three or four workers on a
+   multi-core machine the lines are read in parallel and the pass takes a
+   third of the time. The first worker is the shared one (the cell pass
+   uses it alone); the extras are kept for the next run and dropped when
+   the language changes. Size: the cores minus one, at most 4.        */
+let extraWorkers=[];
+async function dropExtraWorkers(){ const old=extraWorkers; extraWorkers=[]; for(const w of old){ try{ await w.terminate(); }catch(e){} } }
+async function getPool(language,size,onProgress){
+  const first=await getWorker(language,onProgress);
+  const Tesseract=await loadLibrary();
+  const want=Math.max(0,Math.min(7,size-1));
+  while(extraWorkers.length<want) extraWorkers.push(await makeWorker(Tesseract,language,()=>{}));
+  const workers=[first].concat(extraWorkers.slice(0,want));
+  const idle=workers.slice(), waiting=[];
+  return { size:workers.length, workers,
+    take(){ if(idle.length) return Promise.resolve(idle.pop()); return new Promise(res=>waiting.push(res)); },
+    give(w){ const res=waiting.shift(); if(res) res(w); else idle.push(w); } };
+}
+export function defaultWorkerCount(){ const n=(typeof navigator!=='undefined' && navigator.hardwareConcurrency)||2; return Math.max(1,Math.min(4,n-1)); }
 
 /* collect symbols / words from a v5 result whatever its shape */
 function collectSymbols(data){
@@ -79,8 +101,8 @@ function collectWords(data){
    Returns {lines:[{rowIndex, text, confidence, symbols, words}], characters:n,
             recognised:n, cells:[[text]], available:true} or {available:false, error} */
 export async function recognizeText(textLines,characters,columns,W,H,params,onProgress){
-  let worker;
-  try{ worker=await getWorker(params.language||'eng',(status,progress)=>onProgress&&onProgress('loading engine · '+status+' '+Math.round(progress*100)+'%')); }
+  let worker, pool;
+  try{ pool=await getPool(params.language||'eng', params.workers||defaultWorkerCount(), (status,progress)=>onProgress&&onProgress('loading engine · '+status+' '+Math.round(progress*100)+'%')); worker=pool.workers[0]; }
   catch(e){ return {available:false, error:e.message, lines:[], recognised:0}; }
 
   const ink=textLines.cleanBinary, labels=textLines.labels, rows=textLines.fullLines.rows, luma=textLines.luma||null;
@@ -88,7 +110,7 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
   const reference=textLines.stats.reference||20;
   const scale=Math.max(1,Math.min(5,(params.targetHeight||40)/Math.max(8,reference)));   // fractional: the glyph height lands on the target exactly
   const cropStyle=params.cropStyle||'gray';
-  if(params.psm!==undefined){ try{ await worker.setParameters({tessedit_pageseg_mode:String(params.psm)}); }catch(e){} }
+  if(params.psm!==undefined){ for(const w of pool.workers){ try{ await w.setParameters({tessedit_pageseg_mode:String(params.psm)}); }catch(e){} } }
   const byLine=new Map();                          // chainIndex → characters
   for(const ch of characters.characters){ if(!byLine.has(ch.line)) byLine.set(ch.line,[]); byLine.get(ch.line).push(ch); }
   const chainRowIndex=new Map();                   // piece (chain) → full-line row index
@@ -176,15 +198,17 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
     };
     const meanConf=res=>{ const ws=collectWords(res).filter(w=>w.text&&w.text.trim()); return ws.length?ws.reduce((s,w)=>s+w.confidence,0)/ws.length:0; };
     let data, cropStyleUsed=cropStyle;
+    const w=await pool.take();                                 // one of the pool's engines, for this row
     try{
       const first=cropStyle==='binary'?'binary':cropStyle==='raw'?'raw':'gray';
-      ({data}=await worker.recognize(buildCrop(first),{},{text:true,blocks:true})); cropStyleUsed=first;
+      ({data}=await w.recognize(buildCrop(first),{},{text:true,blocks:true})); cropStyleUsed=first;
       if(cropStyle==='both' && meanConf(data)<85){
-        const alt=(await worker.recognize(buildCrop('binary'),{},{text:true,blocks:true})).data;
+        const alt=(await w.recognize(buildCrop('binary'),{},{text:true,blocks:true})).data;
         if(meanConf(alt)>meanConf(data)){ data=alt; cropStyleUsed='binary'; }
       }
     }
     catch(e){ return {rowIndex:ri, text:'', confidence:0, symbols:[], words:[], error:e.message}; }
+    finally{ pool.give(w); }
     // engine boxes → page coordinates, undoing the scale and the shear at the box's own x
     const toPage=s=>{ const sx0=x0+s.bbox.x0/scale, sx1=x0+s.bbox.x1/scale, shift=slope*((sx0+sx1)/2-xc);
       return {text:s.text, confidence:s.confidence, bb:{x0:sx0, y0:yTop+s.bbox.y0/scale+shift, x1:sx1, y1:yTop+s.bbox.y1/scale+shift}}; };
@@ -323,12 +347,14 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
     return {rowIndex:ri, text:(data.text||'').trim(), confidence:data.confidence||0, symbols, words, crop:params.keepCrops?crop:undefined};
   };
 
-  /* pass 1 · every full line of the page */
-  for(let ri=0;ri<rows.length;ri++){
-    const row=rows[ri];
+  /* pass 1 · every full line of the page — as many rows at a time as the
+     pool has engines, the results kept in row order */
+  const byRow=new Map(); let nextRow=0, started=0;
+  const runner=async()=>{ while(nextRow<rows.length){ const ri=nextRow++; const row=rows[ri];
     if(!row.lines.some(p=>!done.has(p))) continue;          // all of its pieces were covered by a merged row
-    results.push(await recogniseRow(row,ri,'recognising line '+(ri+1)+' / '+rows.length));
-  }
+    started++; byRow.set(ri, await recogniseRow(row,ri,'recognising line '+started+' / '+rows.length+(pool.size>1?' · '+pool.size+' engines':''))); } };
+  await Promise.all(Array.from({length:pool.size},runner));
+  for(let ri=0;ri<rows.length;ri++) if(byRow.has(ri)) results.push(byRow.get(ri));
   /* pass 2 · WHOLE-PAGE guarantee: any accepted piece not covered by a
      row (whatever the full-line join or the table band did with it) is
      recognised on its own */
@@ -397,9 +423,10 @@ const CELL_CLASSES={
   alnum:  { keys:new Set(['batch','pack','unit','code','type']),
             whitelist:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'x×-./()" }
 };
-export async function refineCellsByColumn(recognition,textLines,characters,columns,W,H,params,onProgress){
+export async function refineCellsByColumn(recognition,textLines,characters,columns,W,H,params,onProgress,opts={}){
   if(!recognition || !recognition.available || !columns || !columns.band) return recognition;
   const cols=columns.columns; if(!cols.some(c=>c.key)) return recognition;
+  const only=opts.only ? new Set(opts.only) : null;                     // after an edit: just the columns that changed
   let worker; try{ worker=await getWorker(params.language||'eng',()=>{}); }catch(e){ return recognition; }
   const luma=textLines.luma||null, ink=textLines.cleanBinary, labels=textLines.labels;
   const reference=textLines.stats.reference||20, slope=textLines.fullLines.slope||0;
@@ -434,7 +461,7 @@ export async function refineCellsByColumn(recognition,textLines,characters,colum
   let changed=0, tried=0, calls=0, currentClass=null;
   for(let ci=0;ci<cols.length;ci++){
     const key=cols[ci].key; const cls=CELL_CLASSES.numeric.keys.has(key)?'numeric':CELL_CLASSES.alnum.keys.has(key)?'alnum':null;
-    if(!cls) continue;
+    if(!cls || (only && !only.has(ci))) continue;
     /* all the column's cells stacked into ONE image, a clear gap between
        them, read in one call as a block of lines; each result line is
        mapped back to its cell by its centre. One call per column instead

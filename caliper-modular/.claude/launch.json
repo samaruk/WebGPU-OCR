@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ocr-api",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "api/InvoiceOcrApi"],
+      "port": 5080
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8080"],
+      "port": 8080
+    }
+  ]
+}

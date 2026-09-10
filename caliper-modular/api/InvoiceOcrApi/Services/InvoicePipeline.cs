@@ -62,7 +62,17 @@ public sealed class InvoicePipeline
             }
             Task<PaddleOcrResult> paddleTask = _engine.RunAsync(image, ct);
             Task<EngineResult> tessTask = tmp is null ? Task.FromResult(_tesseract.Skipped()) : _tesseract.RunAsync(tmp, image.Width, image.Height, ct);
-            Task<EngineResult> easyTask = tmp is null ? Task.FromResult(_easyOcr.Skipped()) : _easyOcr.RunAsync(tmp, image.Width, image.Height, ct);
+            Task<EngineResult> easyTask;
+            if (tmp is not null && _easyOcr.Enabled && _easyOcr.UsePaddleBoxes)
+            {
+                // EasyOCR reads inside PaddleOCR's regions: its own detector is what costs
+                // most of its time on a CPU (40 s of 50 on a 4000 px page) and finds the
+                // same regions; so it starts when Paddle is done, while Tesseract still runs
+                ocr = await paddleTask;
+                var boxes = ToLines(ocr, image.Width, image.Height).Select(l => l.Bbox).ToList();
+                easyTask = _easyOcr.RunAsync(tmp, image.Width, image.Height, ct, boxes);
+            }
+            else easyTask = tmp is null ? Task.FromResult(_easyOcr.Skipped()) : _easyOcr.RunAsync(tmp, image.Width, image.Height, ct);
             await Task.WhenAll(paddleTask, tessTask, easyTask);
             ocr = paddleTask.Result; tess = tessTask.Result; easy = easyTask.Result;
         }

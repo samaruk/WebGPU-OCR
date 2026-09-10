@@ -55,11 +55,15 @@ const FORMS={
   PATCH:['PATCH'],
 };
 const FORM_OF=new Map(); for(const [f,ws] of Object.entries(FORMS)) for(const w of ws) FORM_OF.set(w,f);
+const NEAR_FORMS=[...FORM_OF.keys()].filter(w=>/^[A-Z]{4,}$/.test(w));   // the form words a misread may be one letter off
+export const FORM_WORDS=[...FORM_OF.keys()];
 /* words that describe but do not name: dropped on both sides */
 const DESCRIPTORS=new Set(['EYE','EAR','NASAL','NOSE','ORAL','EXTERNAL','TOPICAL','FOR','OF','AND','THE','WITH','PER','PACK','BOX','STRIP','PCS','PC','PIECE','PIECES',
   'DELAYED','RELEASE','EXTENDED','SUSTAINED','MODIFIED','PROLONGED','FILM','COATED','ENTERIC','SUGAR','FREE','ADULT','DRY','POWDER','FORMULA','USP','BP','IP','LIQUID','DISPERSIBLE','CHEWABLE','EFFERVESCENT','ORODISPERSIBLE',
   'NEW','ORIGINAL','REGULAR','COMBI','KIT','SET','UNIT','UNITS','BOTTLE','BOTTLES','TUBE','SINGLE','DOUBLE','HUMAN',
-  'PAED','PAEDIATRIC','PEDIATRIC','PED','SKIN','BODY','FACE','HAIR','POT','JAR','CONTAINER','SACHET','SACHETS']);
+  'PAED','PAEDIATRIC','PEDIATRIC','PED','SKIN','BODY','FACE','HAIR','POT','JAR','CONTAINER','SACHET','SACHETS','IVIM',
+  'RESP','RESPIRATORY','RESPIROTY','RESPIRATOR','NEBULISER','NEBULIZER','NEB','NEBULE','NEBULES','INHALER','INHALATION','INH','REFILL','SPRAY','PUMP']);
+export const DESCRIPTOR_WORDS=[...DESCRIPTORS];
 /* a bare number after one of these is a count of pieces ("POT 30", "BOX 100"), not a strength */
 const CONTAINERS=new Set(['POT','JAR','BOTTLE','BOTTLES','PACK','BOX','STRIP','STRIPS','CONTAINER','PCS','PC','PIECES']);
 /* unit words of a strength or a volume; grams and litres are scaled to mg / ml */
@@ -74,6 +78,10 @@ const PACK_RE=/(?<![\d.])\d+\s*X\s*\d+\s*['’`]?S?\b|(?<![\d.])\d+['’`]S\b|\b
 const SERIAL_RE=/^\s*\d{1,3}\s*[.)\-]?\s*(?=[A-Z]{3})/;
 const OCR_DIGIT={S:'5',O:'0',I:'1',L:'1',B:'8',Z:'2'};
 const up=s=>String(s||'').toUpperCase().replace(/µ/g,'U')
+  .replace(/(\d)\s+([O0]{1,2})(ML|MG|MCG|GM)\b/g,'$1$2$3')                    // "5 Oml": a zero read as O and cut off its digit
+  .replace(/(^|[\s(])O(?=\.\d)/g,'$10').replace(/(\d\.)O(\d|\b)/g,'$10$2')     // "O.05", "0.O5": a zero read as O in a decimal
+  .replace(/%(?=[A-Z])/g,'% ')                                                 // "0.05%CRM": the form glued to the percentage
+  .replace(/%\s*\//g,'% /')                                                    // "5%/5GM": the percentage, then the size it is given per
   .replace(/(^|[\s(])([SOILBZ\d.]{1,4})(ML|MG|MCG|GM)\b/g,(m,a,d,u)=>/[SOILBZ]/.test(d)&&(/\d/.test(d)||/^[SOILBZ]{1,2}$/.test(d))?a+d.replace(/[SOILBZ]/g,c=>OCR_DIGIT[c])+u:m)   // Sml → 5ML, l0ml → 10ML
   .replace(/([A-Z]{2,})(\d+(?:\.\d+)?)(MG|MCG|ML|GM|G|IU|%)\b/g,'$1 $2 $3')   // OTEZOL150MG → OTEZOL 150 MG
   .replace(/([A-Z]{3,})(\d{2,}(?:\.\d+)?)\b/g,'$1 $2')                        // FEXO120 → FEXO 120 (a single trailing digit stays: SECL0 is an OCR'd SECLO)
@@ -81,8 +89,12 @@ const up=s=>String(s||'').toUpperCase().replace(/µ/g,'U')
   .replace(/(\d)([A-Z%])/g,'$1 $2')                                            // 20MG → 20 MG
   .replace(/(\d) (MG|MCG|ML|GM|IU)([A-Z]{2,})\b/g,'$1 $2 $3')                    // 20 MGCAP → 20 MG CAP
   .replace(/\.(?!\d)/g,' ')                                                    // PAED. → PAED (a decimal point stays)
+  .replace(/\b(P|PD|PED|PAED)[-\/ ]?(DROPS?|DRPS?)\b/g,'PAED $2').replace(/\bP\/D\b/g,'PAED DROP')   // P-Drop, P/D, PD Drops: paediatric drops
+  .replace(/\bE[-\/.](DROPS?|DRPS?)\b/g,'EYE $1').replace(/\b(EE|E\/E)[-\/.]?(DROPS?|DRPS?)\b/g,'EYE EAR $2').replace(/\bN[-\/.](DROPS?|DRPS?)\b/g,'NASAL $1')   // E-Drop, E/E Drop, N-Drop: eye, eye/ear, nasal drops
+  .replace(/\bO[-\/.](PASTE|GEL|SOLN?|SOLUTION|SUSP|SUSPENSION|DROPS?|DRPS?|SPRAY|RINSE)\b/g,'ORAL $1')   // O-Paste, O-Gel, O-Soln: oral
+  .replace(/([A-Z]{3,})(IV\/IM|IM\/IV)\b/g,'$1 IVIM').replace(/\b(IV\/IM|IM\/IV)\b/g,'IVIM')   // CEFAZIDIV/IM, Cefazid iv/im: the route, one descriptor
   .replace(/\bM[\s\-\/]?WASH\b/g,'MOUTHWASH').replace(/\bMOUTH[\s\-]WASH\b/g,'MOUTHWASH')   // M-Wash, M/Wash, Mouth Wash
-  .replace(/(^|\s)\.(?=\d)/g,'$1').replace(/\s*\/\s*/g,'/')                     // ".20/40" → "20/40"; "5 /40" → "5/40" 
+  .replace(/(^|\s)\.(?=\d)/g,'$1').replace(/(?<!%)\s*\/\s*/g,'/')                     // ".20/40" → "20/40"; "5 /40" → "5/40" 
   .replace(/[()\[\],;:+&|]+/g,' ').replace(/[^A-Z0-9./%\- ]+/g,' ')
   .replace(/\s*-\s*/g,'-')
   .replace(/([A-Z])-(\d)/g,'$1 $2').replace(/(\d)-([A-Z])/g,'$1 $2')            // ESOLOK-20, PLUS-2.5/500, TAB-15S: a hyphen between letters and digits is a space
@@ -104,6 +116,9 @@ export function parseName(text, extra, opts={}){
     // pack sizes: 10X10, 5X10S, 30S, 1X1S — not a strength
     if(/^\d+X\d+S?$/.test(t) || /^\d+S$/.test(t)){ packs.push(t); tail=true; continue; }
     if(tail && /^[A-Z]$/.test(t)) continue;                             // "Maganta Plus Tab 100's T": the T is a scrap of the next column
+    // DSCAP, SRTAB: a form word glued to a qualifier of two letters or more — the qualifier stays, the form is read
+    if(/^[A-Z]{5,}$/.test(t) && !FORM_OF.has(t) && !DESCRIPTORS.has(t)){ const suf=GLUED_FORMS.find(sf=>t.length>=sf.length+2 && t.endsWith(sf));
+      if(suf){ brand.push(t.slice(0,-suf.length)); const f2=FORM_OF.get(suf); if(f2){ forms.push(f2); if(!form) form=f2; } tail=true; continue; } }
     // "/5 ML", "/ML": the volume a dose is given per — not a strength, not a brand word
     if(/^\/\d*(\.\d+)?$/.test(t)){ if(UNIT_OF.has(toks[i+1])) i++; continue; }
     // a/b strengths: 5/40, 5/500 (two numbers, unit may follow)
@@ -119,14 +134,26 @@ export function parseName(text, extra, opts={}){
     // "MG" on its own after a number that was already taken, or stray units
     if(UNIT_OF.has(t)) continue;
     const f=FORM_OF.get(t); if(f){ forms.push(f); if(!form) form=f; tail=true; continue; }
+    if(/^[A-Z]{4,}$/.test(t) && !DESCRIPTORS.has(t)){ const near=NEAR_FORMS.find(w=>w.length===t.length && lev(t,w)===1); if(near){ const nf=FORM_OF.get(near); forms.push(nf); if(!form) form=nf; tail=true; continue; } }   // SALN read for SOLN
     if(DESCRIPTORS.has(t)) continue;
     { let glued=null; for(let k=3;k<t.length-2 && !glued;k++) if(DESCRIPTORS.has(t.slice(0,k)) && FORM_OF.has(t.slice(k))) glued=FORM_OF.get(t.slice(k));   // EYEDROPS → EYE DROPS
       if(glued){ if(!form) form=glued; continue; } }
     if(t.includes('/') && !/\d/.test(t)) continue;                    // M/W, W/V, P/D and the like: descriptors, not brand words
     // hyphenated brand parts: FUNGIN-B → FUNGIN B, BACTIN-D → BACTIN D; SECLO-20 handled by the split above
-    for(const part of t.split('-').filter(Boolean)){ if(UNIT_OF.has(part) || DESCRIPTORS.has(part)) continue; /* TOMYCIN-EYE: EYE is a descriptor here too */ const pf=FORM_OF.get(part); if(pf){ if(!form) form=pf; continue; } if(/^\d+(\.\d+)?$/.test(part)){ pushStrength(part,''); continue; } if(part.length===1 && /\d/.test(part)) continue; brand.push(part); }
+    const parts=t.split('-').filter(Boolean), shortPart=parts.some(x=>/^[A-Z]{1,2}$/.test(x));
+    for(const part of parts){ if(UNIT_OF.has(part) || DESCRIPTORS.has(part)) continue; /* TOMYCIN-EYE: EYE is a descriptor here too */
+      const pf=FORM_OF.get(part);
+      if(pf){ if(shortPart && parts.length>=2){ brand.push(part); continue; }   // E-GEL, V-GEL, E-CAP: the form word IS the brand's second half
+              if(!form) form=pf; continue; }
+      if(/^\d+(\.\d+)?$/.test(part)){ pushStrength(part,''); continue; } if(part.length===1 && /\d/.test(part)) continue;
+      // E-GELCAP: a form word glued to the end of a part (three letters or more on either side; GEL itself is left, it is a brand's half too often)
+      const suf=GLUED_FORMS.find(sf=>part.length>=sf.length+2 && part.endsWith(sf));
+      if(suf){ brand.push(part.slice(0,-suf.length)); const f2=FORM_OF.get(suf); if(f2 && !form) form=f2; continue; }
+      brand.push(part); }
   }
   if(forms.includes('CAPSULE') && form==='GEL') form='CAPSULE';        // "Soft Gel Cap": a capsule, not a gel
+  // "E-GEL 200GM" on a capsule: no capsule weighs 200 g — a gram figure over 5 g on a tablet or capsule is a milligram dose misprinted
+  if(form==='TABLET' || form==='CAPSULE') for(let k=0;k<strength.length;k++){ const st=strength[k]; if(st.size && st.u==='MG' && st.v>5000) strength[k]={v:Math.round(st.v/1000*1000)/1000, u:'MG'}; }
   // the pack column (200ml, 3gm): a soft volume or weight beside whatever the name says, unless the name gives one in that unit already
   if(extra){ const e=parseName(extra); for(const x of e.strength) if((x.u==='ML'||x.u==='MG') && !strength.some(y=>y.u===x.u)) strength.push({...x, soft:true}); if(!form && e.form) form=e.form; }
   const packCount=packs.map(pk=>{ const m=/^(\d+)X(\d+)/.exec(pk); if(m) return +m[1]*+m[2]; const n=/^(\d+)/.exec(pk); return n?+n[1]:0; }).find(n=>n>0)||0;
@@ -186,6 +213,7 @@ export function buildIndex(PRODUCTS, COLUMNS){
     // the form from the category when the name gives none — or names a POWDER, which the category
     // says what it is for ("ZOX 30 ml POWDER" / "Powder For Suspension" is a suspension)
     const cat=up(r[col.Category]||''); if(!p.form || p.form==='POWDER'){ for(const w of cat.split(/[ -]/)){ const f=FORM_OF.get(w); if(f && f!=='POWDER'){ p.form=f; break; } if(f && !p.form) p.form=f; } }
+    if(p.form==='TABLET' || p.form==='CAPSULE') p.strength=p.strength.map(st=>st.size && st.u==='MG' && st.v>5000 ? {v:Math.round(st.v/1000*1000)/1000, u:'MG'} : st);   // "200GM" on a capsule: milligrams
     const generic=up(r[col.GenericName]||'').split(' ').filter(w=>w.length>2);
     const mfr=up(r[col.Manufacturer]||'');
     if(!p.brand.length){ if(generic.length) p.brand=generic.slice(0,1); else return; }
@@ -195,7 +223,11 @@ export function buildIndex(PRODUCTS, COLUMNS){
     add(byPrefix,it.first.slice(0,3),items.length-1);
     for(const g of trigrams(it.first)) add(byTrigram,g,items.length-1);
   });
-  return {items, byFirst, byPrefix, byTrigram, col, PRODUCTS};
+  // the vocabulary: every word of every product name, the form and descriptor
+  // words — what a run-together reading ("FILWELTEEN HRTAB") is cut back into
+  const vocab=new Set([...FORM_OF.keys(), ...DESCRIPTORS]);
+  for(const it of items) for(const w of it.brand) if(w.length>=2) vocab.add(w);
+  return {items, byFirst, byPrefix, byTrigram, col, PRODUCTS, vocab};
 }
 
 /* the product record the caller sees */
@@ -206,8 +238,26 @@ export function productOf(index, it){
           salesUnit:r[c.SalesUnitType], purchaseUnit:r[c.PurchaseUnitType]};
 }
 
+/* form words that may be glued to the end of a hyphenated part (E-GELCAP): the short, common ones */
+const GLUED_FORMS=['CAPSULE','TABLET','CAPS','TABS','CAP','TAB','INJ','SYP','SUSP','CRM'];
 /* descriptors and form words a brand may be glued to, longest first */
 const GLUED_SUFFIXES=[...new Set([...DESCRIPTORS, ...FORM_OF.keys()])].filter(w=>/^[A-Z]{3,}$/.test(w)).sort((a,b)=>b.length-a.length);
+
+/* A word the reading ran together — "FILWELTEEN", "HRTAB" — cut back into
+   words of the vocabulary: the fewest pieces, every piece two letters or
+   more, the first piece a product's first word when one such cut exists.
+   null when the word is a word already, or no cut fits. */
+export function segmentToken(index, tok){
+  const V=index.vocab; if(!V || tok.length<5 || V.has(tok) || !/^[A-Z]+$/.test(tok)) return null;
+  const n=tok.length, best=new Array(n+1).fill(null); best[0]={pieces:[], n:0};
+  for(let i=1;i<=n;i++){
+    for(let j=Math.max(0,i-16); j<=i-2; j++){ if(!best[j]) continue; const w=tok.slice(j,i); if(!V.has(w)) continue;
+      const cand={pieces:best[j].pieces.concat([w]), n:best[j].n+1};
+      const better=!best[i] || cand.n<best[i].n || (cand.n===best[i].n && (index.byFirst.has(cand.pieces[0])?1:0)>(index.byFirst.has(best[i].pieces[0])?1:0)) || (cand.n===best[i].n && cand.pieces[0].length>best[i].pieces[0].length);
+      if(better) best[i]=cand; } }
+  const r=best[n]; if(!r || r.n<2 || r.n>4) return null;
+  return r.pieces;
+}
 
 /* ---- one query ------------------------------------------------------------- */
 /* query: {name, pack, tp}; opts: {manufacturer (hint text), limit} */
@@ -216,14 +266,19 @@ export function matchItem(index, query, opts={}){
   // a name may start with a number too: score both readings, keep the better
   const qs=[parseName(query.name, query.pack, {serial:true})];
   const plain=parseName(query.name, query.pack);
+  const tp=query.tp!==undefined && query.tp!==null && isFinite(+query.tp) ? +query.tp : null;   // the invoice's unit TP: a candidate whose price on file agrees is confirmed
   if(plain.text!==qs[0].text) qs.push(plain);
   // a descriptor or form glued to the brand (CLORAMEYE DROPS, SECLOCAP): when the
   // word is no product's first word, the reading with the suffix cut off is tried too
   for(let k=0;k<qs.length && qs.length<8;k++){ const q=qs[k], f=q.brand[0]; if(!f || index.byFirst.has(f)) continue;   // ISOLONEYEDROP: DROP, then EYE
     for(const suf of GLUED_SUFFIXES){ if(f.length>=suf.length+4 && f.endsWith(suf)){
       const form=FORM_OF.get(suf)||null; qs.push({...q, brand:[f.slice(0,-suf.length), ...q.brand.slice(1)], form:q.form||form, text:q.text+' ('+suf+' cut)'}); break; } } }
+  // a run-together word cut into vocabulary words is another reading of the line
+  for(const q of qs.slice()){ const toks=q.text.split(' '); let changed=false;
+    const cut=toks.map(t=>{ const pieces=segmentToken(index,t); if(pieces){ changed=true; return pieces.join(' '); } return t; });
+    if(changed && qs.length<12){ const q2=parseName(cut.join(' '), '', {}); q2.text=q2.text+' (words cut)'; if(q.packs&&q.packs.length&&!q2.packs.length){ q2.packs=q.packs; q2.packCount=q.packCount; } qs.push(q2); } }
   let best=null;
-  for(const q of qs){ const r=matchParsed(index,q,opts); if(!best || r.score>best.score) best=r; }
+  for(const q of qs){ q.tp=tp; const r=matchParsed(index,q,opts); if(!best || r.score>best.score) best=r; }
   return best;
 }
 function matchParsed(index, q, opts){
@@ -245,6 +300,8 @@ function matchParsed(index, q, opts){
     const qBrand=q.brand.filter((t,k)=>k===0 || !it.generic.some(g=>tokenSim(t,g)>=0.85));
     let score=bs*qualifierFactor(qBrand,it.brand)*strengthFactor(q.strength,it.strength)*formFactor(q.form,it.form);
     if(mfrHint.length && mfrHint.some(w=>it.mfr.includes(w))) score=Math.min(1, score+0.03);
+    // the invoice's TP equal to the product's trade or purchase price on file (per unit or per pack): a confirmation
+    if(q.tp!==null && q.tp!==undefined && bs>=0.85){ const pr=priceOf(productOf(index,it), q.tp); if(pr && pr.differs===false) score=Math.min(1, score+0.05); }
     if(q.packCount && it.conv===q.packCount) score=Math.min(1, score+0.03);   // the invoice's 30's is the product's pack of 30
     scored.push({i, score, brandSim:bs});
   }
@@ -255,8 +312,9 @@ function matchParsed(index, q, opts){
     // FEXOMIN SUS: the tablets come in two strengths, the suspension in one — only the products of the named form count
     const ofForm=q.form ? exact.filter(c=>index.items[c.i].form===q.form) : [];
     const pool=ofForm.length ? ofForm : exact;
-    const strengths=new Set(pool.map(c=>index.items[c.i].strength.map(s=>s.v+s.u).sort().join('+')));
-    if(pool.length && strengths.size===1) for(const c of pool) c.score=Math.min(1, c.score/0.8);
+    const sameSet=(a,b)=>a.length===b.length && a.every(x=>b.some(y=>strengthEq(x,y))) && b.every(y=>a.some(x=>strengthEq(x,y)));
+    const groups=[]; for(const c of pool){ const st=index.items[c.i].strength; if(!groups.some(g=>sameSet(g,st))) groups.push(st); }
+    if(pool.length && groups.length===1) for(const c of pool) c.score=Math.min(1, c.score/0.8);
   }
   scored.sort((a,b)=>b.score-a.score);
   const top=scored.slice(0, opts.limit||5);
@@ -273,16 +331,46 @@ function matchParsed(index, q, opts){
 }
 
 /* many rows; each row {name, pack, tp} → the match with the price comparison */
+/* the invoice's unit TP against the product's purchase and trade prices, per
+   unit or per pack (UnitConversion); differs when the nearest is over 2 % off */
+export function priceOf(p, tp, conv){
+  if(!p || tp===undefined || tp===null || !isFinite(tp)) return null;
+  const up1=p.purchasePrice, pconv=p.unitConversion||1;
+  // the invoice's own conversion (from its pack size) first: UnitConversion × UnitPurchasePrice is the invoice's unit TP;
+  // the product's conversion and the bare unit prices stand in when the invoice gives none
+  const own=conv!==undefined && conv!==null && isFinite(conv) && conv>0 ? conv : null;
+  const cands=(own?[up1*own, (p.tradePrice||0)*own]:[]).concat([up1, up1*pconv, p.tradePrice, (p.tradePrice||0)*pconv]).filter(v=>v!==null && v!==undefined && isFinite(v) && v>0);
+  let bestDiff=null; for(const v of cands){ const d=Math.abs(tp-v)/Math.max(v,0.01); if(bestDiff===null || d<bestDiff.rel-1e-9) bestDiff={rel:d, against:v}; }
+  const expected=own && up1 ? Math.round(up1*own*10000)/10000 : null;
+  return {invoiceTp:tp, purchasePrice:up1, tradePrice:p.tradePrice, unitConversion:own||pconv, invoiceConversion:own, expected, nearest:bestDiff?bestDiff.against:null, relDiff:bestDiff?Math.round(bestDiff.rel*1000)/1000:null, differs:bestDiff?bestDiff.rel>0.02:null};
+}
 export function matchRows(index, rows, opts={}){
   return rows.map(row=>{
     const m=matchItem(index, row, opts);
-    if(m.product && row.tp!==undefined && row.tp!==null && isFinite(row.tp)){
-      // the invoice TP may be per pack while the product price is per unit
-      const p=m.product, up1=p.purchasePrice, conv=p.unitConversion||1;
-      const cands=[up1, up1*conv, p.tradePrice, (p.tradePrice||0)*conv].filter(v=>v!==null && v!==undefined && isFinite(v) && v>0);
-      let bestDiff=null; for(const v of cands){ const d=Math.abs(row.tp-v)/Math.max(v,0.01); if(bestDiff===null || d<bestDiff.rel) bestDiff={rel:d, against:v}; }
-      m.price={invoiceTp:row.tp, purchasePrice:up1, tradePrice:p.tradePrice, unitConversion:conv, nearest:bestDiff?bestDiff.against:null, relDiff:bestDiff?Math.round(bestDiff.rel*1000)/1000:null, differs:bestDiff?bestDiff.rel>0.02:null};
-    }
+    if(m.product){ const pr=priceOf(m.product, row.tp, row.conv); if(pr) m.price=pr; }
     return m;
   });
+}
+
+/* the product list ranked for a free text (the popup behind a Product cell):
+   the matcher's own candidates first, by score, then every product whose
+   name, generic name or manufacturer holds each word of the text, by name —
+   an operator's search reaches any product, the best matches on top */
+export function searchProducts(index, text, limit=200){
+  const q=String(text||'').trim(); const out=[]; const seen=new Set();
+  if(q){
+    const m=matchItem(index, {name:q}, {limit});
+    for(const c of m.candidates){ if(seen.has(c.product.id)) continue; seen.add(c.product.id); out.push({score:c.score, product:c.product, by:'match'}); }
+    const words=up(q).split(' ').filter(w=>w.length>=2);
+    if(words.length){
+      const hits=[];
+      for(const it of index.items){ const r=index.PRODUCTS[it.i], hay=up(String(r[index.col.Name]||'')+' '+String(r[index.col.GenericName]||'')+' '+String(r[index.col.Manufacturer]||''));
+        if(words.every(w=>hay.includes(w))){ const pr=productOf(index,it); if(!seen.has(pr.id)){ seen.add(pr.id); hits.push({score:0, product:pr, by:'text'}); } } }
+      hits.sort((a,b)=>String(a.product.name).localeCompare(String(b.product.name)));
+      out.push(...hits);
+    }
+  } else {
+    for(const it of index.items){ if(out.length>=limit) break; out.push({score:0, product:productOf(index,it), by:'list'}); }
+  }
+  return out.slice(0,limit);
 }

@@ -14,6 +14,16 @@
        results  – per row the match: {status, score, product, price, candidates}
    ====================================================================== */
 import { S } from '../state/state.js';
+import { unitConversionOf, rowPackText, packColumnIndex } from '../final/pack.js';
+
+/* the row's unit conversion: the invoice's own column of that meaning, else the operator's entry, else the pack size rule */
+export function rowConversion(F, ri){
+  const keys=F.keys||[]; const meta=F.rowMeta&&F.rowMeta[ri];
+  if(meta && meta.unitConversion!==undefined && meta.unitConversion!==null && isFinite(meta.unitConversion)) return {value:+meta.unitConversion, source:'typed'};
+  const ci=keys.indexOf('unitconversion'); if(ci>=0){ const v=parseFloat(String((F.grid[ri][ci]&&F.grid[ri][ci].text)||'').replace(/,/g,'')); if(isFinite(v) && v>0) return {value:v, source:'column'}; }
+  const pk=rowPackText(keys, F.grid, ri); const r=unitConversionOf(pk.text);
+  return {value:r.value, source:(pk.source==='name'?'pack from the name: ':'pack: ')+r.rule+(pk.text?' ('+pk.text+')':'')};
+}
 
 let worker=null, ready=null, seq=0; const pending=new Map();
 function getWorker(){
@@ -33,6 +43,22 @@ function getWorker(){
 function ask(rows,opts){
   return getWorker().then(()=>new Promise((resolve,reject)=>{ const id=++seq; pending.set(id,{resolve,reject}); worker.postMessage({id, rows, opts}); }));
 }
+function askSearch(text,limit){
+  return getWorker().then(()=>new Promise((resolve,reject)=>{ const id=++seq; pending.set(id,{resolve,reject}); worker.postMessage({id, search:{text, limit}}); }));
+}
+/* the product list ranked for a text (the popup behind a Product cell): [{score, product, by}] */
+export async function searchProducts(text, limit=200){
+  try{ if(typeof Worker==='undefined') throw new Error('no Worker'); return (await askSearch(text,limit)).results; }
+  catch(e){ const [{PRODUCTS, PRODUCT_COLUMNS},M]=await Promise.all([import('./products-data.js'), import('./matcher.js')]); if(!mainIndex) mainIndex=M.buildIndex(PRODUCTS, PRODUCT_COLUMNS); return M.searchProducts(mainIndex, text, limit); }
+}
+/* a product chosen by hand for a row: the match entry the stage and the JSON read */
+export async function manualMatch(ri, product){
+  const P=S.products; if(!P || !P.results) return null;
+  const { priceOf }=await import('./matcher.js');
+  const row=P.rows.find(r=>r.row===ri) || {};
+  const entry={status:'match', score:1, product, price:priceOf(product, row.tp, row.conv), candidates:[], manual:true};
+  P.results[ri]=entry; return entry;
+}
 /* no worker (file://, an old browser): the matcher on this thread, the index built on first use */
 let mainIndex=null;
 async function askHere(rows,opts){
@@ -49,14 +75,14 @@ export function rowsToMatch(F){
   const keys=F.keys||(S.columns&&S.columns.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
   let nameCi=keys.indexOf('name');
   if(nameCi<0){ let best=-1, bw=-1; keys.forEach((k,ci)=>{ const w=F.grid.reduce((s,r)=>s+((r[ci]&&r[ci].text)||'').replace(/[\d.,]/g,'').length,0); if(w>bw){ bw=w; best=ci; } }); nameCi=best; }
-  const packCi=keys.indexOf('pack');
+  const packCi=packColumnIndex(keys, F.grid);
   const roles=(F.numbers&&F.numbers.roles)||{}; let tpKey=Object.keys(roles).find(k=>roles[k]==='unitTp'); if(!tpKey && keys.includes('tp')) tpKey='tp';
   const tpCi=tpKey?keys.indexOf(tpKey):-1;
   return F.grid.map((row,ri)=>{
     const nr=F.numbers&&F.numbers.rows?F.numbers.rows[ri]:null;
     const name=nameCi>=0?(row[nameCi].text||''):'';
     let tp=null; if(tpCi>=0){ const c=nr&&nr.cells?nr.cells[keys[tpCi]]:null; tp=c&&c.value!==null&&c.value!==undefined?c.value:(parseFloat(String(row[tpCi].text||'').replace(/,/g,''))||null); }
-    return {row:ri, name, pack:packCi>=0?(row[packCi].text||''):'', tp, isTotal:!!(nr&&nr.isTotal)};
+    return {row:ri, name, pack:rowPackText(keys, F.grid, ri).text, tp, conv:rowConversion(F,ri).value, isTotal:!!(nr&&nr.isTotal)};
   });
 }
 

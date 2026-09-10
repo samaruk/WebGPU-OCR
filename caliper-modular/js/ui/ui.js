@@ -42,6 +42,7 @@ bind('rcTargetHeight',px); bind('wmContrast',two);
 /* the Final table · JSON panel (section 07): refreshed whenever the
    final table is (after a run and again when the API answer lands) */
 export function updateFinalJson(){
+  document.dispatchEvent(new Event('finalchanged'));   // the editable-table panel rebuilds when shown
   const pre=$('finalJson'), btn=$('copyFinalJson');
   if(!S.final || !S.final.grid){ pre.textContent=S.final&&S.final.note?S.final.note:'no final table yet — run the pipeline'; btn.disabled=true; return; }
   pre.textContent=JSON.stringify(finalTableJson(S.final),null,1); btn.disabled=false;

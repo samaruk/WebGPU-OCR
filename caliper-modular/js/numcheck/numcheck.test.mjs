@@ -28,8 +28,8 @@ console.log('\n[1] Ibn Sina layout');
   check(res.roles.vat==='unitVat' && res.roles.discountValue==='discAmt', 'vat → unit VAT, discountValue → discount amount');
   check(cell(res,0,'tpValue').status==='fixed' && cell(res,0,'tpValue').value===112.86, 'row 1 total TP 172.86 → 112.86');
   check(cell(res,1,'net').status==='filled' && cell(res,1,'net').value===61.84, 'row 2 net filled 61.84');
-  check(cell(res,2,'vat').value===13.04 && cell(res,2,'vat').status==='verified', 'row 3 "13.O4" read as 13.04 and verified');
-  check(['filled','verified'].includes(cell(res,3,'tpValue').status) && cell(res,3,'tpValue').value===172.42, 'row 4 "1 72.42" → 172.42 (joined and verified, or filled)');
+  check(cell(res,2,'vat').value===13.04 && cell(res,2,'vat').status==='fixed' && cell(res,2,'vat').fixedText==='13.04' && cell(res,2,'vat').cleaned, 'row 3 "13.O4" read as 13.04 and written clean');
+  check(['filled','verified','fixed'].includes(cell(res,3,'tpValue').status) && cell(res,3,'tpValue').value===172.42 && (cell(res,3,'tpValue').fixedText||'172.42')==='172.42', 'row 4 "1 72.42" → 172.42 (joined and written clean, or filled)');
   check(cell(res,4,'tpVat').status==='filled' && cell(res,4,'tpVat').value===220.02, 'row 5 TP+VAT filled 220.02');
   check(res.rows[5].isTotal && cell(res,5,'net').status==='verified', 'sub-total row recognised and verified');
   check(res.summary.conflicts===0, 'no conflicts left');
@@ -52,7 +52,7 @@ console.log('\n[2] Incepta layout');
   check(cell(res,0,'bonus').status==='unchecked', 'bonus has no relation → unchecked, not unverified');
   check(res.model.relations.find(r=>r.id==='uvat*').testedRows===4, 'derived VAT-rate relation reports tested rows');
   check(cell(res,1,'vatValue').status==='filled' && cell(res,1,'vatValue').value===15.66, 'row 2 VAT value filled 15.66');
-  check(cell(res,2,'tpValue').value===449.78 && cell(res,2,'tpValue').status==='verified', 'row 3 "449.7B" → 449.78 verified');
+  check(cell(res,2,'tpValue').value===449.78 && cell(res,2,'tpValue').status==='fixed' && cell(res,2,'tpValue').fixedText==='449.78', 'row 3 "449.7B" → 449.78, written clean');
   check(res.model.vatRate!==null && Math.abs(res.model.vatRate-17.4)<0.1, 'implied VAT ratio ≈ 17.4% (not forced to 15)');
   check(res.summary.conflicts===0, 'no conflicts');
 }
@@ -70,7 +70,7 @@ console.log('\n[3] Square layout');
   ];
   const res=analyseNumbers(table(keys,rows)); show(res);
   check(cell(res,1,'qty').status==='filled' && cell(res,1,'qty').value===2, 'row 2 qty filled 2');
-  check(cell(res,2,'tpValue').value===900 && cell(res,2,'tpValue').status==='verified', 'row 3 "9O0.00" → 900 verified');
+  check(cell(res,2,'tpValue').value===900 && cell(res,2,'tpValue').status==='fixed' && cell(res,2,'tpValue').fixedText==='900.00', 'row 3 "9O0.00" → 900.00, written clean');
   check(cell(res,0,'vat').status!=='conflict', 'row 1 zero VAT (exempt) not flagged');
   check(cell(res,4,'tpValue').status==='fixed' && cell(res,4,'tpValue').value===412.30, 'row 5 142.30 → 412.30 (qty × unit TP)');
 }
@@ -191,6 +191,48 @@ console.log('\n[Q] a quantity read as a letter is computed from the other cells 
   check(cell(res,3,'qty').status==='filled' && cell(res,3,'qty').value===2 && cell(res,3,'tpValue').status==='filled' && cell(res,3,'tpValue').value===172.42, 'row 4 qty blank → 2 by the VAT, then total TP 172.42');
   check(cell(res,4,'qty').status==='filled' && cell(res,4,'qty').value===2, 'row 5 qty "~" → 2');
   check(res.summary.conflicts===0, 'no conflicts');
+}
+
+
+/* ---- stray marks beside a number: the value stands, the text is cleaned */
+console.log('\n[K] a number read with a stray mark beside it is written clean');
+{
+  const keys=['code','name','unit','batch','tp','qty','tpValue','vatValue','net'];
+  const rows=[
+    ['181','CEFAZIDIV/IM 250MG INJ','VIAL','C0321007','63.72','2;','127.44','22.18','149.62'],
+    ['S18',"EAZY JELLY 50GMTUBE1'S","1'S",'21045','131.18;','1€','131.18','22.83','154.01'],
+    ['940',"E-GEL DSCAP400MG5X10'S",'50S','0732145','225.50','1]','225.50','39.23','264.73'],
+    ['633',"EMCON-11X1'S",'1S','K06210041','60.34','2/ "','120.68','0.00','120.68'],
+  ];
+  const res=analyseNumbers(table(keys,rows)); show(res);
+  check(parseNumber('2;').clean===false && parseNumber('2').clean===true && parseNumber('63.72;').norm==='63.72', 'clean means the text is the number');
+  check(cell(res,0,'qty').status==='fixed' && cell(res,0,'qty').fixedText==='2' && cell(res,0,'qty').value===2, 'qty "2;" → 2');
+  check(cell(res,1,'qty').fixedText==='1' && cell(res,1,'tp').fixedText==='131.18', 'qty "1€" → 1, tp "131.18;" → 131.18');
+  check(cell(res,2,'qty').fixedText==='1' && cell(res,3,'qty').fixedText==='2', "qty \"1]\" → 1, qty '2/ \"' → 2");
+  check(res.summary.conflicts===0, 'no conflicts');
+}
+
+
+/* ---- a typed quantity remakes the row: total TP, total VAT, discount, net */
+console.log('\n[T] a typed cell is authoritative: what it feeds is recomputed');
+{
+  const keys=['name','pack','batch','qty','unittp','unitvat','totaltp','totalvat','discountpct','totaldiscount','net'];
+  const relations=[{key:'totaltp',formula:'{qty}*{unittp}'},{key:'totalvat',formula:'{qty}*{unitvat}'},{key:'totaldiscount',formula:'{totaltp}*{discountpct}/100'},{key:'net',formula:'{totaltp}+{totalvat}-{totaldiscount}'}];
+  const rows=[
+    ['1036 KETIFEN100ML','100ml','L0361040','3','41.23','7.17','82.46','14.34','3','2.48','94.32'],   // qty typed as 3 where the print said 2
+    ['1037FAST60ML','60ml','L0372020','3','15.51','2.70','46.53','8.10','3','1.41','53.22'],
+    ['1046DON-A60ML','60ML','L0461032','1','26.32','4.58','26.32','4.58','3','0.79','30.11'],
+  ];
+  const T=table(keys,rows); T.relations=relations; T.rows[0].locked={qty:true};
+  const res=analyseNumbers(T); show(res);
+  const c=k=>cell(res,0,k);
+  check(c('qty').status!=='fixed' && c('qty').value===3, 'the typed quantity stands');
+  check(c('totaltp').status==='fixed' && c('totaltp').value===123.69 && c('totaltp').derived, 'total TP remade: 3 × 41.23 = 123.69');
+  check(c('totalvat').status==='fixed' && c('totalvat').value===21.51, 'total VAT remade: 3 × 7.17 = 21.51');
+  check(c('totaldiscount').status==='fixed' && c('totaldiscount').value===3.71, 'discount remade: 123.69 × 3 % = 3.71');
+  check(c('net').status==='fixed' && c('net').value===141.49, 'net remade: 123.69 + 21.51 − 3.71 = 141.49');
+  check(res.rows[0].rules.after.every(r=>r.status!=='fail'), 'every rule of the row holds again');
+  check(cell(res,1,'totaltp').status==='verified', 'the other rows are untouched');
 }
 
 console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED');

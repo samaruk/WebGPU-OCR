@@ -133,7 +133,9 @@ export function parseNumber(text){
   if(letters>2 || (letters && letters>=digitCount)) return null;
   // letters that are digits in a numeric column
   const fixed=t.replace(/[Oo]/g,'0').replace(/[lI|]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2');
-  const clean=fixed===t;
+  // clean: the text IS the number — no letter stood for a digit, no stray
+  // mark beside it ("2;", "1€", "1]", '2/ "'), no space inside, no trailing point
+  const clean=fixed===t && !/[^\d.,\-+]/.test(t) && !t.endsWith('.');
   t=fixed.replace(/\s+/g,'').replace(/[^\d.,\-+]/g,'');
   if(!t || !/\d/.test(t)) return null;
   // thousands separators: "1,259.44" / "1.259,44" (rare) / "2,575.84"
@@ -144,7 +146,7 @@ export function parseNumber(text){
   if(t.endsWith('.')) t=t.slice(0,-1);
   const v=Number(t);
   if(!isFinite(v)) return null;
-  return {value:v, pct, clean};
+  return {value:v, pct, clean, norm:t};                                // norm: the number as text, junk gone, decimals as printed
 }
 
 /* the printed number with the same decimals as the text it replaces */
@@ -333,10 +335,10 @@ export function analyseNumbers(table, opts={}){
     // a cell read with low confidence (table.rows[].confidence[key], 0-100,
     // from the OCR vote) is "weak": its value may be replaced by what the
     // relations compute without the misread test the others need
-    const conf=row.confidence||{};
+    const conf=row.confidence||{}, locked=row.locked||{};      // locked: typed by hand in the editable table — read, never changed
     // value: the working value (replaced when filled or fixed); raw: the number as read, kept for the record
     const cells={}; for(const k of keys){ const c=parsedRows[ri][k]; cells[k]={text:c.text, value:c.parsed?c.parsed.value:null, raw:c.parsed?c.parsed.value:null, status:c.text?(roles[k]?(covered.has(roles[k])?'unverified':'unchecked'):'text'):'blank',
-      weak:!!(roles[k] && c.text && conf[k]!==undefined && conf[k]<o.weakBelow), confidence:conf[k]}; }
+      weak:!!(roles[k] && c.text && conf[k]!==undefined && conf[k]<o.weakBelow && !locked[k]), confidence:conf[k], locked:!!locked[k]}; }
     if(isTotalRow[ri]) return {row:row.row||ri+1, isTotal:true, cells, issues:[], rules:{before:[], after:[]}};
     const issues=[];
     const v=()=>{ const m={}; for(const r in keyOfRole){ const c=cells[keyOfRole[r]]; if(c.value!==null) m[r]=c.value; } return m; };
@@ -380,7 +382,7 @@ export function analyseNumbers(table, opts={}){
       for(const e of active){ const R=e.R, abs=optAbsent(R,present); if(!R.vars.every(x=>m[x]!==undefined || abs.includes(x)) || !applies(R,m)) continue; const mm={...m}; for(const x of abs) mm[x]=0;
         const t=R.solve(R.vars[0],mm); if(t===null) continue; const ok=Math.abs(t-mm[R.vars[0]])<=tolerance(R,mm,t); status[R.id]=ok;
         if(ok) continue;
-        for(const x of R.vars){ if(m[x]===undefined) continue; const val=R.solve(x,mm); if(val===null || !isFinite(val) || val<-1e-9) continue; (candidates.get(x)||candidates.set(x,[]).get(x)).push({val, R}); } }
+        for(const x of R.vars){ if(m[x]===undefined || cells[keyOfRole[x]].locked) continue; const val=R.solve(x,mm); if(val===null || !isFinite(val) || val<-1e-9) continue; (candidates.get(x)||candidates.set(x,[]).get(x)).push({val, R}); } }
       let bestFix=null;
       for(const [x,list] of candidates){
         for(const cand of list){
@@ -401,6 +403,24 @@ export function analyseNumbers(table, opts={}){
       if(bestFix){ const c=cells[keyOfRole[bestFix.x]]; const was=c.text; setVal(bestFix.x, bestFix.val, 'fixed', `was "${was}" — ${bestFix.agree} relation${bestFix.agree>1?'s':''} agree`); issues.push({cell:keyOfRole[bestFix.x], type:'fixed', was, by:bestFix.R.id}); changed=true; }
       if(!changed) break;
     }
+    /* a cell typed by hand (locked) is authoritative: every relation it feeds
+       that no longer holds is settled by recomputing the relation's target —
+       a typed quantity remakes the total TP and the total VAT, those remake
+       the discount and the net, pass by pass until the row is steady. A
+       typed cell that is itself a relation's target changes nothing
+       upstream (the inputs are not second-guessed from a typed result). */
+    const lockedRoles=new Set(keys.filter(k=>cells[k].locked && roles[k]).map(k=>roles[k]));
+    if(lockedRoles.size){ const derived=new Set();
+      for(let pass=0; pass<6; pass++){ let changed=false; const m=v();
+        for(const e of active){ const R=e.R, T=R.vars[0], tk=keyOfRole[T]; if(!tk || cells[tk].locked) continue;
+          if(!R.vars.slice(1).some(x=>lockedRoles.has(x) || derived.has(x))) continue;      // fed by a typed or a re-made value
+          const abs=optAbsent(R,present); if(!R.vars.every(x=>m[x]!==undefined || abs.includes(x)) || !applies(R,m)) continue;
+          const mm={...m}; for(const x of abs) mm[x]=0; const t=R.solve(T,mm); if(t===null || !isFinite(t)) continue;
+          if(Math.abs(t-mm[T])<=tolerance(R,mm,t)) continue;
+          const val=T==='qty'||T==='bonus'?Math.round(t):Math.round(t*100)/100;
+          setVal(T, val, 'fixed', 'from '+R.formula+' with the typed value'); cells[tk].derived=true; derived.add(T); m[T]=val;
+          issues.push({cell:tk, type:'fixed', by:R.id, derived:true, was:cells[tk].text}); changed=true; }
+        if(!changed) break; } }
     // verdicts: a value in a satisfied relation is verified; in a violated one a conflict
     const m=v();
     for(const e of active){ const R=e.R, abs=optAbsent(R,present); if(!R.vars.every(x=>m[x]!==undefined || abs.includes(x)) || !applies(R,m)) continue; const mm={...m}; for(const x of abs) mm[x]=0;
@@ -408,6 +428,13 @@ export function analyseNumbers(table, opts={}){
       for(const x of R.vars){ const k=keyOfRole[x]; if(!k) continue; const c=cells[k];
         if(ok){ if(c.status==='unverified') c.status='verified'; c.checks=(c.checks||0)+1; }
         else { if(c.status==='unverified' || c.status==='verified') c.status='conflict'; (c.conflicts=c.conflicts||[]).push(R.id); } } }
+    // a number read with a stray mark beside it ("2;", "1€", "63.72;") is written
+    // clean: the value stands (it took part in the relations above), the text
+    // is repaired — a number column holds numbers and nothing else
+    for(const k of keys){ const c=cells[k], p=parsedRows[ri][k].parsed; if(!roles[k] || !p || p.clean || c.locked) continue;
+      if(c.status==='fixed' || c.status==='filled' || c.status==='conflict') continue;
+      c.fixedText=fmtLike(c.value, p.norm); c.note=(c.note?c.note+' · ':'')+'cleaned from "'+c.text+'"'; c.status='fixed'; c.cleaned=true;
+      issues.push({cell:k, type:'fixed', was:c.text, by:'cleaning'}); }
     for(const k of keys) if(cells[k].status==='conflict') issues.push({cell:k, type:'conflict', relations:cells[k].conflicts});
     return {row:row.row||ri+1, isTotal:false, cells, issues, rules:{before:rulesBefore, after:evalRules()}};
   });

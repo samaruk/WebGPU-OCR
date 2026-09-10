@@ -41,6 +41,7 @@ export const COLUMN_TYPES=[
   { key:'totaltp',       label:'Total TP',         numeric:true,  desc:'trade value of the line',          relation:'{qty}*{unittp}' },
   { key:'totalvat',      label:'Total VAT',        numeric:true,  desc:'VAT of the line',                  relation:'{qty}*{unitvat}' },
   { key:'totalsp',       label:'Total SP',         numeric:true,  desc:'selling value of the line',        relation:'{qty}*{unitsp}' },
+  { key:'unitconversion',label:'Unit Conv',        numeric:true,  desc:'units per pack (from the pack size when the invoice prints none)' },
   { key:'discountpct',   label:'Discount %',       numeric:true,  desc:'discount rate' },
   { key:'unitdiscount',  label:'Unit Discount',    numeric:true,  desc:'discount per unit' },
   { key:'totaldiscount', label:'Discount Value',   numeric:true,  desc:'discount of the line',             relation:'{totaltp}*{discountpct}/100' },

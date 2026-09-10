@@ -49,6 +49,7 @@ import './imageload/imageload.js';
 import './watermark/watermark.js';
 import './ui/ui.js';
 import './edit/columnedit.js';
+import './edit/htmltable.js';
 
 import { initGPU } from './webgpu/webgpu.js';
 import { resizeView } from './viewport/viewport.js';
