@@ -33,6 +33,8 @@
      imageload   file decode with GPU-budget downscaling
      watermark   large low-contrast watermark returned to the paper tone
      ui          slider bindings and export buttons
+     layout      the control sections as a top bar of tabs
+     pages       the pages of the invoice: thumbnails, one processed at a time
    ====================================================================== */
 import './config/config.js';
 import './state/state.js';
@@ -50,6 +52,9 @@ import './watermark/watermark.js';
 import './ui/ui.js';
 import './edit/columnedit.js';
 import './edit/htmltable.js';
+import './layout/ribbon.js';
+import './pages/pages.js';
+import './edit/dragedit.js';
 
 import { initGPU } from './webgpu/webgpu.js';
 import { resizeView } from './viewport/viewport.js';

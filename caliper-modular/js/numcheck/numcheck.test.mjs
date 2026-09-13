@@ -235,5 +235,62 @@ console.log('\n[T] a typed cell is authoritative: what it feeds is recomputed');
   check(cell(res,1,'totaltp').status==='verified', 'the other rows are untouched');
 }
 
+/* ---- Opsonin: Product Name · Pack · Batch · T.P · VAT · Qnty · TP+VAT · Net Val, with group headers and group
+        sub-totals inside the table. TP+VAT is the line gross, Qnty × (T.P + VAT), by the header rule's relation;
+        Net Val is the gross less a discount the page does not print. Page 4 of the invoice: the first group's
+        sub-total also covers items printed on the page before, so it cannot add up here — and must not "repair"
+        anything; the second group's does. */
+console.log('\n[9] Opsonin layout: group headers and group sub-totals inside the table');
+{
+  const keys=['name','pack','batch','tp','unitvat','qty','tpVat','net'];
+  const rowsA=[
+    ['Products of General-C: Territory: BABB6-Shamsul Huda[PE18803]','','','','','','',''],
+    ['Salazine 500mg Tab','10X5','TOG121','196','34','2','460.00','448.24'],
+    ['Xelnib XR 11mg Tab','10X1','TNH331','599.7','104.3','1','704.00','686.01'],
+    ['Ceftid 200mg Cap','7X2','COG042','419.86','73.08','2','985.88','960.69'],
+    ['Folic OS 100ml O/Sol','1X1','LOG149','37.48','6.52','1','44.00','42.88'],
+    ['Open 50ml PF Sol','1X1','POG103','26.24','4.57','1','30.81','30.02'],
+    ['','','','Sub Total:','','','3236.69','3153.99'],
+    ['Products of Special-D: Territory: EABD1-Raju Ahamed[PE15031]','','','','','','',''],
+    ['Arnivas 50mg Tab','10X2','TOF530','674.6','117.4','2','1584.00','1543.52'],
+    ['Avas 10mg Tab (COS)','14X3','TOF588','378','65.94','1','443.94','432.60'],
+    ['Bislol 10mg Tab','14X2','TOF420','377.72','65.8','2','887.04','864.38'],
+    ['Bislol 2.5mg Tab','14X5','TOF548','367.5','63.7','2','862.40','840.35'],
+    ['Bislol 5mg Tablet','14X4','TOF107','482.72','84','3','1700.16','1656.72'],
+    ['Cardex 3.125mg Tab','14X12','TOG044','220.08','38.64','1','258.72','252.12'],
+    ['Cifirate 100mg Tab','10X3','TOD491','337.2','58.8','1','396.00','385.88'],
+    ['Cildip 10 mg Tab','14X4','TOG413','420','72.8','1','492.80','480.20'],
+    ['Empadus M12.5/500mg Tab','10X2','TOF281','419.8','73','2','985.60','960.41'],
+    ['Frusin 20 Plus Tab','10X3','TOH118','135.9','23.7','1','159.60','155.52'],
+    ['Hypen-SR 1.5mg Tab','14X4','TOD391','252','43.68','1','295.68','288.12'],
+    ['Linadus M 2.5/850mg Tab','6X3','TOF260','188.82','32.94','1','221.76','216.10'],
+    ['Ramace 2.5mg Tab','10X3','TOA432','113.1','19.8','2','265.80','259.01'],
+    ['Renexin XR 500mg Tab','10X3','TOA378','359.7','62.7','1','422.40','411.61'],
+    ['Vildamet 50/500mg Tab','10X3','TOF363','496.2','86.4','1','582.60','567.71'],
+    ['Vildus 50mg Tab','10X2','TOC322','300.8','52.4','1','353.20','344.18'],
+    ['Ultra-Q Capsule','7X3','COG008','1080.66','0','1','1080.66','1048.24'],
+    ['Frusin 60ml O/Sol','1X1','LOG178','64.15','11.16','1','75.31','73.39'],
+    ['','','','Sub Total:','','','11067.67','10780.06'],
+  ];
+  const isGroup=i=>i===0||i===7;
+  const mk=rows=>({header:{keys, labels:['Product Name','Pack','Batch','T.P','VAT','Qnty','TP+VAT','Net Val']},
+    relations:[{key:'tpVat', formula:'{qty}*({tp}+{unitvat})', source:'rule'}],
+    rows:rows.map((r,i)=>Object.assign({row:i+1, cells:Object.fromEntries(keys.map((k,j)=>[k,r[j]])), readings:{}}, isGroup(i)?{isGroup:true}:{}))});
+  const res=analyseNumbers(mk(rowsA)); show(res);
+  check(res.roles.tp==='unitTp' && res.roles.unitvat==='unitVat' && res.roles.qty==='qty' && res.roles.tpVat==='unitGross' && res.roles.net==='net', 'roles: T.P unit TP, VAT unit VAT, Qnty, TP+VAT gross, Net Val net');
+  check(res.rows[0].isGroup && res.rows[7].isGroup && !res.rows[0].isTotal && res.summary.groupRows===2, 'the two territory rows are group rows, neither an item nor a total');
+  check(res.rows[6].isTotal && res.rows[26].isTotal && res.summary.itemRows===23, 'the two Sub Total rows are totals; 23 item rows');
+  const items=res.rows.filter(r=>!r.isTotal && !r.isGroup);
+  check(items.every(r=>r.cells.tpVat.status==='verified'), 'TP+VAT verified on every item by Qnty × (T.P + VAT), the qty 2 and 3 rows included ('+items.filter(r=>r.cells.tpVat.status!=='verified').map(r=>r.row).join(',')+')');
+  check(res.model.relations.some(r=>r.source==='rule' || /rule/.test(r.id)) || res.model.relations.some(r=>r.id.includes('tpVat')||r.id.includes('unitGross')), 'the header rule\'s relation is in the model ('+res.model.relations.map(r=>r.id).join(', ')+')');
+  check(cell(res,26,'tpVat').status==='verified', 'the second group\'s sub-total adds up over its own items, the group header row between them skipped');
+  check(cell(res,6,'tpVat').status==='conflict', 'the first group\'s sub-total (items on the page before) is a conflict, not silently verified');
+  check(items.every(r=>['tp','unitvat','qty','tpVat','net'].every(k=>r.cells[k].status!=='fixed' && r.cells[k].status!=='filled')), 'no item cell was changed to make that sub-total add up');
+  // one corrupted cell: the qty of Bislol 5mg read as 8 — the relation says 3
+  const rowsB=rowsA.map(r=>r.slice()); rowsB[12][5]='8';
+  const res2=analyseNumbers(mk(rowsB));
+  check(cell(res2,12,'qty').status==='fixed' && cell(res2,12,'qty').value===3, 'a quantity read as 8 is fixed to 3 from TP+VAT = Qnty × (T.P + VAT) ('+cell(res2,12,'qty').status+' '+cell(res2,12,'qty').value+')');
+}
+
 console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED');
 process.exit(failures?1:0);

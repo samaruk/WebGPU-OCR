@@ -73,11 +73,11 @@ for(const [kind,name,desc] of [
   ['coverage','Coverage Profile',
    'Glyph coverage across the table band, x de-skewed along the COLUMNS (their slope is estimated separately from the row slope; both are shown in the badge): bar height = how many band rows have ink at that x. Gutters are shaded as slanted bands: red where almost no row has ink, amber where the profile drops to at most 42 % of the neighbouring peaks — a word-space-sized gap that sits at the same x in every row. Word spaces inside a column fall at different x per row and only dent the profile.'],
   ['columns','Columns · rule or profile',
-   'The intervals between gutters, trimmed to their content, drawn as slanted quads across the band with index, alignment (left / right / centre from the spread of the cell edges) and cell count.'],
+   'The intervals between gutters, trimmed to their content, drawn as slanted quads across the band with index, alignment (left / right / centre from the spread of the cell edges) and cell count. Drag a boundary (the tabs above the table) left or right to move it: the two columns on either side take it and everything from the cells on is computed again.'],
   ['cells','Cells',
    'Row × column grid: every glyph goes to the column under its centre and the union of a row’s glyphs in a column is the cell, coloured by column. A piece that chained two columns is split here. Empty cells are dotted.'],
   ['table','Table Layout',
-   'Table region with slanted column separators (at gutter centres) and row separators (between consecutive rows), plus the header and footer regions. This is the invoice skeleton.']
+   'Table region with slanted column separators (at gutter centres) and row separators (between consecutive rows), plus the header and footer regions. This is the invoice skeleton. Drag the table\'s top or bottom edge up or down to change its rows: the columns are found again from the new band and everything from there on is computed again.']
 ]) add('CL_'+kind,kind,'CL','COLUMNS','CL · '+name,desc);
 
 /* ---- CHARACTERS ------------------------------------------------------- */
@@ -126,4 +126,4 @@ add('PR_match','products-match','FN','PRODUCTS · match','PR · Product Match',
 
 /* ---- FINAL · editable table ------------------------------------------------ */
 add('FN_edit','final-edit','FN','FINAL · editable table','FN · Editable Table',
-  'The fixed final table as a plain HTML table over the viewport (js/edit/htmltable.js): the values after the number check\u2019s repair, text coloured by its source like the Final Table stage, a number cell underlined by its check (cyan filled, magenta fixed, red conflict), the matched product and its MRP beside each row. Every number cell and the pack size are inputs: an edit is written into the final table as typed by hand, the row rules run again under the rules in force, the products are matched again, the JSON and the stages follow. The thumbnail shows the same table drawn on the page.');
+  'The fixed final table as a plain HTML table over the viewport (js/edit/htmltable.js): the values after the number check\u2019s repair, text coloured by its source like the Final Table stage, a number cell underlined by its check (cyan filled, magenta fixed, red conflict), the matched product’s MRP and profit beside each row. Once the match is in, the item name cell shows the matched product’s name, the invoice’s reading in the tooltip, “no match” where no product fits, and clicking it opens the product popup; every number stays the invoice’s, the pack size cell showing its units per pack (1X30s → 30) as an input that sets the row’s conversion. Every other number cell is an input: an edit is written into the final table as typed by hand, the row rules run again under the rules in force, the products are matched again, the JSON and the stages follow. The thumbnail shows the same table drawn on the page.');

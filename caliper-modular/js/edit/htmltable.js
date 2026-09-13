@@ -8,6 +8,15 @@
    "manual"), runs the number check again under the rules in force,
    matches the products again and redraws the stages, so the colours and
    the JSON follow the correction at once.
+   Once the product match is in, the item name column shows the MATCHED
+   PRODUCT's name in place of the invoice's reading, which stays in the
+   tooltip; a row with no match reads "no match"; clicking the cell opens
+   the product popup. Every number stays the INVOICE's: the pack size
+   column shows the invoice's units per pack (1X30s → 30, 5x4's → 20,
+   100ml → 1, by the pack rule) as an input whose typed value is the row's
+   conversion, the unit conversion column (the invoice's own, or the one
+   the table adds from the pack size) likewise, and the MRP, the profit and
+   the price check follow them.
    Colours are the final table's: text by source (white agreed, yellow
    vote, orange PaddleOCR, violet EasyOCR, pink Tesseract 5, green local,
    cyan typed by hand); a number cell's underline by its check (cyan filled,
@@ -21,7 +30,9 @@ import { tableForNumbers } from '../final/final.js';
 import { columnType } from '../config/columntypes.js';
 import { updateFinalJson } from '../ui/ui.js';
 import { startProducts } from '../pipeline/pipeline.js';
-import { searchProducts, manualMatch, rowConversion } from '../products/products.js';
+import { searchProducts, manualMatch } from '../products/products.js';
+import { rowConversion, rowPackMrp, profitRange, profitColor } from '../products/mrp.js';
+import { packColumnIndex } from '../final/pack.js';
 import { refreshStages } from '../gallery/gallery.js';
 
 const SRC={agreed:'#f0f5f5', vote:'#ffe182', local:'#54dd7e', api:'#ffaa46', easyocr:'#c896ff', tesseract5:'#ff82be', 'local-only':'#6ec8ff', manual:'#6edcff', name:'#7fd0ff', empty:'#96a5aa'};
@@ -34,6 +45,10 @@ panel.style.cssText='position:absolute;inset:0;display:none;overflow:auto;backgr
 viewport.appendChild(panel);
 
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* a product of the list as shown in the table: Product, Strength and Category, space-separated ("BINOCLAR 500 MG Tab") */
+const productLabel=p=>[p.name,p.strength,p.category].map(v=>String(v??'').trim()).filter(Boolean).join(' ');
+/* the row's number as shown: the rows above it that are not item groups, plus one; '' on a group row, which takes no number */
+function itemNumber(F,ri){ const rows=F.rows||[]; if(rows[ri]&&rows[ri].kind==='group') return ''; let n=0; for(let i=0;i<=ri;i++) if(!(rows[i]&&rows[i].kind==='group')) n++; return n; }
 
 /* is the column one the operator may edit: a number column (by its role, its key's type, or its values) or the pack size */
 function editable(F,ci,key){
@@ -81,11 +96,11 @@ function columnRanges(F, n){
   return r;
 }
 
-/* the row's pack MRP and profit: UnitSalePrice × UnitConversion against the invoice's unit TP */
-function priceHelpers(F,keys,N){
+/* the row's pack MRP (typed, else UnitSalePrice × units per pack — mrp.js) and its profit on the invoice's unit TP */
+function priceHelpers(F,keys,N,P){
   const tpKey=keys.find(k=>((N&&N.roles)||{})[k]==='unitTp')||(keys.includes('tp')?'tp':null);
   const rowTp=ri=>{ if(!tpKey) return null; const c=N&&N.rows&&N.rows[ri]&&N.rows[ri].cells?N.rows[ri].cells[tpKey]:null; if(c && c.value!==null && c.value!==undefined) return c.value; const v=parseFloat(String((F.grid[ri][keys.indexOf(tpKey)]||{}).text||'').replace(/,/g,'')); return isFinite(v)?v:null; };
-  const packMrp=(r,ri)=>{ if(!r || !r.product || r.product.mrp==null) return null; const conv=rowConversion(F,ri).value||1; return +r.product.mrp*conv; };
+  const packMrp=(r,ri)=>rowPackMrp(F,P,ri).value;
   const profitPct=(r,ri)=>{ const m=packMrp(r,ri), tp=rowTp(ri); if(m===null || tp===null || !(tp>0)) return null; return (m-tp)/tp*100; };
   return {tpKey, rowTp, packMrp, profitPct};
 }
@@ -98,7 +113,7 @@ function build(){
   const N=F.numbers, P=S.products;
   const prodDone=P && P.status==='done' && P.results;
   let h='<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:8px;color:#8fa39a">'
-    +'<b style="color:#e6f0eb">FINAL · editable table</b><span>'+F.grid.length+' rows × '+keys.length+' columns · values after the number check\'s repair · columns and text at the page\'s proportions, the row\'s band of the page above each row · number and pack cells are inputs</span>'
+    +'<b style="color:#e6f0eb">FINAL · editable table</b><span>'+F.grid.length+' rows × '+keys.length+' columns · values after the number check\'s repair · columns and text at the page\'s proportions, the row\'s band of the page above each row · number cells are inputs · the name shows the matched product (click to pick another) · pack size and unit conversion are the invoice\'s units per pack, typed over to correct them</span>'
     +'<label style="margin-left:auto;white-space:nowrap">zoom <input id="etZoom" type="range" min="50" max="250" step="10" value="'+Math.round(zoom*100)+'" style="vertical-align:middle;width:120px"> <span id="etZoomV">'+Math.round(zoom*100)+'%</span></label>'
     +'<button id="etReset" title="drag a column\'s right edge to resize it; double-click the edge to reset that column" style="font:inherit;font-size:11px;padding:2px 8px;background:transparent;color:#8fa39a;border:1px solid #2a3a3a;border-radius:3px;cursor:pointer">reset widths</button></div>';
   h+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:11px">'
@@ -122,11 +137,37 @@ function build(){
   const pageOff=pageW.map((w,i)=>pageW.slice(0,i).reduce((a,b)=>a+b,0));           // where each column starts in the row's crop
   const cropW=pageW.reduce((a,b)=>a+b,0);
   const tableW=widths.reduce((a,b)=>a+b,0);
-  // the columns beyond the page: Unit Conv (from the pack size, editable), then the product and its MRP
+  // the columns beyond the page: the product's MRP (editable) and the profit; a Unit Conv column only when the invoice
+  // prints neither a pack size nor a units-per-pack column (else the Pack Size cell is the row's units-per-pack input)
   const hasConvCol=keys.includes('unitconversion');
-  const EXTRA=(hasConvCol?0:80)+(prodDone?410:0);
-  const {rowTp, packMrp, profitPct}=priceHelpers(F,keys,N);
-  const ncols=1+keys.length+(prodDone?2:0);
+  const packCiEarly=packColumnIndex(keys, F.grid);
+  const showConv=!hasConvCol && packCiEarly<0;
+  const EXTRA=(showConv?80:0)+(prodDone?150:0);
+  const {rowTp, packMrp, profitPct}=priceHelpers(F,keys,N,P);
+  const RANGE=profitRange();
+  // the product-list column: once the match is in, the item name (key name, else the widest text column, as the
+  // matcher picks it) shows the matched product's name, the invoice's reading in the tooltip, and opens the product
+  // popup; no product → "no match"; a total row is left as read. Every number stays the invoice's: the pack size
+  // column shows its units per pack (the pack rule on the reading, or the operator's value) as an input.
+  let nameCi=keys.indexOf('name');
+  if(nameCi<0){ let bw=-1; keys.forEach((k,ci)=>{ const w=F.grid.reduce((s,r)=>s+((r[ci]&&r[ci].text)||'').replace(/[\d.,]/g,'').length,0); if(w>bw){ bw=w; nameCi=ci; } }); }
+  const packCi=packColumnIndex(keys, F.grid);
+  const prodCol=ci=>prodDone && ci===nameCi;
+  const packCol=ci=>prodDone && ci===packCi && ci!==nameCi;
+  // the row's units per pack as an input (the Pack Size cell once the match is in, and the Unit Conv column the table adds
+  // when the invoice prints none): the typed value first, else the invoice's own column, else the pack rule on the reading
+  const convInput=(ri,total,invoice)=>{ const cv=rowConversion(F,ri); const typed=cv.source==='typed'; const pc=packCi>=0?F.grid[ri][packCi]:null;
+    const title=[typed?'typed by hand':'units per pack: '+cv.source, invoice?'invoice reads: "'+invoice+'"':'', pc&&pc.packWas!==undefined&&pc.packWas!==pc.text?'as read: "'+pc.packWas+'"':'', pc&&pc.packNote?pc.packNote:'', 'type a number to set the row\'s units per pack; the MRP, the profit and the price check follow'].filter(Boolean).join('\n');
+    return '<td style="'+cell+'padding:0" title="'+esc(title)+'"><input data-conv="'+ri+'" value="'+(total?'':esc(String(cv.value)))+'" style="width:100%;box-sizing:border-box;background:transparent;border:0;outline:0;padding:2px 4px;color:'+(typed?SRC.manual:'#6edcff')+';font:inherit;text-align:right"'+(total?' disabled':'')+'></td>'; };
+  const isTotalRow=ri=>!!(P && P.results && P.results[ri] && P.results[ri].status==='total');
+  const prodCell=(ri,invoice)=>{ const r=P.results[ri]; const st=r?r.status:'none'; const col=st==='match'?'#54dd7e':st==='uncertain'?'#ffc85a':'#ff5a5a';
+    let text='', suffix='', title='';
+    if(r && r.product){ const p=r.product;
+      const retried=r.retry&&r.retry.by;
+      text=esc(productLabel(p)); suffix='<span style="color:#8fa39a;font-size:10px"> '+(r.manual?'(picked)':'('+r.score+(retried?' ↻':'')+')')+'</span>';
+      title=['product: '+[p.name,p.strength,p.category].filter(Boolean).join(' · '), r.manual?'picked by hand':'score '+r.score, retried?'matched on a retry from the '+r.retry.by.join(' and ')+' reading "'+r.retry.text+'" — the chosen text "'+r.retry.was+'" matched nothing':'', 'UnitConversion on file (units per pack): '+(p.unitConversion!=null?p.unitConversion:''), invoice?'invoice reads: "'+invoice+'"':'invoice reads nothing', 'click: pick the product from the list'].filter(Boolean).join('\n'); }
+    else { text='no match'; title=['no product matched', r.retry&&r.retry.disagree?'the other readings disagree: '+r.retry.disagree.join('; '):'', invoice?'invoice reads: "'+invoice+'"':'invoice reads nothing', 'click: pick the product from the list'].filter(Boolean).join('\n'); }
+    return '<td data-prod="'+ri+'" title="'+esc(title)+'" style="'+cell+'padding:2px 4px;color:'+col+';cursor:pointer;text-decoration:underline dotted rgba(110,220,255,.5);text-align:left">'+text+suffix+'</td>'; };
   // one crop per row; every column cell shows its own window of it (background offset by the column's start), so a
   // column dragged wider or narrower keeps the print at the page's scale and just shows more or less of it
   const cropCell=(b0,b1,label)=>{ if(!src || !boxes.length) return ''; const c=cropRow(src,tx0,tx1,b0,b1,scale); if(!c) return '';
@@ -134,38 +175,46 @@ function build(){
     // the column's own window of the page, exactly its page width, at the cell's left edge: a column shown wider than on
     // the page leaves blank space beside the print instead of showing its neighbour; one shown narrower is clipped
     keys.forEach((k,i)=>{ r+='<td style="border:1px solid #2a3a3a;padding:0;height:'+c.cssH+'px;overflow:hidden;background:#141a1c" title="'+esc(labels[i]||k)+' on the page"><div style="width:'+pageW[i]+'px;height:'+c.cssH+'px;background:url('+c.url+') no-repeat -'+pageOff[i]+'px 0 / '+cropW+'px '+c.cssH+'px"></div></td>'; });
-    return r+(hasConvCol?'':'<td style="border:1px solid #2a3a3a"></td>')+(prodDone?'<td colspan="3" style="border:1px solid #2a3a3a"></td>':'')+'</tr>'; };
+    return r+(hasConvCol?'':'<td style="border:1px solid #2a3a3a"></td>')+(prodDone?'<td colspan="2" style="border:1px solid #2a3a3a"></td>':'')+'</tr>'; };
   const cell='border:1px solid #2a3a3a;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;';
-  h+='<table style="border-collapse:collapse;white-space:nowrap;table-layout:fixed;width:'+(LABEL_W+tableW+EXTRA)+'px;font-size:'+fontPx+'px"><colgroup><col style="width:'+LABEL_W+'px">'+widths.map(w=>'<col style="width:'+w+'px">').join('')+(hasConvCol?'':'<col style="width:80px">')+(prodDone?'<col style="width:270px"><col style="width:70px"><col style="width:70px">':'')+'</colgroup><thead><tr>';
+  h+='<table style="border-collapse:collapse;white-space:nowrap;table-layout:fixed;width:'+(LABEL_W+tableW+EXTRA)+'px;font-size:'+fontPx+'px"><colgroup><col style="width:'+LABEL_W+'px">'+widths.map(w=>'<col style="width:'+w+'px">').join('')+(hasConvCol?'':'<col style="width:80px">')+(prodDone?'<col style="width:70px"><col style="width:70px">':'')+'</colgroup><thead><tr>';
   h+='<th style="'+cell+'padding:4px 6px;color:#8fa39a;font-size:11px">#</th>';
-  keys.forEach((k,ci)=>{ h+='<th data-col="'+ci+'" style="'+cell+'position:relative;padding:4px 10px 4px 4px;color:#ffe68c;text-align:left;font-size:'+Math.max(9,Math.min(14,fontPx))+'px" title="'+esc(labels[ci]||k)+' · '+esc(k)+(editable(F,ci,k)?' · editable':'')+'">'+esc(labels[ci]||k)+'<div style="color:#8fa39a;font-weight:normal;font-size:9px;overflow:hidden;text-overflow:ellipsis">'+esc(k)+(editable(F,ci,k)?' · edit':'')+'</div>'
+  keys.forEach((k,ci)=>{ const pc=prodCol(ci), pk=packCol(ci); h+='<th data-col="'+ci+'" style="'+cell+'position:relative;padding:4px 10px 4px 4px;color:'+(pc||pk?'#6edcff':'#ffe68c')+';text-align:left;font-size:'+Math.max(9,Math.min(14,fontPx))+'px" title="'+esc(labels[ci]||k)+' · '+esc(k)+(pc?' · the matched product\'s name (the invoice\'s reading in the tooltip) · click a cell to pick the product':pk?' · the invoice\'s units per pack (1X30s → 30, 5x4\'s → 20, 100ml → 1); type a number to correct it; the MRP, the profit and the price check follow':editable(F,ci,k)?' · editable':'')+'">'+esc(labels[ci]||k)+'<div style="color:#8fa39a;font-weight:normal;font-size:9px;overflow:hidden;text-overflow:ellipsis">'+esc(k)+(pc?' · product list':pk?' · units per pack · edit':editable(F,ci,k)?' · edit':'')+'</div>'
       +'<div class="etGrip" data-col="'+ci+'" title="drag to resize · double-click to reset" style="position:absolute;top:0;right:-4px;width:8px;height:100%;cursor:col-resize;z-index:2"></div></th>'; });
-  if(!hasConvCol) h+='<th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="units per pack from the pack size (4X10\'S → 40, 1X1\'S → 1, a size or a word → 1); UnitConversion × UnitPurchasePrice = the invoice\'s unit TP; editable">Unit Conv<div style="color:#8fa39a;font-weight:normal;font-size:9px">from pack · edit</div></th>';
-  if(prodDone) h+='<th style="'+cell+'padding:4px 6px;color:#6edcff;text-align:left;font-size:11px">Product</th><th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="the pack\'s MRP: UnitSalePrice × UnitConversion">MRP<div style="color:#8fa39a;font-weight:normal;font-size:9px">× conv</div></th><th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="profit on the invoice\'s unit TP: (MRP × conversion − TP) / TP × 100">Profit %<div style="color:#8fa39a;font-weight:normal;font-size:9px">on TP</div></th>';
+  if(showConv) h+='<th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="units per pack (the invoice prints no pack size): UnitConversion × UnitPurchasePrice = the invoice\'s unit TP; editable">Unit Conv<div style="color:#8fa39a;font-weight:normal;font-size:9px">edit</div></th>';
+  if(prodDone) h+='<th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="the pack\'s MRP: the list\'s UnitSalePrice × the row\'s units per pack — type over it to set the pack MRP by hand (the profit and the summaries follow)">MRP<div style="color:#8fa39a;font-weight:normal;font-size:9px">pack · edit</div></th><th style="'+cell+'padding:4px 6px;color:#6edcff;font-size:11px" title="profit on the invoice\'s unit TP: (pack MRP − TP) / TP × 100 — danger colour outside the Options\' profit range ('+RANGE.min+' … '+RANGE.max+' %)">Profit %<div style="color:#8fa39a;font-weight:normal;font-size:9px">'+RANGE.min+'–'+RANGE.max+' fine</div></th>';
   h+='</tr></thead><tbody>';
   if(F.header && F.header.cells){ const hb=F.header.cells.filter(Boolean); if(hb.length) h+=cropCell(Math.min(...hb.map(b=>b.y0)),Math.max(...hb.map(b=>b.y1)),'page'); }
   F.grid.forEach((row,ri)=>{
     const nr=N&&N.rows?N.rows[ri]:null, total=!!(nr&&nr.isTotal);
+    const no=itemNumber(F,ri);                                        // '' on an item group row: the groups are not counted
     // the row on the page first, then the row as read
-    const rb=row.map(g=>g.box||g.bb).filter(Boolean); if(rb.length) h+=cropCell(Math.min(...rb.map(b=>b.y0)),Math.max(...rb.map(b=>b.y1)),'page '+(ri+1));
+    const rb=row.map(g=>g.box||g.bb).filter(Boolean); if(rb.length) h+=cropCell(Math.min(...rb.map(b=>b.y0)),Math.max(...rb.map(b=>b.y1)),'page'+(no?' '+no:''));
+    // an item group name (RPL, RNL …): one cell across the table, no inputs, nothing to match
+    const fr=F.rows&&F.rows[ri];
+    if(fr && fr.kind==='group'){ h+='<tr style="background:rgba(255,225,130,.10)"><td style="'+cell+'padding:2px 6px;color:#8fa39a;font-size:11px"></td>'
+        +'<td colspan="'+(keys.length+(hasConvCol?0:1)+(prodDone?2:0))+'" style="'+cell+'padding:3px 6px;color:#ffe182;font-weight:600" title="item group: the rows below belong to '+esc(fr.groupName)+'">▸ '+esc(fr.groupName)+' <span style="color:#8fa39a;font-weight:normal;font-size:10px">item group</span></td></tr>'; return; }
     h+='<tr style="background:'+(total?'rgba(110,160,255,.14)':(ri%2?'rgba(255,255,255,.025)':'transparent'))+'">';
-    h+='<td style="'+cell+'padding:2px 6px;color:#8fa39a;font-size:11px">'+(ri+1)+'</td>';
+    h+='<td style="'+cell+'padding:2px 6px;color:#8fa39a;font-size:11px">'+no+'</td>';
     row.forEach((g,ci)=>{
       const k=keys[ci], c=nr&&nr.cells?nr.cells[k]:null;
       const shown=c && (c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined ? c.fixedText : (g.text||'');
       const color=SRC[g.source]||SRC.agreed, under=c&&CHECK[c.status]?'border-bottom:3px solid '+CHECK[c.status]+';':'';
       const title=[g.source?'source: '+g.source:'', c?c.status+(c.note?' — '+c.note:''):'', c&&c.status!=='blank'&&shown!==g.text?'as read: "'+g.text+'"':''].filter(Boolean).join('\n');
       const align=/^[\d.,%\-+ ]*$/.test(shown)&&shown?'right':'left';
+      if(prodCol(ci) && !isTotalRow(ri)){ h+=prodCell(ri, shown); return; }
+      if(packCol(ci)){ h+=convInput(ri, total, shown); return; }
       if(editable(F,ci,k)) h+='<td style="'+cell+'padding:0;'+under+'"><input data-ri="'+ri+'" data-ci="'+ci+'" value="'+esc(shown)+'" title="'+esc(title)+'" style="width:100%;box-sizing:border-box;background:transparent;border:0;outline:0;padding:2px 4px;color:'+color+';font:inherit;text-align:'+align+'"></td>';
       else h+='<td style="'+cell+'padding:2px 4px;color:'+color+';'+under+'text-align:'+align+'" title="'+esc(title)+'">'+esc(shown)+'</td>';
     });
-    if(!hasConvCol){ const cv=rowConversion(F,ri); const typed=cv.source==='typed';
-      h+='<td style="'+cell+'padding:0" title="'+esc(cv.source)+'"><input data-conv="'+ri+'" value="'+(total?'':esc(String(cv.value)))+'" style="width:100%;box-sizing:border-box;background:transparent;border:0;outline:0;padding:2px 4px;color:'+(typed?SRC.manual:'#6edcff')+';font:inherit;font-size:11px;text-align:right"'+(total?' disabled':'')+'></td>'; }
+    if(showConv) h+=convInput(ri, total, '');
     if(prodDone){ const r=P.results[ri]; const st=r?r.status:'none'; const col=st==='match'?'#54dd7e':st==='uncertain'?'#ffc85a':st==='total'?'#6ea0ff':'#ff5a5a';
-      h+='<td data-prod="'+ri+'" title="click: pick the product from the list" style="'+cell+'padding:3px 6px;color:'+col+';cursor:pointer;font-size:11px;text-decoration:underline dotted rgba(110,220,255,.5)">'+(r&&r.product?esc([r.product.name,r.product.strength,r.product.category].filter(Boolean).join(' · '))+(r.manual?' (picked)':' ('+r.score+')'):(st==='total'?'':'no match'))+'</td>';
-      const pm=packMrp(r,ri), pp=profitPct(r,ri);
-      h+='<td style="'+cell+'padding:3px 6px;color:'+col+';text-align:right;font-size:11px" title="'+(r&&r.product?esc('MRP '+pm.toFixed(2)+' = '+(+r.product.mrp).toFixed(2)+' × '+(rowConversion(F,ri).value||1))+(r.price?esc(' · invoice TP '+r.price.invoiceTp+(r.price.expected!=null?' · expected '+r.price.expected+' = '+r.price.purchasePrice+' × '+r.price.unitConversion:'')+(r.price.differs?' · differs':' · agrees')):''):'')+'">'+(pm!==null?pm.toFixed(2):'')+(r&&r.price&&r.price.differs?' <span style="color:#ff78e6" title="the invoice TP is not UnitConversion × UnitPurchasePrice">≠</span>':'')+'</td>';
-      h+='<td style="'+cell+'padding:3px 6px;text-align:right;font-size:11px;color:'+(pp===null?'#8fa39a':pp<0?'#ff5a5a':pp<10?'#ffc85a':'#54dd7e')+'" title="'+(pp!==null?esc('('+pm.toFixed(2)+' − '+rowTp(ri)+') / '+rowTp(ri)+' × 100'):'')+'">'+(pp!==null?pp.toFixed(1)+'%':'')+'</td>'; }
+      const mr=rowPackMrp(F,P,ri), pm=mr.value, pp=profitPct(r,ri);
+      const mrpTitle=[mr.source==='typed'?'pack MRP typed by hand':(r&&r.product&&pm!==null?'MRP '+pm.toFixed(2)+' = '+mr.unit.toFixed(2)+' × '+mr.conv+' units per pack':'no product: type the pack MRP'),
+        r&&r.price?'invoice TP '+r.price.invoiceTp+(r.price.expected!=null?' · expected '+r.price.expected+' = '+r.price.purchasePrice+' × '+r.price.unitConversion:'')+(r.price.differs?' · differs':' · agrees'):'', 'type a number to set the pack MRP; the profit and the summaries follow; clear it to take the list\'s again'].filter(Boolean).join('\n');
+      if(total) h+='<td style="'+cell+'"></td>';
+      else h+='<td style="'+cell+'padding:0" title="'+esc(mrpTitle)+'"><input data-mrp="'+ri+'" value="'+(pm!==null?pm.toFixed(2):'')+'" style="width:100%;box-sizing:border-box;background:transparent;border:0;outline:0;padding:2px 4px;color:'+(mr.source==='typed'?SRC.manual:col)+';font:inherit;text-align:right;font-size:11px">'+(r&&r.price&&r.price.differs?'<span style="color:#ff78e6;font-size:10px" title="the invoice TP is not UnitConversion × UnitPurchasePrice">≠</span>':'')+'</td>';
+      h+='<td style="'+cell+'padding:3px 6px;text-align:right;font-size:11px;color:'+profitColor(pp,RANGE)+'" title="'+(pp!==null?esc('('+pm.toFixed(2)+' − '+rowTp(ri)+') / '+rowTp(ri)+' × 100'+(profitColor(pp,RANGE)==='#ff5a5a'?' — outside the profit range '+RANGE.min+' … '+RANGE.max+' %':'')):'')+'">'+(pp!==null?pp.toFixed(1)+'%':'')+'</td>'; }
     h+='</tr>';
   });
   h+='</tbody></table>';
@@ -181,7 +230,13 @@ function build(){
   panel.querySelectorAll('td[data-prod]').forEach(td=>{ td.onclick=()=>openProductPopup(+td.dataset.prod); });
   panel.querySelectorAll('input[data-conv]').forEach(inp=>{ const go=()=>{ const F=S.final, ri=+inp.dataset.conv; const v=parseFloat(inp.value); if(!F) return;
       F.rowMeta=F.rowMeta||{}; F.rowMeta[ri]=F.rowMeta[ri]||{}; if(isFinite(v) && v>0) F.rowMeta[ri].unitConversion=v; else delete F.rowMeta[ri].unitConversion;
-      updateFinalJson(); if(S.pipelineDone) startProducts(); const top=panel.scrollTop; build(); panel.scrollTop=top; };
+      updateFinalJson(); if(S.pipelineDone) startProducts(); const top=panel.scrollTop; build(); panel.scrollTop=top; edited(); };
+    inp.onchange=go; inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); go(); } }; });
+  // the pack MRP typed over: kept on the row (F.rowMeta[ri].mrp), the profit and the summaries follow; cleared → the list's again
+  panel.querySelectorAll('input[data-mrp]').forEach(inp=>{ const go=()=>{ const F=S.final, ri=+inp.dataset.mrp; if(!F) return; const v=parseFloat(String(inp.value).replace(/,/g,''));
+      F.rowMeta=F.rowMeta||{}; F.rowMeta[ri]=F.rowMeta[ri]||{}; const listed=rowPackMrp({...F, rowMeta:{}},S.products,ri).value;
+      if(isFinite(v) && v>=0 && (listed===null || Math.abs(v-listed)>0.005)) F.rowMeta[ri].mrp=v; else delete F.rowMeta[ri].mrp;
+      updateFinalJson(); const top=panel.scrollTop; build(); panel.scrollTop=top; edited(); };
     inp.onchange=go; inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); go(); } }; });
   // column resizing: drag a header cell's right edge; the <col> follows live, the width is kept per column key
   const tbl=panel.querySelector('table'), colEls=tbl?[...tbl.querySelectorAll('colgroup col')]:[];
@@ -238,7 +293,7 @@ function renderList(){
       return '<tr data-i="'+i+'" style="cursor:pointer;background:'+(sel?'rgba(166,255,63,.18)':(i%2?'rgba(255,255,255,.025)':'transparent'))+'">'
         +'<td style="padding:3px 6px;color:#8fa39a">'+(i+1)+'</td><td style="padding:3px 6px;color:'+(it.by==='match'?'#54dd7e':'#e6f0eb')+'">'+esc(p.name)+'</td><td style="padding:3px 6px">'+esc(p.strength||'')+'</td><td style="padding:3px 6px">'+esc(p.category||'')+'</td><td style="padding:3px 6px;text-align:right" title="UnitConversion: units per pack">'+(p.unitConversion!=null?esc(String(p.unitConversion)):'')+'</td><td style="padding:3px 6px;color:#8fa39a">'+esc(p.manufacturer||'')+'</td>'
         +'<td style="padding:3px 6px;text-align:right">'+n(p.mrp)+'</td><td style="padding:3px 6px;text-align:right">'+n(p.tradePrice)+'</td><td style="padding:3px 6px;text-align:right">'+n(p.purchasePrice)+'</td><td style="padding:3px 6px;text-align:right;color:'+(it.score>=0.85?'#54dd7e':it.score>=0.6?'#ffc85a':'#8fa39a')+'">'+(it.score?it.score.toFixed(3):'')+'</td></tr>'; }).join('')+'</tbody></table>';
-  L.querySelectorAll('tr[data-i]').forEach(tr=>{ tr.onclick=()=>{ pp.picked=pp.items[+tr.dataset.i].product; $p('ppPick').textContent='selected: '+[pp.picked.name,pp.picked.strength,pp.picked.category].filter(Boolean).join(' · ')+(pp.picked.mrp!=null?' · MRP '+(+pp.picked.mrp).toFixed(2):''); $p('ppMerge').disabled=false; renderList(); };
+  L.querySelectorAll('tr[data-i]').forEach(tr=>{ tr.onclick=()=>{ pp.picked=pp.items[+tr.dataset.i].product; $p('ppPick').textContent='selected: '+productLabel(pp.picked)+(pp.picked.mrp!=null?' · MRP '+(+pp.picked.mrp).toFixed(2):''); $p('ppMerge').disabled=false; renderList(); };
     tr.ondblclick=()=>{ tr.onclick(); $p('ppMerge').click(); }; });
   $p('ppCount').textContent=pp.items.length+' shown'+(pp.items.some(i=>i.by==='match')?' · best matches first':'');
 }
@@ -256,7 +311,7 @@ function openProductPopup(ri){
   const name=(nameCi>=0&&F.grid[ri][nameCi].text)||(F.grid[ri].map(g=>g.text).find(t=>/[A-Za-z]{3}/.test(t||''))||'');
   const pack=packCi>=0?(F.grid[ri][packCi].text||''):'';
   pp.row=ri; pp.picked=null; pp.items=[];
-  $p('ppHead').innerHTML='row '+(ri+1)+' · <b style="color:#e6f0eb">'+esc(name)+'</b>'+(pack?' · pack '+esc(pack):'')+(P&&P.results&&P.results[ri]&&P.results[ri].product?' · now: '+esc(P.results[ri].product.name)+(P.results[ri].manual?' (picked)':''):' · now: no match')+' — pick a product and press Merge';
+  $p('ppHead').innerHTML='row '+(itemNumber(F,ri)||ri+1)+' · <b style="color:#e6f0eb">'+esc(name)+'</b>'+(pack?' · pack '+esc(pack):'')+(P&&P.results&&P.results[ri]&&P.results[ri].product?' · now: '+esc(productLabel(P.results[ri].product))+(P.results[ri].manual?' (picked)':''):' · now: no match')+' — pick a product and press Merge';
   $p('ppPick').textContent='no product selected'; $p('ppMerge').disabled=true;
   // the row on the page, the table's full width, fitted to the popup: what is being matched, right above the list
   { const cropEl=$p('ppCrop'); const src=S.workCanvas||S.origCanvas||null; const rb=F.grid[ri].map(g=>g.box||g.bb).filter(Boolean);
@@ -294,9 +349,10 @@ const ROLE_LABEL={qty:'Quantity', bonus:'Bonus', unitTp:'Unit TP', unitVat:'Unit
 const SUMMED=new Set(['qty','bonus','totalTp','totalVat','discAmt','net','totalSp']);       // the columns whose sum means something
 function summaryHtml(F,keys,labels,N,P,prodDone){
   const rows=N&&N.rows?N.rows:null; if(!rows) return '';
-  const {rowTp, packMrp}=priceHelpers(F,keys,N);
+  const {rowTp, packMrp}=priceHelpers(F,keys,N,P);
+  const RANGE=profitRange();
   const roles=N.roles||{};
-  const items=rows.filter(r=>!r.isTotal), totals=rows.filter(r=>r.isTotal);
+  const items=rows.filter(r=>!r.isTotal && !r.isGroup), totals=rows.filter(r=>r.isTotal);
   const fmt=(v,k)=>v===null||v===undefined||!isFinite(v)?'':(roles[k]==='qty'||roles[k]==='bonus'?String(Math.round(v)):(+v).toFixed(2));
   const lines=[];
   lines.push(['Item rows', String(items.length), '', '']);
@@ -312,13 +368,13 @@ function summaryHtml(F,keys,labels,N,P,prodDone){
   h+='<div><div style="color:#ffe68c;margin-bottom:4px">Item table summary</div><table style="border-collapse:collapse;font-size:12px"><thead><tr>'+['','sum of the item rows','printed sub-total','check'].map(t=>'<th style="border:1px solid #2a3a3a;padding:3px 8px;color:#8fa39a;font-weight:normal;text-align:left">'+t+'</th>').join('')+'</tr></thead><tbody>'
     +lines.map(l=>'<tr><td style="border:1px solid #2a3a3a;padding:3px 8px">'+l[0]+'</td><td style="border:1px solid #2a3a3a;padding:3px 8px;text-align:right;color:#f0f5f5">'+l[1]+'</td><td style="border:1px solid #2a3a3a;padding:3px 8px;text-align:right;color:#6ea0ff">'+l[2]+'</td><td style="border:1px solid #2a3a3a;padding:3px 8px">'+l[3]+'</td></tr>').join('')+'</tbody></table></div>';
   if(prodDone){
-    const counts={match:0, uncertain:0, none:0, priceDiff:0, picked:0}; let mrpValue=0, mrpRows=0, costValue=0;
+    const counts={match:0, uncertain:0, none:0, priceDiff:0, picked:0, retry:0}; let mrpValue=0, mrpRows=0, costValue=0;
     const qtyKey=keys.find(k=>roles[k]==='qty');
-    P.results.forEach((r,ri)=>{ if(!r || r.status==='total') return; counts[r.status]=(counts[r.status]||0)+1; if(r.manual) counts.picked++; if(r.price&&r.price.differs) counts.priceDiff++;
+    P.results.forEach((r,ri)=>{ if(!r || r.status==='total' || r.status==='group') return; counts[r.status]=(counts[r.status]||0)+1; if(r.manual) counts.picked++; if(r.retry&&r.retry.by) counts.retry++; if(r.price&&r.price.differs) counts.priceDiff++;
       const pm=packMrp(r,ri), tp=rowTp(ri);
       if(pm!==null && qtyKey && rows[ri] && rows[ri].cells[qtyKey] && rows[ri].cells[qtyKey].value!==null){ const q=rows[ri].cells[qtyKey].value; mrpValue+=q*pm; mrpRows++; if(tp!==null) costValue+=q*tp; } });
     const profitAll=costValue>0?(mrpValue-costValue)/costValue*100:null;
-    const pl=[['Matched','<span style="color:#54dd7e">'+counts.match+'</span>'+(counts.picked?' <span style="color:#8fa39a">('+counts.picked+' picked by hand)</span>':'')],['Uncertain','<span style="color:#ffc85a">'+counts.uncertain+'</span>'],['No match','<span style="color:#ff5a5a">'+counts.none+'</span>'],['TP differs from the price on file','<span style="color:#ff78e6">'+counts.priceDiff+'</span>'],['MRP value of the matched lines (qty × MRP × conversion)',mrpRows?(mrpValue).toFixed(2)+' <span style="color:#8fa39a">('+mrpRows+' rows)</span>':''],['TP value of those lines (qty × TP)',costValue>0?costValue.toFixed(2):''],['Profit on TP',profitAll!==null?'<span style="color:'+(profitAll<0?'#ff5a5a':'#54dd7e')+'">'+profitAll.toFixed(1)+'%</span>':'']];
+    const pl=[['Matched','<span style="color:#54dd7e">'+counts.match+'</span>'+(counts.picked?' <span style="color:#8fa39a">('+counts.picked+' picked by hand)</span>':'')+(counts.retry?' <span style="color:#8fa39a">('+counts.retry+' on a retry from another reading)</span>':'')],['Uncertain','<span style="color:#ffc85a">'+counts.uncertain+'</span>'],['No match','<span style="color:#ff5a5a">'+counts.none+'</span>'],['TP differs from the price on file','<span style="color:#ff78e6">'+counts.priceDiff+'</span>'],['MRP sum (Σ qty × pack MRP)',mrpRows?'<b style="color:#e6f0eb">'+(mrpValue).toFixed(2)+'</b> <span style="color:#8fa39a">('+mrpRows+' rows)</span>':''],['TP value of those lines (qty × TP)',costValue>0?costValue.toFixed(2):''],['Profit on TP',profitAll!==null?'<span style="color:'+profitColor(profitAll,RANGE)+'">'+profitAll.toFixed(1)+'%</span> <span style="color:#8fa39a">(range '+RANGE.min+' … '+RANGE.max+' %)</span>':'']];
     h+='<div><div style="color:#6edcff;margin-bottom:4px">Products</div><table style="border-collapse:collapse;font-size:12px"><tbody>'+pl.map(l=>'<tr><td style="border:1px solid #2a3a3a;padding:3px 8px">'+l[0]+'</td><td style="border:1px solid #2a3a3a;padding:3px 8px;text-align:right">'+l[1]+'</td></tr>').join('')+'</tbody></table></div>';
   }
   return h+'</div>';
@@ -342,9 +398,13 @@ async function applyEdit(ri,ci,value,live){
     const top=panel.scrollTop, left=panel.scrollLeft;
     build(); panel.scrollTop=top; panel.scrollLeft=left;
     if(keep){ const again=panel.querySelector('input[data-ri="'+keep.ri+'"][data-ci="'+keep.ci+'"]'); if(again){ again.focus(); try{ again.setSelectionRange(keep.pos,keep.pos); }catch(e){} } }
-    if(!live){ if(S.pipelineDone) startProducts(); refreshStages(['final-table','num-columns','num-fields','num-rules','num-repair','products-match',KIND]); }
+    if(!live){ if(S.pipelineDone) startProducts(); refreshStages(['final-table','num-columns','num-fields','num-rules','num-repair','products-match',KIND]); edited(); }
   } finally { applying=false; }
 }
+/* a field of the page changed: the all-pages summary (js/pages/pages.js listens) follows */
+function edited(){ document.dispatchEvent(new CustomEvent('finaledited')); }
+/* the profit range in the Options: every row's colour is checked again, in the table and the summaries */
+for(const id of ['profitMin','profitMax']){ const el=document.getElementById(id); if(el) el.addEventListener('change',()=>{ if(panel.style.display!=='none'){ const top=panel.scrollTop; build(); panel.scrollTop=top; } document.dispatchEvent(new CustomEvent('profitrange')); }); }
 
 function sync(){ const st=STAGES[S.stage]; const on=!!(st && st.kind===KIND && S.W); panel.style.display=on?'block':'none'; if(on) build(); }
 document.addEventListener('stagechange',sync);

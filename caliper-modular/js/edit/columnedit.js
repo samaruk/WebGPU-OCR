@@ -1,5 +1,5 @@
 /* ======================================================================
-   COLUMN EDIT  ·  right-click a column: Set name / Split column
+   COLUMN EDIT  ·  right-click a column: Set name / Split column / Merge with left · right
    Why: a column can still come out wrong after the rules and the vocabulary
    have had their say — a title misread, two printed columns run together.
    The operator right-clicks the column in the view and either names it
@@ -24,6 +24,8 @@ import { updateFinalJson } from '../ui/ui.js';
 import { readParams, startProducts } from '../pipeline/pipeline.js';
 import { refreshStages } from '../gallery/gallery.js';
 import { findSplitGap } from './split.js';
+import { columnFractions, columnAtFraction } from './colnames.js';
+import { moveBoundaryIn, boundariesOf } from './dragmath.js';
 
 /* ---- the menu ---------------------------------------------------------- */
 const menu=document.createElement('div');
@@ -67,7 +69,7 @@ async function rebuild(what, touched){
     const p=readParams();
     if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,C);
       if(S.recognition && S.recognition.available && S.textLines) S.recognition.cells=buildCellTexts(S.characters,C,S.textLines.stats.reference||20); }
-    if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.characters && S.textLines && touched && touched.length){
+    if(p.recognition.enabled && p.recognition.cellPass && !S.pdfWords && S.recognition && S.recognition.available && S.characters && S.textLines && touched && touched.length){
       stepLabel.textContent='column edit · reading the column again'; await nextFrame();
       try{ await refineCellsByColumn(S.recognition,S.textLines,S.characters,C,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='column edit · '+label; },{only:touched}); }catch(e){ console.warn('cell pass after the edit failed', e); } }
     stepLabel.textContent='column edit · final table'; await nextFrame();
@@ -75,6 +77,26 @@ async function rebuild(what, touched){
     overlay.classList.remove('show');
     await refreshStages(STAGES.filter(st=>['CL','CH','RC','FN'].includes(st.pass)).map(st=>st.kind));
   } finally { busy=false; overlay.classList.remove('show'); }
+}
+
+export const rebuildColumns=rebuild;
+export const isBusy=()=>busy;
+
+/* ---- a boundary dragged (js/edit/dragedit.js) --------------------------------
+   Boundary i (0 = the left edge of the first column, N = the right edge of the last, else between columns i-1 and
+   i) goes to de-skewed x; the two columns on either side take it, the gutter between them follows, the cells are
+   rebuilt and those two columns are read again cell by cell; the final table, the products and the stages follow. */
+export async function moveBoundary(i, xd){
+  const C=S.columns; if(!C || !C.columns || busy) return false;
+  const N=C.columns.length, was=boundariesOf(C.columns)[i];
+  const cols=moveBoundaryIn(C.columns, i, xd);
+  const x=boundariesOf(cols)[i];
+  finishColumns(C,cols);
+  if(i>0 && i<N){ const g=(C.gutters||[]).find(g=>g.x0>=cols[i-1].gutterX0 && g.x1<=cols[i].gutterX1);
+    if(g){ g.x0=x-1; g.x1=x+1; g.width=3; g.manual=true; } else C.gutters=(C.gutters||[]).concat([{x0:x-1, x1:x+1, width:3, relative:false, manual:true}]).sort((p,q)=>p.x0-q.x0); }
+  const touched=[i-1,i].filter(k=>k>=0 && k<N);
+  await rebuild('boundary '+(i===0?'left edge':i===N?'right edge':'between columns '+i+' and '+(i+1))+' moved '+Math.round(was)+' → '+Math.round(x), touched);
+  return true;
 }
 
 /* ---- Set name ------------------------------------------------------------- */
@@ -92,10 +114,32 @@ function setName(ci){
     // the same key on another column is released: one meaning, one column
     C.columns.forEach((o,i)=>{ if(i!==ci && key && o.key===key){ o.key=null; o.label=null; o.manual=true; } });
     c.key=key; c.label=t?t.label:null; c.group=null; c.manual=true;
-    hideMenu(); await rebuild('column '+(ci+1)+' → '+(key||'unnamed'), [ci]); };
+    const detail={key, label:c.label, ...columnFractions(C,ci)};
+    hideMenu(); await rebuild('column '+(ci+1)+' → '+(key||'unnamed'), [ci]);
+    // the name is the invoice's: every other page takes it at the same place (js/pages/pages.js listens) — told
+    // AFTER this page's table is rebuilt: the listener swaps the other pages into S, and a rebuild started after that
+    // swap would have run on the wrong page
+    document.dispatchEvent(new CustomEvent('columnnamed',{detail})); };
   menu.appendChild(sel);
   menu.appendChild(item('Cancel',hideMenu));
   sel.focus();
+}
+
+/* ---- the names of the invoice laid over the page in S -----------------------
+   records: [{key, label, x0f, x1f}] — for each, the column at that place takes the key (the key released from any
+   other column); the cells, the final table, the products and the stages follow when anything changed */
+export async function applyColumnNames(records){
+  const C=S.columns; if(!C || !C.columns || !C.columns.length || busy) return false;
+  const touched=[], notes=[];
+  for(const rec of records){
+    const ci=columnAtFraction(C, rec.x0f, rec.x1f); if(ci<0) continue;
+    const c=C.columns[ci]; if((c.key||null)===(rec.key||null)) continue;
+    C.columns.forEach((o,i)=>{ if(i!==ci && rec.key && o.key===rec.key){ o.key=null; o.label=null; o.manual=true; } });
+    c.key=rec.key||null; c.label=rec.label||null; c.group=null; c.manual=true; touched.push(ci); notes.push('column '+(ci+1)+' → '+(rec.key||'unnamed')+' (named on another page)');
+  }
+  if(!touched.length) return false;
+  await rebuild(notes.join('; '), touched);
+  return true;
 }
 
 /* ---- Split column ---------------------------------------------------------- */
@@ -113,6 +157,21 @@ async function splitColumn(ci){
   hideMenu(); await rebuild('column '+(ci+1)+' split at x='+Math.round((gap.x0+gap.x1)/2), [ci,ci+1]);
 }
 
+/* ---- Merge columns ----------------------------------------------------------
+   Two neighbouring columns become one: the span from the left one's left gutter to the right one's right gutter,
+   the gutter between them gone, the key and label of whichever was named (the one clicked first when both are);
+   the cells are rebuilt and the merged column is read again cell by cell. */
+async function mergeColumns(ci, cj){
+  const C=S.columns; if(!C || busy) return;
+  const a=Math.min(ci,cj), b=Math.max(ci,cj); if(a<0 || b>=C.columns.length || b-a!==1) return;
+  const L=C.columns[a], Rr=C.columns[b], keep=C.columns[ci].key?C.columns[ci]:C.columns[cj].key?C.columns[cj]:L;
+  const merged={...L, gutterX0:L.gutterX0, gutterX1:Rr.gutterX1, x0:L.x0, x1:Rr.x1, key:keep.key||null, label:keep.label||null, group:keep.group||null, found:!!keep.key, title:[L.title,Rr.title].filter(Boolean).join(' '), manual:true};
+  const cols=C.columns.slice(0,a).concat([merged],C.columns.slice(b+1));
+  finishColumns(C,cols);
+  C.gutters=(C.gutters||[]).filter(g=>!(g.x0>=L.gutterX1-1 && g.x1<=Rr.gutterX0+1));   // the gutter between them is no boundary any more
+  hideMenu(); await rebuild('columns '+(a+1)+' and '+(b+1)+' merged'+(merged.key?' as '+merged.key:''), [a]);
+}
+
 /* ---- the right-click ------------------------------------------------------- */
 viewCv.addEventListener('contextmenu',e=>{
   const ci=columnAt(e.clientX,e.clientY);
@@ -124,6 +183,9 @@ viewCv.addEventListener('contextmenu',e=>{
   menu.appendChild(note('column '+(ci+1)+' of '+S.columns.columns.length+' · '+(c.key||'unnamed')+(c.label?' · '+c.label:'')));
   menu.appendChild(item('Set name…',()=>setName(ci)));
   menu.appendChild(item('Split column',()=>splitColumn(ci)));
+  const N=S.columns.columns.length;
+  if(ci>0) menu.appendChild(item('Merge with left ('+(S.columns.columns[ci-1].key||'column '+ci)+')',()=>mergeColumns(ci,ci-1)));
+  if(ci<N-1) menu.appendChild(item('Merge with right ('+(S.columns.columns[ci+1].key||'column '+(ci+2))+')',()=>mergeColumns(ci,ci+1)));
   menu.appendChild(item('Cancel',hideMenu));
   showMenu(e.clientX,e.clientY);
 });

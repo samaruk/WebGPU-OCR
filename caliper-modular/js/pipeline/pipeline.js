@@ -18,14 +18,13 @@
 import { $, overlay, runBtn, stepLabel, savePng, saveJson, showError } from '../dom/dom.js';
 import { S } from '../state/state.js';
 import { gpuSauvola, gpuMorph } from '../webgpu/webgpu.js';
-import { correctLensDistortion } from '../lens/lens.js';
-import { rectifyPerspective } from '../rectify/rectify.js';
 import { detectBorders } from '../borders/borders.js';
 import { analyseBorders, inpaintRules } from '../borderlayout/borderlayout.js';
 import { detectTextLines } from '../textlines/textlines.js';
 import { detectColumns } from '../columns/columns.js';
 import { segmentCharacters, assignCells } from '../characters/characters.js';
 import { recognizeText, buildCellTexts, refineCellsByColumn } from '../recognition/recognition.js';
+import { recognitionFromPdf } from '../pdf/pdftext.js';
 import { buildGallery, showStage, refreshStages } from '../gallery/gallery.js';
 import { STAGES } from '../config/config.js';
 import { startApiAnalysis } from '../api/api.js';
@@ -37,7 +36,8 @@ import { startProductMatch } from '../products/products.js';
 export function startProducts(){
   const entry=startProductMatch(S.final); S.products=entry;
   entry.promise.then(async()=>{ if(S.products!==entry) return; if(S.galleryPromise) await S.galleryPromise; if(S.products!==entry) return;
-    if(S.pipelineDone){ updateFinalJson(); refreshStages(['products-match']); } });
+    // a pack size the MRP settled changed the final table: its stages redraw too
+    if(S.pipelineDone){ entry.drawn=true; updateFinalJson(); refreshStages(entry.packRepairs?['final-compare','final-table','products-match']:['products-match']); } });
 }
 import { buildFinal } from '../final/final.js';
 
@@ -60,13 +60,26 @@ async function headerRuleWithApi(p){
   if(after===before) return false;
   if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,C);
     if(S.recognition && S.recognition.available) S.recognition.cells=buildCellTexts(S.characters,C,S.textLines.stats.reference||20); }
-  if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.characters){
+  if(p.recognition.enabled && p.recognition.cellPass && !S.pdfWords && S.recognition && S.recognition.available && S.characters){
     try{ await refineCellsByColumn(S.recognition,S.textLines,S.characters,C,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='7 · '+label; }); }catch(e){ console.warn('cell pass after the API answer failed', e); } }
   return true;
 }
 import { matchHeaderRule, applyHeaderRule } from '../headerrule/headerrule.js';
 import { updateFinalJson } from '../ui/ui.js';
 import { fitView } from '../viewport/viewport.js';
+
+/* what happens when the API answer is in: the header rule on both engines' title words, the final table from both
+   readings, the product match, the stages. Called by the request's hook when the page is the one in S, else by the
+   pages module the moment the page is shown again. */
+export async function continueAfterApi(p, entry){
+  let columnsChanged=false;
+  if(S.pipelineDone){
+    columnsChanged=await headerRuleWithApi(p);           // the title words of both engines: a rule missed on the local words alone may match now
+    S.final=buildFinal(); updateFinalJson(); startProducts(); }   // both sides are in: finalise, match the products again
+  $('statApi').textContent = entry.status==='done' ? Math.round(entry.ms)+' ms' : 'failed';
+  refreshStages(columnsChanged ? STAGES.map(st=>st.kind) : ['api-engine','api-ocr','final-compare','final-table','num-columns','num-fields','num-rules','num-repair','products-match']);
+  document.dispatchEvent(new Event('apianswered'));     // the pages strip reads the page's printed number from the answer too
+}
 
 export const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve()));
 const num=id=>+$(id).value, on=id=>$(id).checked;
@@ -75,7 +88,7 @@ const num=id=>+$(id).value, on=id=>$(id).checked;
 export function readParams(){
   const window=num('sauvolaWindow');
   return {
-    rectify:on('rectify'),
+    rectify:!!(S.prepared && S.prepared.rectified),                       // Beautify (js/pages/pages.js) warped the page flat from its corners; else the original image as loaded
     sauvola:{ radius:(window-1)>>1, k:num('sauvolaK'), R:num('sauvolaR'), invert:on('invert') },
     components:{ minArea:num('minArea'), connectivity8:$('connectivity').querySelector('.on').dataset.c==='8' },
     rules:{ k:num('rulesK'), minLengthFrac:num('rulesMinLength'),
@@ -114,24 +127,59 @@ async function detectRules(imageData,p){
   return {binary, rules};
 }
 
+/* the band rows whose recognised text names the totals (Sub Total / Grand Total / Amount in words / Free Product / the
+   invoice's summary lines): the column stage ends the table before the first that is not a sub-total inside it */
+const FOOTER=/\b(sub\s*total|grand\s*total|net\s*total|total\s*(amount|payable|value)?\s*:|amount\s+in\s+(tk|taka|words|figures)|in\s+words|free\s+product|total\s*trade\s*price|less\s*discount|net\s*invoice\s*amount|total\s*invoice\s*amount|adjustment\s*amount|outstanding\s*amount|net\s*payable)/i;
+export function keywordFooterRows(){
+  const out=[]; if(!(S.recognition && S.recognition.available && S.columns && S.columns.band)) return out;
+  const band=S.columns.band;
+  for(const res of S.recognition.lines){
+    if(res.rowIndex<0) continue;
+    const rowInfo=S.columns.rows[res.rowIndex];
+    if(!rowInfo || rowInfo.kind!=='table' || res.rowIndex<=band.first) continue;
+    if(FOOTER.test(res.text||'')) out.push(res.rowIndex);
+  }
+  return out;
+}
+/* the columns found again from the text lines with limits set by hand — the table's rows (forceBand) dragged on the
+   Table Layout stage — then the cells and the header rule as the pipeline does; the caller rebuilds from the cells on
+   (js/edit/columnedit.js rebuildColumns) and lays the invoice's layout and names over (js/pages/pages.js) */
+export async function reapplyColumns(limits){
+  if(!S.textLines || !S.pipelineDone) return false;
+  const p=readParams();
+  const prior=(p.borders.feedColumns&&S.borders)?S.borders.layout:null;
+  const keep=S.columns&&S.columns.edits;
+  S.columns=detectColumns(S.textLines,p.columns,prior,{footerRows:keywordFooterRows(), ...(limits||{})});
+  if(limits && limits.forceBand) S.columns.bandByHand={...limits.forceBand};
+  if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,S.columns);
+    if(S.recognition && S.recognition.available) S.recognition.cells=buildCellTexts(S.characters,S.columns,S.textLines.stats.reference||20); }
+  S.headerRuleMatch=null;
+  if(p.columns.headerRules && S.columns && S.columns.band){
+    const m=matchHeaderRule(S.columns,S.recognition,S.api);
+    if(m && applyHeaderRule(S.columns,m)){
+      S.headerRuleMatch=m;
+      if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,S.columns);
+        if(S.recognition && S.recognition.available) S.recognition.cells=buildCellTexts(S.characters,S.columns,S.textLines.stats.reference||20); } } }
+  if(keep && keep.length) S.columns.edits=keep.slice();
+  $('statTable').textContent=(S.columns&&S.columns.band)?S.columns.band.rows.length+' × '+S.columns.columns.length:'—';
+  return true;
+}
+
 export async function runPipeline(){
   if(!S.device || !S.origImageData) return;
-  const p=readParams();
+  const p=readParams(); S.params=p;
   overlay.classList.add('show'); runBtn.disabled=true;
   S.pipelineDone=false; S.api=null; S.final=null; S.products=null;
   const timing={};
   const step=async(label)=>{ stepLabel.textContent=label; await nextFrame(); };
   const timed=async(name,fn)=>{ const t0=performance.now(); const r=await fn(); timing[name]=performance.now()-t0; return r; };
   try{
-    /* 1–2 · geometric correction (both skipped when Rectify image is off) */
-    await timed('lens', async()=>{
-      let lens=null;
-      if(p.rectify){ await step('1 · lens distortion'); try{ lens=correctLensDistortion(S.origCanvas); }catch(e){ lens=null; } }
-      S.lensCanvas=lens||S.origCanvas; });
+    /* 1–2 · geometric correction: done by Beautify (js/pages/pages.js — lens correction, then the page warped flat
+          from its corners as the operator left them) before the run; a page not beautified is processed as loaded */
+    await timed('lens', async()=>{ S.lensCanvas=(p.rectify && S.prepared.lens)||S.origCanvas; });
     await timed('rectify', async()=>{
-      let rectified=null;
-      if(p.rectify){ await step('2 · perspective rectification'); try{ rectified=rectifyPerspective(S.lensCanvas); }catch(e){ rectified=null; } }
-      S.workCanvas=rectified||S.lensCanvas;
+      await step(p.rectify?'2 · the beautified page':'2 · the page as loaded');
+      S.workCanvas=p.rectify ? S.prepared.rectified : S.origCanvas;
       S.workImageData=(S.workCanvas===S.origCanvas)?S.origImageData:S.workCanvas.getContext('2d').getImageData(0,0,S.W,S.H); });
 
     /* 2b · PaddleOCR API — fire and forget: the rectified image goes out
@@ -142,15 +190,12 @@ export async function runPipeline(){
       const entry=startApiAnalysis(S.workCanvas,url);
       S.api=entry;
       entry.promise.then(async()=>{
-        if(S.api!==entry) return;                          // a newer run replaced this request
+        // the page may have left S meanwhile (another page shown, or run): the answer waits in its own state and the
+        // continuation runs when that page is shown again; a newer run of the same page replaced the request: nothing
+        if(S.api!==entry){ return; }
         if(S.galleryPromise) await S.galleryPromise;       // never race the gallery build
         if(S.api!==entry) return;
-        let columnsChanged=false;
-        if(S.pipelineDone){
-          columnsChanged=await headerRuleWithApi(p);         // the title words of both engines: a rule missed on the local words alone may match now
-          S.final=buildFinal(); updateFinalJson(); startProducts(); }   // both sides are in: finalise, match the products again
-        $('statApi').textContent = entry.status==='done' ? Math.round(entry.ms)+' ms' : 'failed';
-        refreshStages(columnsChanged ? STAGES.map(st=>st.kind) : ['api-engine','api-ocr','final-compare','final-table','num-columns','num-fields','num-rules','num-repair','products-match']);
+        await continueAfterApi(p, entry);
       });
     }
 
@@ -196,7 +241,10 @@ export async function runPipeline(){
       S.recognition=null;
       if(p.recognition.enabled && S.characters){
         await step('7 · recognition');
-        S.recognition=await recognizeText(S.textLines,S.characters,S.columns,S.W,S.H,p.recognition,
+        if(S.pdfWords){                                     // a PDF page with a text layer: its own words are the reading, exact
+          S.characters.pdfWords=S.pdfWords;
+          S.recognition=recognitionFromPdf(S.pdfWords,S.textLines,S.columns); }
+        else S.recognition=await recognizeText(S.textLines,S.characters,S.columns,S.W,S.H,p.recognition,
           label=>{ stepLabel.textContent='7 · '+label; });
         await nextFrame();
       } });
@@ -208,15 +256,7 @@ export async function runPipeline(){
           sub-total inside the table. The characters' cells and cell
           texts follow. */
     if(S.recognition && S.recognition.available && S.columns && S.columns.band){
-      const FOOTER=/\b(sub\s*total|grand\s*total|net\s*total|total\s*(amount|payable|value)?\s*:|amount\s+in\s+(tk|taka|words|figures)|in\s+words|free\s+product)/i;
-      const band=S.columns.band;
-      const footerRows=[];
-      for(const res of S.recognition.lines){
-        if(res.rowIndex<0) continue;
-        const rowInfo=S.columns.rows[res.rowIndex];
-        if(!rowInfo || rowInfo.kind!=='table' || res.rowIndex<=band.first) continue;
-        if(FOOTER.test(res.text||'')) footerRows.push(res.rowIndex);
-      }
+      const footerRows=keywordFooterRows();
       if(footerRows.length){
         S.columns=detectColumns(S.textLines,p.columns,(p.borders.feedColumns&&S.borders)?S.borders.layout:null,{footerRows});
         if(S.characters){ S.characters.stats.inCells=assignCells(S.characters.characters,S.columns);
@@ -241,7 +281,7 @@ export async function runPipeline(){
 
     /* 8c · cell pass — numeric and code columns read again cell by cell
           with a character whitelist, now that the columns are named */
-    if(p.recognition.enabled && p.recognition.cellPass && S.recognition && S.recognition.available && S.columns && S.columns.band && S.characters){
+    if(p.recognition.enabled && p.recognition.cellPass && !S.pdfWords && S.recognition && S.recognition.available && S.columns && S.columns.band && S.characters){
       await step('7 · recognition · cells');
       await refineCellsByColumn(S.recognition,S.textLines,S.characters,S.columns,S.W,S.H,p.recognition,label=>{ stepLabel.textContent='7 · '+label; });
     }

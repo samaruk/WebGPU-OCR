@@ -12,7 +12,8 @@ import { resizeView, fitView } from '../viewport/viewport.js';
 import { setStageCap } from '../ui/ui.js';
 
 export function loadImage(file){
-  if(!file||!file.type.startsWith('image/')) return;
+  if(!file||!file.type.startsWith('image/')) return Promise.reject(new Error('not an image'));
+  return new Promise((resolve,reject)=>{
   const url=URL.createObjectURL(file);
   const img=new Image();
   img.onload=()=>{
@@ -44,9 +45,37 @@ export function loadImage(file){
 
     resetResults();
     previewImage(S.origCanvas);
+    resolve();
   };
-  img.onerror=()=>showError('Could not decode that image file.');
+  img.onerror=()=>{ URL.revokeObjectURL(url); showError('Could not decode that image file.'); reject(new Error('could not decode '+file.name)); };
   img.src=url;
+  });
+}
+
+/* a rendered page (a PDF page from js/pdf/pdfload.js) loaded the way a decoded file is: the same pixel budget, the
+   same working raster, the same preview */
+/* the working raster of a decoded image, a bitmap or a rendered page: the pixel budget and the canvas limit applied —
+   nothing in S touched, so a page can be prepared in the background while another is shown (js/pages/pages.js) */
+export function scaledCanvas(source){
+  const srcW=source.width, srcH=source.height;
+  let W=srcW, H=srcH, scaled=null;
+  const budget=S.maxPixels||32_000_000;
+  if(W*H>budget){ const s=Math.sqrt(budget/(W*H)); W=Math.max(1,Math.round(W*s)); H=Math.max(1,Math.round(H*s)); scaled='pixel budget'; }
+  const maxDim=16384;
+  if(W>maxDim||H>maxDim){ const s=Math.min(maxDim/W,maxDim/H); W=Math.round(W*s); H=Math.round(H*s); scaled='dimension limit'; }
+  const canvas=document.createElement('canvas'); canvas.width=W; canvas.height=H;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true}); ctx.imageSmoothingQuality='high'; ctx.drawImage(source,0,0,W,H);
+  return {canvas, W, H, srcW, srcH, scaledFrom:scaled?{w:srcW,h:srcH,why:scaled}:null};
+}
+export function loadCanvas(source, label){
+  const r=scaledCanvas(source); const W=r.W, H=r.H;
+  S.img=null; S.srcW=r.srcW; S.srcH=r.srcH; S.W=W; S.H=H; S.scaledFrom=r.scaledFrom;
+  const canvas=r.canvas;
+  S.origImageData=canvas.getContext('2d').getImageData(0,0,W,H); S.origCanvas=canvas; S.rawCanvas=canvas; S.rawImageData=S.origImageData; S.watermark=null;
+  $('removeWm').disabled=false; $('removeWm').textContent='Remove watermark';
+  meta.innerHTML=`<div><span class="k">${label||'page'}</span> <span class="v">${W}×${H}</span>${S.scaledFrom?' <span class="warn">↓ resized — '+S.scaledFrom.why+'</span>':''}</div>`; meta.style.display='block';
+  resetResults(); previewImage(S.origCanvas);
+  return {W,H};
 }
 
 /* every stage result and the gallery are dropped: the next run starts
@@ -73,10 +102,7 @@ export function previewImage(canvas,caption){
   setStageCap(-1,caption);
 }
 
-drop.onclick=()=>fileInput.click();
-fileInput.onchange=e=>loadImage(e.target.files[0]);
+/* the file input, the drop zone and the viewport hand their files to the pages of the invoice (js/pages/pages.js) */
 ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hot');}));
-drop.addEventListener('drop',e=>loadImage(e.dataTransfer.files[0]));
 viewport.addEventListener('dragover',e=>e.preventDefault());
-viewport.addEventListener('drop',e=>{e.preventDefault();loadImage(e.dataTransfer.files[0]);});

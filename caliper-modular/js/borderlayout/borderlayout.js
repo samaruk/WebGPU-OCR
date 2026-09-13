@@ -26,10 +26,48 @@
                            bands outright and outrank a boxed customer
                            block that would pose as a vertical grid;
           · sections       long horizontal rules outside the table;
+          · one frame around the boxed header (address, customer block:
+                           three columns) and the item table (a dozen):
+                           the rule where the interior verticals change
+                           splits it — the part with the most crossings
+                           is the table, the rest a boxed block that is
+                           not the table (splitGridAtSection);
      3. PRIORS for the column stage: table region and column boundaries.
    ====================================================================== */
 
 const lengthH=r=>r.x1-r.x0+1, lengthV=r=>r.y1-r.y0+1;
+
+/* ---- one frame, two sections ---------------------------------------------------
+   An invoice's boxed header (address · INVOICE · logos, then the customer block: three columns) and its item
+   table (a dozen columns) often share one outer frame, so their rules meet and the intersection graph makes them
+   one grid. They are two sections: a long horizontal rule of the grid where the interior verticals above it and
+   below it are different sets (none in common, or one in four at most) splits it. The part with the most rule
+   crossings is the table; the other parts are boxed blocks that are not the table.
+     splitGridAtSection(hs, vs, box, tolerance) → {parts:[{y0,y1,score}], table:part, splits:[y…]} or null
+   hs: the grid's horizontal rules sorted by y (deduped), vs: its verticals sorted by x, box: the grid's box. */
+export function splitGridAtSection(hs, vs, box, tolerance){
+  if(!hs || hs.length<3 || !vs || vs.length<3) return null;
+  const interior=vs.filter(v=>{ const x=xAt(v,(v.y0+v.y1)/2); return x>box.x0+2*tolerance && x<box.x1-2*tolerance; });
+  const bandVerts=[];                                            // per band between consecutive rules: the interior verticals spanning it
+  for(let i=0;i<hs.length-1;i++){ const y0=hs[i].y, y1=hs[i+1].y;
+    bandVerts.push(interior.filter(v=>v.y0<=y0+tolerance && v.y1>=y1-tolerance).map(v=>({v, x:xAt(v,(y0+y1)/2)}))); }
+  // a separator both bands share: the same traced rule running through the boundary, or two pieces of one at the
+  // same x (a few pixels — the header box's 540 and the table's 520 are two separators, not one)
+  const tight=Math.max(3, tolerance/3);
+  const shared=(A,B)=>A.filter(a=>B.some(b=>b.v===a.v || Math.abs(a.x-b.x)<=tight)).length;
+  const width=box.x1-box.x0;
+  const splits=[];
+  for(let i=1;i<hs.length-1;i++){
+    const A=bandVerts[i-1], B=bandVerts[i]; if(A.length<2 || B.length<2) continue;
+    if(lengthH(hs[i])<0.7*width) continue;                       // only a rule across the frame separates sections
+    if(shared(A,B)<=0.25*Math.min(A.length,B.length)) splits.push(i);
+  }
+  if(!splits.length) return null;
+  const parts=[]; let start=0;
+  for(const i of splits.concat([hs.length-1])){ let score=0; for(let b=start;b<i;b++) score+=bandVerts[b].length; parts.push({y0:hs[start].y, y1:hs[i].y, from:start, to:i, score, bands:i-start}); start=i; }
+  const table=parts.slice().sort((a,b)=>b.score-a.score || b.bands-a.bands)[0];
+  return {parts, table, splits:splits.map(i=>hs[i].y)};
+}
 /* y of a horizontal rule at image column x (polyline has one point per column) */
 function yAt(rule,x){ const P=rule.polyline; if(!P||!P.length) return rule.y;
   const i=Math.max(0,Math.min(P.length-1,Math.round(x-P[0].x))); return P[i].y; }
@@ -92,17 +130,30 @@ export function analyseBorders(rules,W,H,params,binary=null){
 
   const layout={kind:'none', table:null, headerBox:null, box:null, colsX:[], rowsY:[], sections:[], grid:null, rowRuled:false, rowPitch:0};
   if(grid){
-    const hs=dedupe(grid.hs,'y'), vs=dedupe(grid.vs,'x');
-    layout.grid={hs,vs,box:grid.box,intersections};
+    let hs=dedupe(grid.hs,'y'), vs=dedupe(grid.vs,'x'), gridBox=grid.box;
+    // one frame around the boxed header and the item table: the rule where the column separators change splits
+    // them, the part with the most crossings is the table, the rest are boxed blocks that are not the table
+    const sp=splitGridAtSection(hs, vs, grid.box, tolerance);
+    if(sp && sp.parts.length>1){
+      const T=sp.table;
+      hs=hs.filter(h=>h.y>=T.y0-tolerance && h.y<=T.y1+tolerance);
+      vs=vs.filter(v=>v.y0<=T.y1-tolerance && v.y1>=T.y0+tolerance);
+      gridBox={x0:grid.box.x0, y0:T.y0, x1:grid.box.x1, y1:T.y1};
+      const others=sp.parts.filter(p=>p!==T);
+      layout.box={x0:grid.box.x0, y0:others[0].y0, x1:grid.box.x1, y1:others[others.length-1].y1};
+      layout.boxes=others.map(p=>({x0:grid.box.x0, y0:p.y0, x1:grid.box.x1, y1:p.y1}));
+      layout.split=sp.splits.slice();
+    }
+    layout.grid={hs,vs,box:gridBox,intersections};
     const colsX=vs.map(v=>({x:xAt(v,(v.y0+v.y1)/2), y0:v.y0, y1:v.y1}));
     const rowsY=hs.map(h=>({y:h.y, x0:h.x0, x1:h.x1}));
-    const boxHeight=grid.box.y1-grid.box.y0;
+    const boxHeight=gridBox.y1-gridBox.y0;
     // a short grid is a boxed HEADER whatever its rule count: two-line
     // column titles ("Per pack" over "Trade / VAT") add a middle rule and
     // would otherwise pass as a three-rule table that is the header alone
-    if(boxHeight<=0.12*H){ layout.kind='header-box'; layout.headerBox={...grid.box}; layout.colsX=colsX; layout.headerRowsY=rowsY; }
-    else if(hs.length>=3){ layout.kind='full-grid'; layout.table={...grid.box}; layout.rowsY=rowsY; layout.colsX=colsX; }
-    else { layout.kind='vertical-grid'; layout.table={...grid.box}; layout.colsX=colsX; layout.rowsY=rowsY; }
+    if(boxHeight<=0.12*H){ layout.kind='header-box'; layout.headerBox={...gridBox}; layout.colsX=colsX; layout.headerRowsY=rowsY; }
+    else if(hs.length>=3){ layout.kind='full-grid'; layout.table={...gridBox}; layout.rowsY=rowsY; layout.colsX=colsX; }
+    else { layout.kind='vertical-grid'; layout.table={...gridBox}; layout.colsX=colsX; layout.rowsY=rowsY; }
   }
   /* --- stacked long horizontals with no verticals (open table) ----------
      Long horizontals outside the grid, clustered by x-overlap. Two rules
@@ -182,8 +233,10 @@ export function analyseBorders(rules,W,H,params,binary=null){
     if(lengthH(h)<minSection) continue;
     if(layout.table && h.y>=layout.table.y0-tolerance && h.y<=layout.table.y1+tolerance) continue;
     if(layout.headerBox && h.y>=layout.headerBox.y0-tolerance && h.y<=layout.headerBox.y1+tolerance) continue;
+    if(layout.box && h.y>layout.box.y0+tolerance && h.y<layout.box.y1-tolerance) continue;   // inside a boxed block: its own rules
     layout.sections.push({y:h.y,x0:h.x0,x1:h.x1});
   }
+  for(const y of layout.split||[]) if(!layout.sections.some(s=>Math.abs(s.y-y)<=tolerance)) layout.sections.push({y, x0:layout.grid.box.x0, x1:layout.grid.box.x1, split:true});   // the rule between the boxed header and the table
   layout.sections.sort((a,b)=>a.y-b.y);
 
   /* --- erase mask --------------------------------------------------------

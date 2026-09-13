@@ -77,6 +77,7 @@ async function getPool(language,size,onProgress){
     take(){ if(idle.length) return Promise.resolve(idle.pop()); return new Promise(res=>waiting.push(res)); },
     give(w){ const res=waiting.shift(); if(res) res(w); else idle.push(w); } };
 }
+import { pdfCells } from '../pdf/pdftext.js';
 export function defaultWorkerCount(){ const n=(typeof navigator!=='undefined' && navigator.hardwareConcurrency)||2; return Math.max(1,Math.min(4,n-1)); }
 
 /* collect symbols / words from a v5 result whatever its shape */
@@ -389,6 +390,7 @@ export async function recognizeText(textLines,characters,columns,W,H,params,onPr
    a character with no symbol). Re-run after the table is refined.       */
 export function buildCellTexts(characters,columns,reference){
   if(!columns || !columns.band) return null;
+  if(characters && characters.pdfWords) return pdfCells(characters.pdfWords, columns);   // a PDF page: its own words, whatever the columns become
   const cells=columns.band.rows.map(()=>columns.columns.map(()=>''));
   const perCell=new Map();
   for(const ch of characters.characters){ if(!ch.cell) continue; const key=ch.cell.row+','+ch.cell.col;

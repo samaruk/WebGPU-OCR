@@ -270,8 +270,12 @@ export function detectPageQuad(canvas){
 /* Warp the detected page quad back to an upright rectangle. Returns a new
    W x H canvas, or null when no confidently-keystoned page is found — in
    which case the caller simply keeps the original image unchanged. */
-export function rectifyPerspective(canvas){
-  const quad=getPageQuad(canvas);
+/* the page quad of a canvas, as the pipeline would find it (shown for correction before the run: js/pages/pages.js) */
+export function pageQuadOf(canvas){ return getPageQuad(canvas); }
+/* opts.quad: the corners to warp from (null: no page — nothing is warped; undefined: detect them here);
+   opts.force: the operator set the corners — a page that is merely rotated is warped upright from them too */
+export function rectifyPerspective(canvas, opts={}){
+  const quad=opts.quad!==undefined ? opts.quad : getPageQuad(canvas);
   if(!quad) return null;
   const {tl,tr,br,bl}=quad;
   const len=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
@@ -294,7 +298,8 @@ export function rectifyPerspective(canvas){
   // stage. A huge keystone means a degenerate detection — also skip.
   const keystone=Math.max(Math.abs(topL-botL)/Math.max(topL,botL),
                           Math.abs(leftL-rightL)/Math.max(leftL,rightL));
-  if(keystone<0.035 || keystone>0.7) return null;
+  if(keystone>0.7) return null;
+  if(keystone<0.035 && !opts.force) return null;
 
   const CW=canvas.width, CH=canvas.height;
   // destination = a rectangle of the page's estimated aspect, centred in

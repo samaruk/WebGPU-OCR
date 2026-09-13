@@ -130,6 +130,14 @@ document.addEventListener('paste',e=>{ for(const it of e.clipboardData.items) if
         line fit per edge -> corners from line intersections. Candidates are
         scored by convexity x quad fill x edge contrast, and shape-validated
         (convex, plausible angles, real contrast step on every visible edge).
+        When the hull's quad fails or scores poorly — the page merged with a
+        second sheet of the same colour (the hull spans both), a shadow or a
+        hand biting a corner off the mask (the bite becomes a hull edge) —
+        the rough quad is taken instead from the four dominant straight runs
+        of the boundary (sequential RANSAC, the frame border left out), one
+        per side of the page, intersected: the page's own edges are still
+        the longest straight runs, and their intersections are the corners
+        whether or not the mask reaches them.
      5. Sub-pixel refinement at (near) full resolution. Along each edge, every
         sample contributes all its edge-response peaks (sub-pixel, parabolic)
         within a narrow window around the rough edge; a Hough vote over
@@ -210,7 +218,13 @@ function detectPageQuad(canvas, opts = {}) {
   const cands = [];
   const done = () => cands.length && cands[0].score >= GOOD && !cands[0].weak;
   const consider = (mask, tag) => {
-    const c = quadFromMask(mask, w, h, o.minAreaFrac, (...m) => log(tag + ':', ...m));
+    const pc = pageComponent(mask, w, h, o.minAreaFrac, (...m) => log(tag + ':', ...m));
+    if (!pc) return;
+    let c = quadFromHull(pc, w, h, (...m) => log(tag + ':', ...m));
+    if (!c || c.score < 0.9) {
+      const c2 = quadFromLines(pc, w, h, D, tD, (...m) => log(tag + ' lines:', ...m));
+      if (c2 && (!c || c2.score > c.score)) { c = c2; tag += '+lines'; }
+    }
     if (!c) return;
     // visible edges must show real image evidence (a colour step or a thin
     // edge line); this rejects bands produced by thresholding a smooth
@@ -220,7 +234,11 @@ function detectPageQuad(canvas, opts = {}) {
     log(tag + ': conv*fill', c.score.toFixed(3), 'edges', ec.inFrame, 'strong', ec.strong, 'steps', ec.steps.map(v => v.toFixed(1)).join('/'));
     if (ec.inFrame < 2 || ec.strong < Math.max(2, ec.inFrame - 1)) return;
     c.score *= Math.min(1, ec.meanStep / Math.max(10, 0.5 * tD));
-    c.weak = ec.strong < ec.inFrame;
+    // a quad built from boundary runs is only as good as its weakest visible edge: three strong edges and one
+    // along a shadow's rim make a plausible shape with a fine mean step, and only the weak edge gives it away —
+    // such a candidate is weak (it never ends the search, and pays the weak factor below)
+    const faintEdge = c.fromLines && ec.steps.length && Math.min(...ec.steps) < 0.5 * tD;
+    c.weak = ec.strong < ec.inFrame || faintEdge;
     c.weakEdge = ec.edge.map(v => v !== null && v < 6);
     if (c.weak) c.score *= 0.85;                         // never beats a candidate with all edges seen
     if (ec.inFrame < 4) c.score *= 0.9;                  // an edge on the frame border is usually a leak into a bright surround
@@ -285,7 +303,10 @@ function detectPageQuad(canvas, opts = {}) {
 /* ---------------------------------------------------------------------- */
 /* segmentation -> rough quad                                              */
 
-function quadFromMask(mask0, w, h, minAreaFrac, log) {
+/* the page component of a mask: hole-filled, opened, the component under the
+   frame centre, with its boundary extremes (per row and column, rotation
+   independent), hull and centroid — shared by quadFromHull and quadFromLines */
+function pageComponent(mask0, w, h, minAreaFrac, log) {
   const N = w * h;
   let mask = fillHoles(mask0, w, h);
   const r = Math.max(1, Math.round(Math.min(w, h) * 0.006));
@@ -328,6 +349,14 @@ function quadFromMask(mask0, w, h, minAreaFrac, log) {
   if (hull.length < 4) return null;
   const hullA = polyArea(hull);
   if (hullA <= 0) return null;
+  let sx = 0, sy = 0;
+  for (let y = 0, i = 0; y < h; y++) for (let x = 0; x < w; x++, i++) if (cc.labels[i] === L) { sx += x; sy += y; }
+  return { labels: cc.labels, L, area, bnd, hull, hullA, cx: sx / area, cy: sy / area };
+}
+
+/* the rough quad as the largest quad inscribed in the hull, its edges refitted on the boundary */
+function quadFromHull(pc, w, h, log) {
+  const { area, bnd, hull, hullA } = pc;
   const conv = area / hullA;                 // notches (fingers, clips) lower this
   if (conv < 0.75) { log('convexity', conv.toFixed(3)); return null; }
 
@@ -341,6 +370,119 @@ function quadFromMask(mask0, w, h, minAreaFrac, log) {
   const quad = fitEdges(bnd, orderCorners(q0), Math.max(2, 0.01 * Math.hypot(w, h)));
   if (!validQuad(quad, 0.04 * Math.hypot(w, h))) { log('implausible quad shape'); return null; }
   return { quad, score: conv * fill, area };
+}
+
+/* The rough quad from the four dominant straight runs of the component's
+   boundary. Sequential RANSAC over the boundary points (those on the frame
+   border left out: a page merged with a sheet that leaves the frame would
+   otherwise get the frame edge as an edge): the line with the most inliers
+   within tol is refitted by total least squares on them, kept when its
+   inliers span a run long enough, its inliers taken out of the pool, up to
+   six lines. Each line is assigned to the side of the page it lies on (top,
+   right, bottom, left — by the direction from the component's centroid to
+   the line's nearest point) and the best-supported line per side is kept;
+   the corners are their intersections, which may lie outside the mask (a
+   corner under a second sheet, in a shadow, or beyond the frame).
+   A run only counts as an edge when the image steps across it: the paper
+   distance 4 px outside minus 4 px inside, at the 60th percentile of its
+   inliers, must reach the segmentation threshold. The boundary of a shadow
+   on the page, or of a hand, is a straight run too, but the step across it
+   is a fraction of the step off the page; such runs are dropped and the
+   search goes on, so a real edge hidden for part of its length can still
+   come up.
+   Score: the paper fraction inside the quad, times a factor for how much of
+   the perimeter the four runs cover. */
+function quadFromLines(pc, w, h, D, tD, log) {
+  const { labels, L: lab, bnd, cx, cy } = pc;
+  const diag = Math.hypot(w, h);
+  const pts = bnd.filter(p => p.x > 0 && p.y > 0 && p.x < w - 1 && p.y < h - 1);
+  const minStep = Math.max(8, 0.75 * tD);
+  const stepOf = (Ln, inl) => {                    // outside minus inside, 4 px off the line, 60th percentile over the inliers
+    const d = Ln.a * cx + Ln.b * cy + Ln.c, sgn = d < 0 ? 1 : -1, cs = [];
+    for (const p of inl) {
+      const ox = Math.round(p.x + sgn * Ln.a * 4), oy = Math.round(p.y + sgn * Ln.b * 4), ix = Math.round(p.x - sgn * Ln.a * 4), iy = Math.round(p.y - sgn * Ln.b * 4);
+      if (ox < 0 || oy < 0 || ox >= w || oy >= h || ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
+      cs.push(D[oy * w + ox] - D[iy * w + ix]);
+    }
+    if (!cs.length) return 0;
+    cs.sort((a, b) => a - b); return cs[Math.min(cs.length - 1, Math.floor(cs.length * 0.6))];
+  };
+  const lines = ransacLines(pts, Math.max(1.5, 0.003 * diag), 0.06 * (w + h), 6, (Ln, inl) => { Ln.step = stepOf(Ln, inl); return Ln.step >= minStep; });
+  if (lines.length < 4) { log('only ' + lines.length + ' straight runs with a step of ' + minStep.toFixed(0) + '+'); return null; }
+  const sides = [[], [], [], []];                   // top, right, bottom, left
+  for (const Ln of lines) {
+    const d = Ln.a * cx + Ln.b * cy + Ln.c;
+    if (Math.abs(d) < 0.1 * Math.min(w, h)) continue;   // an edge does not pass by the centre
+    const ang = Math.atan2(-d * Ln.b, -d * Ln.a);        // direction from the centroid to the line
+    const s = ang < -Math.PI / 4 && ang >= -3 * Math.PI / 4 ? 0 : ang >= -Math.PI / 4 && ang < Math.PI / 4 ? 1 : ang >= Math.PI / 4 && ang < 3 * Math.PI / 4 ? 2 : 3;
+    sides[s].push(Ln);
+  }
+  const missing = sides.findIndex(sd => !sd.length);
+  if (missing >= 0) { log('no straight run on the ' + ['top', 'right', 'bottom', 'left'][missing]); return null; }
+  // per side the best-supported run: inliers × step — a sparse slanted run past a thumb spans further than the
+  // edge it crosses, but has a fraction of the points on it and a fraction of the step across it
+  const pick = sides.map(sd => sd.sort((a, b) => b.n * b.step - a.n * a.step)[0]);
+  const q = [intersect(pick[3], pick[0]), intersect(pick[0], pick[1]), intersect(pick[1], pick[2]), intersect(pick[2], pick[3])];
+  if (q.some(p => !p || p.x < -0.25 * w || p.x > 1.25 * w || p.y < -0.25 * h || p.y > 1.25 * h)) { log('corners off the frame'); return null; }
+  const quad = orderCorners(q);
+  if (!validQuad(quad, 0.04 * diag)) { log('implausible quad shape'); return null; }
+  // the paper inside the quad, on a grid of every third pixel
+  let inside = 0, paper = 0;
+  const x0 = Math.max(0, Math.floor(Math.min(...quad.map(p => p.x)))), x1 = Math.min(w - 1, Math.ceil(Math.max(...quad.map(p => p.x))));
+  const y0 = Math.max(0, Math.floor(Math.min(...quad.map(p => p.y)))), y1 = Math.min(h - 1, Math.ceil(Math.max(...quad.map(p => p.y))));
+  for (let y = y0; y <= y1; y += 3) for (let x = x0; x <= x1; x += 3) {
+    if (!inQuad(quad, x, y)) continue;
+    inside++; if (labels[y * w + x] === lab) paper++;
+  }
+  if (!inside) return null;
+  const fill = paper / inside;
+  let per = 0; for (let i = 0; i < 4; i++) per += Math.hypot(quad[i].x - quad[(i + 1) % 4].x, quad[i].y - quad[(i + 1) % 4].y);
+  const cover = Math.min(1, pick.reduce((t, Ln) => t + Ln.extent, 0) / (0.6 * per));
+  const score = fill * (0.7 + 0.3 * cover);
+  log('four runs', pick.map(Ln => Math.round(Ln.extent) + 'px').join('/'), 'fill', fill.toFixed(3), 'cover', cover.toFixed(2), 'score', score.toFixed(3));
+  return { quad, score, area: pc.area, fromLines: true };
+}
+
+// sequential RANSAC: lines through the point set, longest straight runs first; a run `accept` refuses is taken
+// out of the pool and the search goes on (up to 3 × maxLines runs are examined)
+function ransacLines(pts, tol, minRun, maxLines, accept = () => true) {
+  const out = [];
+  let pool = pts.slice(), seed = 12345, examined = 0;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const dist = (Ln, p) => Math.abs(Ln.a * p.x + Ln.b * p.y + Ln.c);
+  const extentOf = (Ln, inl) => { let lo = Infinity, hi = -Infinity; for (const p of inl) { const t = -Ln.b * p.x + Ln.a * p.y; if (t < lo) lo = t; if (t > hi) hi = t; } return hi - lo; };
+  while (out.length < maxLines && pool.length >= minRun && examined < 3 * maxLines) {
+    examined++;
+    let best = null;
+    for (let it = 0; it < 400; it++) {
+      const A = pool[(rnd() * pool.length) | 0], B = pool[(rnd() * pool.length) | 0];
+      if (A === B) continue;
+      const Ln = lineThrough(A, B); if (!Ln) continue;
+      let n = 0; for (const p of pool) if (dist(Ln, p) <= tol) n++;
+      if (!best || n > best.n) best = { Ln, n };
+    }
+    if (!best || best.n < 10) break;
+    let inl = pool.filter(p => dist(best.Ln, p) <= tol);
+    let Ln = tlsLine(inl); inl = pool.filter(p => dist(Ln, p) <= tol); if (inl.length < 10) break; Ln = tlsLine(inl);
+    const extent = extentOf(Ln, inl);
+    const set = new Set(inl); pool = pool.filter(p => !set.has(p));
+    if (extent < minRun) continue;                       // a cluster, not a run
+    if (!accept(Ln, inl)) continue;                      // a run without the image step of an edge (a shadow's rim, a hand)
+    out.push({ a: Ln.a, b: Ln.b, c: Ln.c, n: inl.length, extent, step: Ln.step || 0 });
+  }
+  return out;
+}
+
+function inQuad(q, x, y) {
+  let sgn = 0;
+  for (let i = 0; i < 4; i++) {
+    const A = q[i], B = q[(i + 1) % 4];
+    const cr = (B.x - A.x) * (y - A.y) - (B.y - A.y) * (x - A.x);
+    if (cr === 0) continue;
+    const s = Math.sign(cr);
+    if (!sgn) sgn = s; else if (s !== sgn) return false;
+  }
+  return true;
 }
 
 // replace each rough edge by a total-least-squares fit through the boundary

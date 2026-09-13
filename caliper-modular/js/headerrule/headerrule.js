@@ -36,7 +36,9 @@ export const LABEL_VOCAB=(()=>{ const seen=new Map();
   return [...seen.values()]; })();
 
 /* "Batch No." → ['batch','no'];  "%" → ['pct'];  "TP(TK) /PACK" → ['tp','tk','pack'] */
-export const tokensOf=s=>(s||'').toLowerCase().replace(/\b[0o]\s*\/\s*[0o6]\b/g,' pct ').replace(/%/g,' pct ').split(/[^a-z0-9]+/).filter(t=>t.length);   // "0/0", "o/o": a % the engine read as digits
+export const tokensOf=s=>(s||'').toLowerCase().replace(/\b[0o]\s*\/\s*[0o6]\b/g,' pct ').replace(/%/g,' pct ')   // "0/0", "o/o": a % the engine read as digits
+  .replace(/\b([a-z])\.\s?(?=[a-z]\b)/g,'$1')                                                                    // "T.P", "T. P" → tp: dotted single letters are one abbreviation
+  .split(/[^a-z0-9]+/).filter(t=>t.length);
 const weightOf=t=>t.length>=4?1:t.length===3?0.7:0.4;
 
 function levenshtein(a,b){
@@ -60,11 +62,18 @@ const numericWord=t=>/^[\d.,%\-()/]+$/.test(t);
 export function titleWords(C,recognition,api){
   const band=C.band, rowsAll=C.rows;
   const firstIdx=band.rows[0].index;                              // index into C.rows of the band's top row
-  // two rows above the band's top down to six rows into it: a key-value
-  // row glued to the band top and a two-line title both fit; item rows
-  // in the window are dropped by their numbers below
+  // two rows above the band's top down to twelve rows into it: a key-value
+  // row glued to the band top and a two-line title both fit, and so does a
+  // title under a customer block the band swallowed whole (an Opsonin
+  // invoice prints eight key-value rows of the table's own width above its
+  // title); item rows in the window are dropped by their numbers below
   const candidates=[];
-  for(let k=Math.max(0,firstIdx-2);k<=Math.min(rowsAll.length-1,firstIdx+6);k++) candidates.push(rowsAll[k]);
+  for(let k=Math.max(0,firstIdx-2);k<=Math.min(rowsAll.length-1,firstIdx+12);k++) candidates.push(rowsAll[k]);
+  return rowWords(C,candidates,recognition,api);
+}
+/* the recognised words of the given rows (entries of C.rows): the local words and the API's regions split into
+   words, rows holding mostly numbers left out, the same word at the same place once, sorted left to right */
+export function rowWords(C,candidates,recognition,api){
   const words=[];
   const takeRow=(r,ws,src)=>{ if(ws.length<2) return; let numeric=0; for(const w of ws) if(numericWord(w.text)) numeric++;
     if(numeric>0.3*ws.length) return;                              // an item row, not a title row
@@ -99,6 +108,34 @@ export function titleWords(C,recognition,api){
   return unique;
 }
 
+/* ---- 1b · the title row anywhere on the page ---------------------------------
+   When the band's top is nowhere near the title — a dot-matrix page whose
+   customer block the profile cut into a score of columns, so the band
+   starts at the customer block and the title row is a dozen rows down,
+   or a title above a band that began at its first item — every text row
+   of the page is tried, alone and with the row under it (a two-line
+   title), against every rule. The best match wins when it finds at least
+   four columns and three quarters of the rule's, in the rule's order; an
+   exact one drives the columns like a match at the band's top would. */
+export function findTitleRowOnPage(C,recognition,api,rules=HEADER_RULES){
+  const rowsAll=C.rows||[]; let best=null;
+  const inOrder=cols=>{ let prev=-1/0; for(const c of cols){ if(!c.found||c.x===null) continue; if(c.x<prev) return false; prev=c.x; } return true; };
+  for(let i=0;i<rowsAll.length;i++){
+    for(const span of [1,2]){
+      if(i+span>rowsAll.length) continue;
+      const words=rowWords(C,rowsAll.slice(i,i+span),recognition,api);
+      if(words.length<3) continue;
+      for(const rule of rules){
+        const a=alignRule(rule,words); if(!a) continue;
+        if(a.found<Math.max(4,Math.ceil(0.75*a.total)) || !inOrder(a.cols)) continue;
+        const better=!best || a.found/a.total>best.found/best.total || (a.found/a.total===best.found/best.total && (span<best.span || (span===best.span && a.tokenScore>best.tokenScore)));
+        if(better) best={...a, words, span, rowIndex:rowsAll[i].index, pageWide:true};
+      }
+    }
+  }
+  return best;
+}
+
 /* ---- 2 · align one rule to the words ------------------------------------ */
 export function alignRule(rule,words){
   const toks=[]; rule.columns.forEach((c,ci)=>{ for(const t of tokensOf(c.label)) toks.push({t,ci,w:weightOf(t)}); });
@@ -131,12 +168,17 @@ export function alignRule(rule,words){
 export function matchHeaderRule(C,recognition,api,rules=HEADER_RULES){
   if(!C||!C.band||!C.band.rows.length) return null;
   const words=titleWords(C,recognition,api);
-  if(words.length<3) return null;
   let best=null;
-  for(const rule of rules){
+  if(words.length>=3) for(const rule of rules){
     const a=alignRule(rule,words); if(!a) continue;
     if(a.found<3) continue;
     if(!best || a.found/a.total>best.found/best.total || (a.found/a.total===best.found/best.total && a.tokenScore>best.tokenScore)) best=a;
+  }
+  // not every title found around the band's top: the whole page is searched for the title row (a band that
+  // starts far above it, or a profile that cut the page into a score of columns); a closer match there wins
+  if(!best || best.found<best.total){
+    const page=findTitleRowOnPage(C,recognition,api,rules);
+    if(page && (!best || page.found/page.total>best.found/best.total)) return page;
   }
   // no rule comes close: the columns are still named from the vocabulary
   if(!best) return {rule:null, cols:[], found:0, total:0, tokenScore:0, words};
@@ -177,6 +219,56 @@ function refineAnchors(rule,words,map){
   });
 }
 
+/* ---- the invoice's layout on a page without a title row -----------------------
+   Only the first page of many invoices prints the column titles; the rest print the item table alone, with the
+   invoice's header and footer around it. The columns of a page whose title row matched a rule exactly are kept as
+   the invoice's LAYOUT — the rule's keys and labels, and every boundary as a share of the table's width — and laid
+   over every page where no rule matched: each boundary goes to the page's own gutter nearest its place (within
+   half a column, a deep-but-not-clear valley paying extra as in applyHeaderRule) or, without one, to the place
+   itself. The table's width is the profile's extent, as it is for a rule. */
+export function layoutOfColumns(C){
+  const cols=C&&C.columns; if(!cols || cols.length<2) return null;
+  const X0=C.profile?C.profile.X0:cols[0].gutterX0, X1=C.profile?C.profile.X1:cols[cols.length-1].gutterX1, w=Math.max(1,X1-X0);
+  return {ruleId:C.headerRule?C.headerRule.id:null, ruleName:C.headerRule?C.headerRule.name:null,
+          columns:cols.map(c=>({key:c.key||null, label:c.label||null, group:c.group||null, x0f:(c.gutterX0-X0)/w, x1f:(c.gutterX1-X0)/w}))};
+}
+export function columnsFromLayout(layout, X0, X1, gutters, glyphHeight){
+  const N=layout.columns.length, w=X1-X0, minCol=Math.max(4,0.8*(glyphHeight||10));
+  const gs=(gutters||[]).slice().sort((p,q)=>p.x0-q.x0);
+  const bounds=[]; let usedUpTo=-1, prevX=X0;
+  for(let k=0;k<N-1;k++){
+    const xb=X0+layout.columns[k].x1f*w, width=(layout.columns[k+1].x1f-layout.columns[k].x0f)*w;
+    let best=-1, bestCost=1/0;
+    for(let g=usedUpTo+1; g<gs.length; g++){ const gt=gs[g], gm=(gt.x0+gt.x1)/2; if(gm<=prevX+minCol) continue;
+      const cost=Math.abs(gm-xb)+(gt.relative?0.2*width:0); if(cost>0.5*width) continue; if(cost<bestCost){ bestCost=cost; best=g; } }
+    if(best>=0){ const gt=gs[best]; bounds.push({x0:gt.x0,x1:gt.x1,fromGutter:true}); usedUpTo=best; prevX=gt.x1; }
+    else { const x=Math.max(prevX+minCol,xb); bounds.push({x0:x-1,x1:x+1,fromGutter:false}); prevX=x+1; }
+  }
+  return layout.columns.map((lc,k)=>{ const gx0=k===0?X0:bounds[k-1].x1+1, gx1=k===N-1?X1:bounds[k].x0-1;
+    return {x0:gx0, x1:Math.max(gx0+1,gx1), gutterX0:gx0, gutterX1:Math.max(gx0+1,gx1), glyphs:0, key:lc.key, label:lc.label, group:lc.group, found:false, title:'', fromGutter:k<N-1?bounds[k].fromGutter:true}; });
+}
+/* a page that prints its own column titles: a rule matched them exactly, or one row of title words named most of
+   the columns (three at least, half of them — titleHits); columns named from the closest rule IN ORDER, or from stray
+   words on a page without titles, do not count. Not a page whose columns came from another page's layout. */
+export function hasOwnTitles(C){
+  const HR=C&&C.headerRule; if(!HR) return false;
+  if(/^exact/.test(HR.mode||'')) return true;
+  if(!HR.titleRows || !HR.titleRows.length || /^the layout of/.test(HR.mode||'')) return false;
+  if(HR.titleHits!==undefined) return HR.total>=2 && HR.titleHits>=Math.max(3, Math.ceil(0.5*HR.total));
+  return HR.total>=2 && HR.found>=Math.max(4, Math.ceil(0.75*HR.total));
+}
+export function needsLayout(C){
+  return !!(C && C.band && C.band.rows && C.band.rows.length>=2 && C.columns && C.columns.length && !hasOwnTitles(C) && !(C.edits && C.edits.length));
+}
+export function applyLayout(C, layout, note){
+  if(!needsLayout(C) || !layout || !layout.columns || layout.columns.length<2) return false;
+  const X0=C.profile?C.profile.X0:C.columns[0].gutterX0, X1=C.profile?C.profile.X1:C.columns[C.columns.length-1].gutterX1;
+  const columns=columnsFromLayout(layout, X0, X1, C.gutters, C.glyphHeight);
+  finishColumns(C, columns);
+  C.headerRule={id:layout.ruleId, name:layout.ruleName, found:0, total:layout.columns.length, boundariesFromGutters:columns.filter(c=>c.fromGutter).length-1, mode:note||'the invoice\'s layout laid over a page without a title row', titleRows:[]};
+  return true;
+}
+
 export function applyHeaderRule(C,match){
   const P=C.profile; if(!P) return false;
   if(!match.rule) return nameColumns(C,match.words,null);
@@ -200,7 +292,11 @@ export function applyHeaderRule(C,match){
      takes the key of the rule column whose label is written above it.  */
   const anchorsInOrder=(()=>{ let prev=-1/0; for(const c of cols){ if(!c.found||c.x===null) continue; if(c.x<prev) return false; prev=c.x; } return true; })();
   const profileGutters=(C.gutters||[]).length;
-  const titleRows=[...new Set(cols.filter(c=>c.found).flatMap(c=>c.rows||[]))].sort((p,q)=>p-q);
+  // the rows the titles came from: a row that gave a single token (a "Name" in the customer block above, at the
+  // same x as the title's) is not a title row when another row gave two or more
+  const rowCount=new Map(); for(const c of cols) if(c.found) for(const r of new Set(c.rows||[])) rowCount.set(r,(rowCount.get(r)||0)+1);
+  const strongRows=[...rowCount].filter(([,n])=>n>=2).map(([r])=>r);
+  const titleRows=(strongRows.length?strongRows:[...rowCount.keys()]).sort((p,q)=>p-q);
   const exact=match.found===match.total && anchorsInOrder;
   if(!exact) return nameColumns(C,match.words,{rule, titleRows});
 
@@ -212,12 +308,15 @@ export function applyHeaderRule(C,match){
      steps back: every column keeps at least a glyph of width.           */
   const gutters=(C.gutters||[]).slice().sort((p,q)=>p.x0-q.x0);
   const minCol=Math.max(4,0.8*(C.glyphHeight||10));
+  // a profile with more than twice the rule's gutters cut the page's dot-matrix words into slivers: its gutters lie
+  // inside the columns as often as between them, so the boundaries stay at the positions the titles map to
+  const trustGutters=profileGutters<=2*(N-1);
   const bounds=[]; let usedUpTo=-1, prevX=X0;
   for(let k=0;k<N-1;k++){
     const xb=mapX(rule.columns[k].x1), width=map.b*(rule.columns[k+1].x1-rule.columns[k].x0);
     const leftAnchor=cols[k].found?cols[k].x:-1/0, rightAnchor=cols[k+1].found?cols[k+1].x:1/0;
     let best=-1, bestCost=1/0;
-    for(let g=usedUpTo+1; g<gutters.length; g++){
+    if(trustGutters) for(let g=usedUpTo+1; g<gutters.length; g++){
       const gt=gutters[g], gm=(gt.x0+gt.x1)/2;
       if(gm<=prevX+minCol) continue;
       if(gm<=leftAnchor || gm>=rightAnchor) continue;                       // a boundary lies between the two titles
@@ -235,7 +334,7 @@ export function applyHeaderRule(C,match){
             found:cols[k].found, title:cols[k].words.join(' ')};
   });
   finishColumns(C,columns);
-  C.headerRule={id:rule.id, name:rule.name, found:match.found, total:match.total, boundariesFromGutters:bounds.filter(x=>x.fromGutter).length, mode:'exact match: rule columns on the gutters', titleRows};
+  C.headerRule={id:rule.id, name:rule.name, found:match.found, total:match.total, boundariesFromGutters:bounds.filter(x=>x.fromGutter).length, mode:'exact match: rule columns on the gutters'+(match.pageWide?' (title row found by the page-wide search)':''), titleRows};
   return true;
 }
 
@@ -260,6 +359,7 @@ export function ruleInOrder(rule, colWords){
   colWords.forEach((inside,pi)=>{ if(!inside.length) return;
     for(let jj=j; jj<rule.columns.length; jj++){ const c=rule.columns[jj], toks=tokensOf(c.label); let score=0,total=0,strong=false,n=0; const used=new Set();
       for(const t of toks){ const wt=weightOf(t); total+=wt; let bi=-1,bsim=0; inside.forEach((w,i)=>{ if(used.has(i)) return; const sc=sim(t,w.t); if(sc>bsim){ bsim=sc; bi=i; } }); if(bi>=0&&bsim>=0.75){ used.add(bi); score+=bsim*wt; n++; if(t.length>=3||toks.length===1) strong=true; } }
+      if(n===toks.length && toks.length<=2) strong=true;                                                   // a short label found whole ("T P", "Sl No") is evidence enough
       if(n && strong && (total?score/total:0)>=0.6){ out[pi]={key:c.key, label:c.group?c.group+' '+c.label:c.label}; j=jj+1; break; } }
   });
   return out.filter(Boolean).length>=3 ? out : colWords.map(()=>null);
@@ -286,6 +386,7 @@ export function nameColumns(C,words,closest){
     let best=-1,bs=0,bn=0;
     LABEL_VOCAB.forEach((v,vi)=>{ if(taken.has(vi) || usedKeys.has(v.key)) return; const toks=tokensOf(v.label); let score=0,total=0,strong=false,n=0; const used=new Set();
       for(const t of toks){ const wt=weightOf(t); total+=wt; let bi=-1,bsim=0; inside.forEach((w,i)=>{ if(used.has(i)) return; const sc=sim(t,w.t); if(sc>bsim){ bsim=sc; bi=i; } }); if(bi>=0&&bsim>=0.75){ used.add(bi); score+=bsim*wt; n++; if(t.length>=3||toks.length===1) strong=true; } }
+      if(n===toks.length && toks.length<=2) strong=true;                                                   // a short label found whole ("T P", "Sl No") is evidence enough
       const frac=total?score/total:0;
       // the label that explains the most words wins: "Unit (T.P)" over "Unit" when "(T.P)" is printed below
       if((strong || frac>=0.95) && frac>=0.6 && (n>bn || (n===bn && frac>bs))){ bs=frac; bn=n; best=vi; } });
@@ -295,7 +396,14 @@ export function nameColumns(C,words,closest){
   const byRule=named.filter(c=>c.byRule).length;
   finishColumns(C,named);
   const rows=[...new Set(words.map(w=>w.row))].sort((p,q)=>p-q);
-  C.headerRule={id:closest&&closest.rule?closest.rule.id:null, name:closest&&closest.rule?closest.rule.name:null, found:named.filter(c=>c.key).length, total:named.length,
+  // titleHits: the most columns any one row of words names — a real title row names most of the columns at once; a
+  // page without titles names one or two from stray words ("Invoice No." in the customer block over the qty column)
+  const hitsByRow=new Map();
+  named.forEach((c,pi)=>{ if(!c.key || !c.label) return; const hit=new Set();
+    for(const t of tokensOf(c.label)){ let bi=-1,bs=0; inside0[pi].forEach((w,i)=>{ const sc=sim(t,w.t); if(sc>bs){ bs=sc; bi=i; } }); if(bi>=0 && bs>=0.75) hit.add(inside0[pi][bi].row); }
+    for(const r of hit) hitsByRow.set(r,(hitsByRow.get(r)||0)+1); });
+  const titleHits=Math.max(0,...hitsByRow.values());
+  C.headerRule={id:closest&&closest.rule?closest.rule.id:null, name:closest&&closest.rule?closest.rule.name:null, found:named.filter(c=>c.key).length, total:named.length, titleHits,
                 boundariesFromGutters:(C.gutters||[]).length, mode:'profile columns, named '+(byRule?byRule+' from the rule '+orderRule.id+' in order, the rest ':'')+'from the header vocabulary'+(closest&&closest.rule?' (closest rule: '+closest.rule.name+')':''),
                 titleRows:(closest&&closest.titleRows&&closest.titleRows.length)?closest.titleRows:rows};
   return true;

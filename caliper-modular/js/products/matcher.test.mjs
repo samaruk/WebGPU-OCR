@@ -138,6 +138,78 @@ console.log('[4] price comparison');
   console.log('    price', JSON.stringify(m.price));
 }
 
+console.log('[4b] a pack count before the form word, FC / BD dropped, the retry on the other readings');
+{
+  const pb=parseName('BINOCLAR 500MG 14FCT BD'); check(pb.brand.join(' ')==='BINOCLAR' && pb.packCount===14 && pb.form==='TABLET' && pb.strength.length===1 && pb.strength[0].v===500, 'BINOCLAR 500MG 14FCT BD → brand BINOCLAR, 500 MG, tablet, pack 14 ('+JSON.stringify(pb)+')');
+  const b=matchItem(index,{name:'BINOCLAR 500MG 14FCT BD'}); show('BINOCLAR 500MG 14FCT BD',b); check(b.status==='match' && /BINOCLAR/i.test(b.product.name) && /500/.test(b.product.strength||''), 'BINOCLAR 500MG 14FCT BD → BINOCLAR 500 MG');
+  const x=matchItem(index,{name:'XIONIL 3MG 50TAB BD'}); show('XIONIL 3MG 50TAB BD',x); check(x.status==='match' && /XIONIL/i.test(x.product.name), 'XIONIL 3MG 50TAB BD → XIONIL');
+  const sc=parseName('Seclo 20 Cap'); check(sc.strength.length===1 && sc.strength[0].v===20 && sc.packCount===0, 'Seclo 20 Cap: the 20 is still the strength (no strength with a unit before it)');
+  const pc=parseName('NAPA 50 PCS'); check(pc.packCount===50 && pc.strength.length===0, 'NAPA 50 PCS: a count before a container word is the pack');
+  const a=matchItem(index,{name:'Acos FC Tab 500mg (6s)'}); show('Acos FC Tab 500mg (6s)',a); check(a.product && /ACOS/i.test(a.product.name) && a.score>0.76, 'Acos FC Tab 500mg: FC dropped, the score rises above the old 0.76');
+  const cx=parseName('Coralcal-DX FC Tab 600mg/400IU(50s)'); check(cx.brand.join(' ')==='CORALCAL DX' && cx.strength.length===2 && cx.strength[0].v===600 && cx.strength[0].u==='MG' && cx.strength[1].v===400 && cx.strength[1].u==='IU' && cx.packCount===50, 'Coralcal-DX FC Tab 600mg/400IU(50s) → CORALCAL DX, 600 MG + 400 IU, pack 50 ('+JSON.stringify(cx)+')');
+  const cdx=matchItem(index,{name:'Coralcal-DX FC Tab 600mg/400IU(50s)'}); show('Coralcal-DX FC Tab 600mg/400IU(50s)',cdx); check(cdx.status==='match' && /CORALCAL.?DX/i.test(cdx.product.name), 'Coralcal-DX FC Tab 600mg/400IU(50s) → CORALCAL DX 600/400IU');
+  const cd=matchItem(index,{name:'Coralcal-D FC Tab 500mg/200IU (60s)'}); show('Coralcal-D FC Tab 500mg/200IU (60s)',cd); check(cd.status==='match' && /CORALCAL.?D\b/i.test(cd.product.name) && /500/.test(cd.product.strength||''), 'Coralcal-D FC Tab 500mg/200IU (60s) → CORALCAL D 500MG/200IU');
+  const tp=parseName('Aeron Flash Tablet 5mg 1X3X10'); check(tp.packs.length===1 && tp.packCount===30 && tp.strength.length===1 && tp.strength[0].v===5, '1X3X10 beside the name: one pack of 30 (pieces × per strip × strips), not a strength ('+JSON.stringify(tp)+')');
+  for(const [n,v] of [['Napa Tab 6X2',12],['Seclo Cap 20X7',140],['Ace 500mg 10X5',50]]){ const pp=parseName(n); check(pp.packCount===v && !pp.strength.some(s=>s.v===v), n+': pack '+pp.packCount+' (two parts, no S), not a strength'); }
+  const ab=parseName('OLMEDIP 5/40 MG'); check(ab.strength.length===2 && ab.strength[0].v===5 && ab.strength[0].u==='' && ab.strength[1].v===40 && ab.strength[1].u==='MG', '5/40 MG: the unit on the second figure, the first without one');
+  // an ACME line: a four-digit product code in front, no strength, the descriptor NASAL; the invoice TP is the purchase price on file
+  const pf=parseName('1018 FLUTICON NASAL SPRAY','',{serial:true}); check(pf.brand.join(' ')==='FLUTICON' && pf.strength.length===0 && pf.form==='SPRAY' && pf.descriptors.join()==='NASAL', '1018 FLUTICON NASAL SPRAY: the code stripped, brand FLUTICON, spray, descriptor NASAL ('+JSON.stringify(pf)+')');
+  const fl=matchItem(index,{name:'1018 FLUTICON NASAL SPRAY', pack:"1x1's", tp:187.98},{manufacturer:'The ACME Laboratories Ltd'}); show('1018 FLUTICON NASAL SPRAY / TP 187.98',fl);
+  check(fl.status==='match' && /^Fluticon$/i.test(fl.product.name) && /NASAL/i.test(fl.product.category||''), 'Fluticon 50 mcg/spray NASAL SPRAY, not FLUTICA NASAL of another company');
+  const fl2=matchItem(index,{name:'1018 FLUTICON NASAL SPRAY'},{}); show('1018 FLUTICON NASAL SPRAY (no TP)',fl2);
+  check(fl2.product && /^Fluticon$/i.test(fl2.product.name) && /NASAL/i.test(fl2.product.category||''), 'without the TP the Fluticon listing whose category says NASAL still comes first');
+  // a tube's size is its identity: the list files CLOTRIM 20GM and CLOTRIM "10MG" (a 10 g tube) creams — a 5 g tube is neither
+  const cl5=matchItem(index,{name:'1002 CLOTRIM 5GM'},{}); show('1002 CLOTRIM 5GM',cl5);
+  check(cl5.status==='none' && !cl5.product, 'CLOTRIM 5GM matches neither the 10 g nor the 20 g tube: no match');
+  const cl10=matchItem(index,{name:'1002 CLOTRIM CREAM 10GM'},{}); show('1002 CLOTRIM CREAM 10GM',cl10);
+  check(cl10.status==='match' && /^CLOTRIM$/i.test(cl10.product.name) && /10/.test(cl10.product.strength||''), 'CLOTRIM CREAM 10GM is the tube filed as 10MG');
+  const cl20=matchItem(index,{name:'1002 CLOTRIM 20GM'},{}); show('1002 CLOTRIM 20GM',cl20);
+  check(cl20.status==='match' && /20/.test(cl20.product.strength||''), 'CLOTRIM 20GM is the 20 g tube');
+  // the brand is in the list, spelled so, but not in this size: a similar brand of another company must not step in
+  const ac=matchItem(index,{name:'1011 ACLOBET 10GM'},{manufacturer:'The ACME Laboratories Ltd'}); show('1011 ACLOBET 10GM',ac);
+  check(!ac.product || /^ACLOBET/i.test(ac.product.name), 'ACLOBET 10GM never takes NYCLOBET ('+(ac.product?ac.product.name:'no product')+')');
+  check(ac.status!=='match', 'no 10 g ACLOBET on the list: not a match');
+  const ac30=matchItem(index,{name:'1011 ACLOBET 30GM'},{}); show('1011 ACLOBET 30GM',ac30);
+  check(ac30.status==='match' && /^ACLOBET 30GM$/i.test(ac30.product.name), 'ACLOBET 30GM is the 30 g ointment');
+  const ocr=matchItem(index,{name:'SECL0 20MG CAP'},{}); check(ocr.status==='match' && /^SECLO/i.test(ocr.product.name), 'an OCR slip in the brand (SECL0) still matches when no exact brand competes');
+  // ACME's TRIZON lines: the route (IM / IV) told apart, an injection's grams as its dose, the list's "250 GM" as 250 mg
+  const tz=[['1017 TRIZON-IV 1G',/^TRIZON 1 GM IV$/i],['1018 TRIZON-IM 250MG',/^TRIZON 250GM$/i],['1019 TRIZON-IM500MG',/^TRIZON 500 GM IM$/i],['1020 TRIZON-IM 1G',/^TRIZON 1 GM IM$/i],['1028 TRIZONIV 2GM',/^TRIZON(-IV INJ)? 2 GM( IV)?$/i]];
+  for(const [q,want] of tz){ const m=matchItem(index,{name:q},{manufacturer:'The ACME Laboratories Ltd'}); show(q,m); check(m.status==='match' && want.test(m.product.name), q+' → '+want.source.replace(/[\^$]/g,'')+' ('+(m.product?m.product.name:'none')+' '+m.status+')'); }
+  const pt=parseName('1019 TRIZON-IM500MG','',{serial:true}); check(pt.brand.join(' ')==='TRIZON' && pt.route.join()==='IM' && pt.form==='INJECTION' && pt.strength.length===1 && pt.strength[0].v===500 && !pt.strength[0].size, 'TRIZON-IM500MG: brand TRIZON, route IM, injection, 500 mg dose ('+JSON.stringify(pt)+')');
+  const pg=parseName('TRIZON-IV 1G'); check(pg.strength[0].v===1000 && !pg.strength[0].size && pg.route.join()==='IV', 'TRIZON-IV 1G: a 1000 mg dose, route IV');
+  // the retry: the chosen text is garbage, the other engines read the line right
+  const r=matchRows(index,[{name:'XXXXXXX ZZZ', alts:[{by:'EasyOCR', text:'BINOCLAR 500MG 14FCT BD'},{by:'Tesseract 5', text:'BINOCLAR 500 MG 14FCT BD'}]}],{})[0]; show('retry from EasyOCR / Tesseract 5',r);
+  check(r.status==='match' && /BINOCLAR/i.test(r.product.name) && r.retry && r.retry.by.join(',')==='EasyOCR,Tesseract 5' && r.retry.was==='XXXXXXX ZZZ' && r.retry.text==='BINOCLAR 500MG 14FCT BD', 'a no-match text is retried on the other readings; their agreed product stands, marked with the readings it came from');
+  const d=matchRows(index,[{name:'XXXXXXX ZZZ', alts:[{by:'EasyOCR', text:'SECLO 20MG CAP'},{by:'Tesseract 5', text:'NAPA 500MG TAB'}]}],{})[0];
+  check(d.status==='none' && !d.product && d.retry && d.retry.disagree && d.retry.disagree.length===2, 'two readings matching different products: still no match, the disagreement noted');
+  const u=matchRows(index,[{name:'SECLO 20MG CAP', alts:[{by:'EasyOCR', text:'NAPA 500MG TAB'}]}],{})[0];
+  check(u.status==='match' && /SECLO/i.test(u.product.name) && !u.retry, 'a text that matches is never retried');
+  const n=matchRows(index,[{name:'XXXXXXX ZZZ', alts:[{by:'EasyOCR', text:'QQQQQQ WWW'},{by:'local', text:'XXXXXXX ZZZ'}]}],{})[0];
+  check(n.status==='none' && !n.retry, 'readings that match nothing either: no match, nothing noted');
+}
+
+console.log('[4c] a unit per vial, puff, sachet in the list’s strength field');
+{ const pv=parseName('1 gm/vial'); check(pv.strength.length===1 && pv.strength[0].v===1000 && pv.strength[0].u==='MG', '"1 gm/vial" is one gram ('+JSON.stringify(pv.strength)+')');
+  const pm=parseName('500 mg/vial'); check(pm.strength.length===1 && pm.strength[0].v===500 && pm.strength[0].u==='MG', '"500 mg/vial" is 500 mg with its unit');
+  const pp=parseName('250 mcg/puff'); check(pp.strength[0].v===250 && pp.strength[0].u==='MCG', '"250 mcg/puff" is 250 mcg');
+  const pi=parseName('40 IU/ml'); check(pi.strength[0].v===40 && pi.strength[0].u==='IU', '"40 IU/ml" is 40 IU');
+  const neo=matchRows(index,[{name:'Neopenem IV Injection 1gm'},{name:'1023 Neopenem IV Injection 1gm'},{name:'Neopenem IV Inj 500mg'},{name:'Neopenem 250mg IV'}],{}); neo.forEach((m,i)=>show(['Neopenem IV Injection 1gm','1023 Neopenem IV Injection 1gm','Neopenem IV Inj 500mg','Neopenem 250mg IV'][i],m));
+  check(neo[0].status==='match' && neo[0].product.name==='Neopenem' && /1 gm/.test(neo[0].product.strength), 'Neopenem IV Injection 1gm → Neopenem 1 gm/vial IV Injection or Infusion');
+  check(neo[1].status==='match' && /1 gm/.test(neo[1].product.strength), 'the same line behind its serial number');
+  check(neo[2].status==='match' && /500 mg/.test(neo[2].product.strength) && neo[3].status==='match' && /250/.test(neo[3].product.strength), 'the 500 mg and 250 mg vials each to their own listing'); }
+console.log('[4d] a qualifier hyphenated to the form word: every part of the line is in the list');
+{ const pa=parseName('Angivent MR-Tab'); check(pa.brand.join(' ')==='ANGIVENT MR' && pa.form==='TABLET', '"Angivent MR-Tab" → brand ANGIVENT MR, form TABLET ('+JSON.stringify([pa.brand,pa.form])+')');
+  const pe=parseName('E-Cap 200mg'); check(pe.brand.join(' ')==='E CAP' && pe.strength[0].v===200, '"E-Cap 200mg" still keeps CAP as the brand’s second half');
+  const an=matchRows(index,[{name:'Angivent MR-Tab'},{name:"12 Angivent MR-Tab 30's"}],{}); an.forEach((m,i)=>show(['Angivent MR-Tab',"12 Angivent MR-Tab 30's"][i],m));
+  check(an[0].status==='match' && an[0].product.name==='ANGIVENT MR' && an[1].status==='match', 'Angivent MR-Tab → ANGIVENT MR 35 MG TABLET, with and without serial and pack'); }
+console.log('[4e] a nasal spray by its count of sprays');
+{ const pa=parseName('Antazol Plus N-Spray 1 20 sprays'); check(pa.brand.join(' ')==='ANTAZOL PLUS' && pa.form==='SPRAY' && pa.strength.length===1 && pa.strength[0].v===120 && pa.strength[0].u==='PUFF' && pa.descriptors.includes('NASAL'), '"Antazol Plus N-Spray 1 20 sprays" → ANTAZOL PLUS, nasal, spray, 120 puffs ('+JSON.stringify([pa.brand,pa.form,pa.strength,pa.descriptors])+')');
+  const pd=parseName('120P'); check(pd.strength.length===1 && pd.strength[0].v===120 && pd.strength[0].u==='PUFF' && !pd.brand.length, 'the list\'s "120P" is 120 puffs');
+  const pn=parseName('ANTAZOL PLUS N-SPRAY'); check(pn.brand.join(' ')==='ANTAZOL PLUS' && pn.form==='SPRAY', 'the list\'s name parses the same way');
+  const an=matchRows(index,[{name:'Antazol Plus N-Spray 1 20 sprays'},{name:'15 Antazol Plus N-Spray 120 sprays'},{name:'Antazol 0.05% N-Drops 15ML'}],{}); an.forEach((m,i)=>show(['Antazol Plus N-Spray 1 20 sprays','15 Antazol Plus N-Spray 120 sprays','Antazol 0.05% N-Drops 15ML'][i],m));
+  check(an[0].status==='match' && an[0].product.name==='ANTAZOL PLUS N-SPRAY' && an[1].status==='match' && an[1].product.name==='ANTAZOL PLUS N-SPRAY', 'Antazol Plus N-Spray, with the count split by a space or not → ANTAZOL PLUS N-SPRAY 120P NASAL SPRAY');
+  check(an[2].status==='match' && /0\.05/.test(an[2].product.name+' '+an[2].product.strength), 'the 0.05 % nasal drops still go to their own listing');
+  const bec=parseName('Beclomin 100 HFA MDI 200puff'); check(bec.strength.some(s=>s.v===200 && s.u==='PUFF') && bec.form==='INHALER' && !bec.brand.includes('PUFF'), '"200puff" on an inhaler is 200 puffs, not a brand word'); }
 console.log('[5] speed');
 {
   const names=index.items.slice(0,300).map(it=>({name:it.name}));

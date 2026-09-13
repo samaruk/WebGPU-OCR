@@ -40,7 +40,13 @@ import { HEADER_RULES } from '../config/headerrules.js';
 import { catalogueRelations } from '../config/columntypes.js';
 import { respace } from './respace.js';
 import { rowConversion } from '../products/products.js';
-import { looksLikePack, packFromName, packColumnIndex, resolvePackCell } from './pack.js';
+import { looksLikePack, packFromName, packColumnIndex, resolvePackCell, repairPacksByColumn } from './pack.js';
+import { isGroupName, groupNameOf, groupRowsOf, groupInsideTotal } from './group.js';
+import { isTitleRow } from './titlerow.js';
+import { tableTop, TOTAL_RE } from './tabletop.js';
+import { leadingHeaderRows, headerVocabulary, wordsOf } from './headerrows.js';
+import { invoiceCloseAt } from './invoiceclose.js';
+import { ruleLinesY, mergeRowsByRules, readingOrder, mergeOverlappingRows } from './ruledrows.js';
 
 const norm=s=>(s||'').replace(/\s+/g,' ').trim();
 const key=s=>norm(s).toLowerCase().replace(/[\s.,:;'"`·]/g,'');
@@ -75,6 +81,7 @@ export function buildFinal(){
         return {text, source, votes:src.startsWith('vote')?src.slice(5).split('+'):null, local:'', api:t, others, localConf:0, apiConf:100*(T.confidence[ri][ci]||0), bb:cell&&cell.bbox?cell.bbox:null};
       }));
       out.rows=out.grid.map((_,ri)=>({source:'api', y:api.deep.rows[api.deep.table.firstRow+ri].bbox.y0}));
+      markGroups(out.grid, out.rows, out);
       out.stats=count(out.grid,out.rows);
       out.note=(out.note?out.note+' · ':'')+'no local table — the API table stands';
     } else out.note=(out.note?out.note+' · ':'')+'no table from either side';
@@ -167,8 +174,7 @@ export function buildFinal(){
       const text=cols.map((c,ci)=>localText(bi,ci)).join(' ')+' '+wordsIn(r.row.dy.y0,r.row.dy.y1).map(w=>w.text).join(' ');
       if(!/\d/.test(text) && /[a-z]{3}/i.test(text)) titleSet.add(bi); }
   }
-  const titleRows=[...titleSet].sort((a,b)=>a-b);
-  const lastTitle=titleRows.length?titleRows[titleRows.length-1]:-1;
+  const titleRows=[...titleSet].sort((a,b)=>a-b);   // every title row, the first block bounding the table's top (tabletop.js)
 
   /* header labels: rule labels; else the API's title words per column; the
      local title text only where the API read nothing there, read it with
@@ -208,22 +214,35 @@ export function buildFinal(){
      columns like an item row, else it is one of the API's own key-value
      rows glued to its table. */
   const rowList=[];
-  const localRows=[]; band.forEach((r,bi)=>{ if(bi>lastTitle) localRows.push({ri:bi, yp0:r.row.dy.y0, yp1:r.row.dy.y1, y0:r.row.ink.y0, y1:r.row.ink.y1}); });
+  // the table's top (tabletop.js): the rows above the FIRST title block that look like rows of the table — the items
+  // of a group begun on the page before, their SubTotal, an item group's header printed above the titles ("Rx
+  // Product … MD JAKARIA HABIB") — are kept; the page header above them is not. Title rows anywhere (the titles
+  // printed again at the head of a later group) are not rows.
+  const bandCellTexts=bi=>{ const r=band[bi]; const t=cols.map(()=>[]); for(const w of wordsIn(r.row.dy.y0,r.row.dy.y1)){ const ci=colOf(w.xp); if(ci>=0) t[ci].push(w.text); }
+    cols.forEach((c,ci)=>{ const s=localText(bi,ci); if(s) t[ci].push(s); }); return t.map(a=>norm(a.join(' '))); };
+  const top=tableTop(band.map((r,bi)=>bandCellTexts(bi)), titleRows);
+  const keepFrom=titleRows.length?top.keepFrom:0;
+  if(top.above) out.note=(out.note?out.note+' · ':'')+top.above+' row'+(top.above>1?'s':'')+' above the column titles kept ('+[...new Set(Object.values(top.kinds).filter(Boolean))].join(', ')+': the table begins before its titles)';
+  const localRows=[]; band.forEach((r,bi)=>{ if(bi>=keepFrom && !titleSet.has(bi)) localRows.push({ri:bi, yp0:r.row.dy.y0, yp1:r.row.dy.y1, y0:r.row.ink.y0, y1:r.row.ink.y1}); });
   const localTextFill=r=>{ const hit=new Set(); for(const w of wordsIn(r.yp0,r.yp1)){ const ci=colOf(w.xp); if(ci>=0) hit.add(ci); } cols.forEach((c,ci)=>{ if(localText(r.ri,ci)) hit.add(ci); }); return hit.size; };
   const localFills=localRows.map(localTextFill).sort((a,b)=>a-b);
   let itemFill=localFills.length?localFills[localFills.length>>1]:0;
-  const topY=lastTitle>=0?band[lastTitle].row.dy.y1:(band[0]?band[0].row.dy.y0:0);
+  const topY=band[keepFrom]?band[keepFrom].row.dy.y0-1:(band[0]?band[0].row.dy.y0:0);
+  const onTitle=yp=>titleRows.some(bi=>yp>=band[bi].row.dy.y0-1 && yp<=band[bi].row.dy.y1+1);
   if(api && api.deep && api.deep.table && api.deep.table.rowCount>=3){
     const t=api.deep.table, cand=[];
     for(let k=t.firstRow;k<=t.lastRow;k++){
       const ar=api.deep.rows[k]; if(!ar || ar.kind!=='table' || !ar.bbox) continue;
       const b=ar.bbox, cx=(b.x0+b.x1)/2, cy=(b.y0+b.y1)/2, yp=cy-C.slope*cx;
-      if(yp<=topY) continue;                                          // only below the title: the local top is trusted
-      if(!/\d/.test((ar.cells||[]).map(c=>c.text).join(' '))) continue;
-      cand.push({source:'api', ri:-1, apiRow:k, yp0:b.y0-C.slope*cx, yp1:b.y1-C.slope*cx, y0:b.y0, y1:b.y1, localRis:[]});
+      if(yp<=topY || onTitle(yp)) continue;                           // only from the table's top, and never a title row
+      const txt=(ar.cells||[]).map(c=>c.text).join(' '), yp0=b.y0-C.slope*cx, yp1=b.y1-C.slope*cx;
+      // a row without a number is not an item — unless it is an item group name on a row of its own (RPL, RNL: one column, a name)
+      const groupCand=!/\d/.test(txt) && fillOf(yp0,yp1)<=1 && isGroupName(txt);
+      if(!/\d/.test(txt) && !groupCand) continue;
+      cand.push({source:'api', ri:-1, apiRow:k, yp0, yp1, y0:b.y0, y1:b.y1, localRis:[], groupCand});
     }
-    if(!itemFill && cand.length){ const f=cand.map(r=>fillOf(r.yp0,r.yp1)).sort((a,b)=>a-b); itemFill=f[f.length>>1]; }
-    for(const r of cand) if(fillOf(r.yp0,r.yp1)>=0.6*itemFill) rowList.push(r);
+    if(!itemFill && cand.length){ const f=cand.filter(r=>!r.groupCand).map(r=>fillOf(r.yp0,r.yp1)).sort((a,b)=>a-b); itemFill=f.length?f[f.length>>1]:0; }
+    for(const r of cand) if(r.groupCand || fillOf(r.yp0,r.yp1)>=0.6*itemFill) rowList.push(r);
   }
   for(const lr of localRows){
     const yc=(lr.yp0+lr.yp1)/2;
@@ -236,12 +255,31 @@ export function buildFinal(){
     rowList.push({source:'local', ri:lr.ri, yp0:lr.yp0, yp1:lr.yp1, y0:lr.y0, y1:lr.y1, localRis:[lr.ri]});
   }
   rowList.sort((a,b)=>a.yp0-b.yp0);
+  const rowCellTexts=r=>{ const t=cols.map(()=>[]); for(const w of wordsIn(r.yp0,r.yp1)){ const ci=colOf(w.xp); if(ci>=0) t[ci].push(w.text); }
+    for(const ri of r.localRis) cols.forEach((c,ci)=>{ const s=localText(ri,ci); if(s) t[ci].push(s); }); return t.map(a=>norm(a.join(' '))); };
+  // two rows that each carry a serial number in the first column are two items, whatever their bands or the rules say
+  const serialOf=r=>/^\d{1,4}$/.test((rowCellTexts(r)[0]||'').trim()); const twoItems=(a,b)=>serialOf(a) && serialOf(b);
+  // one line read twice (a SubTotal line as a PaddleOCR row and again as a local row it did not host) is one row
+  { const m=mergeOverlappingRows(rowList, 0.6, twoItems); if(m.merged){ rowList.length=0; rowList.push(...m.rows); out.note=(out.note?out.note+' · ':'')+m.merged+' row'+(m.merged>1?'s':'')+' read twice folded'; } }
+  /* ---- ruled rows (ruledrows.js): with a rule under every row (a full
+     grid, or a row-ruled table), the rows lie between the rules — an item
+     whose name wraps to a second line is one band, and the two text lines
+     (or the two PaddleOCR rows) it was read as are folded into one row,
+     whose cells read both lines in reading order. A band taller than three
+     lines is not trusted, so a sparse rule folds nothing. */
+  { const L=S.borders&&S.borders.layout;
+    if(L && L.rowsY && L.rowsY.length>=3 && (L.rowRuled || L.kind==='full-grid')){
+      const m=mergeRowsByRules(rowList, ruleLinesY(L.rowsY, C.slope), 3.2, twoItems);
+      if(m.merged){ rowList.length=0; rowList.push(...m.rows); out.note=(out.note?out.note+' · ':'')+m.merged+' wrapped line'+(m.merged>1?'s':'')+' folded into the ruled row above'; } } }
   const rowFill=r=>{ const hit=new Set(); for(const w of wordsIn(r.yp0,r.yp1)){ const ci=colOf(w.xp); if(ci>=0) hit.add(ci); }
     for(const ri of r.localRis) cols.forEach((c,ci)=>{ if(localText(ri,ci)) hit.add(ci); }); return hit.size; };
   // leading / trailing rows that fill hardly any column (a section title
-  // under the header, a reference number under the table) are not items
+  // under the header, a reference number under the table) are not items —
+  // except an item group name at the top (RPL over the first group's rows)
+  const groupLike=r=>rowFill(r)<=Math.max(3,0.5*itemFill) && !!groupNameOf(rowCellTexts(r));
   while(rowList.length && rowFill(rowList[rowList.length-1])<0.4*itemFill) rowList.pop();
-  while(rowList.length && rowFill(rowList[0])<0.4*itemFill) rowList.shift();
+  const totalLike=r=>{ const t=rowCellTexts(r).join(' '); return TOTAL_RE.test(t) && /\d/.test(t); };   // a SubTotal at the top of the page: the group of the page before ends here
+  while(rowList.length>1 && rowFill(rowList[0])<0.4*itemFill && !groupLike(rowList[0]) && !totalLike(rowList[0])) rowList.shift();
 
   // curled rows overlap in y: a word inside two rows' extents goes to
   // the row whose centre is nearest
@@ -267,17 +305,18 @@ export function buildFinal(){
 
   const grid=rowList.map((row,i)=>cols.map((c,ci)=>{
     const local=norm(row.localRis.map(ri=>localText(ri,ci)).filter(Boolean).join(' '));
-    const rgs=apiCell[i][ci].slice().sort((a,b)=>a.bbox.x0-b.bbox.x0);
+    const rgs=readingOrder(apiCell[i][ci]);                                  // a two-line cell: line by line, left to right
     const apiText=norm(rgs.map(g=>g.text).join(' '));
     const apiConf=rgs.length?100*rgs.reduce((s,g)=>s+(g.confidence||0),0)/rgs.length:0;
-    let lsum=0,ln=0; for(const ri of row.localRis){ const lc=localConf[ri][ci]; lsum+=lc.sum; ln+=lc.n; } const lConf=ln?lsum/ln:0;
+    let lsum=0,ln=0; for(const ri of row.localRis){ const lc=localConf[ri][ci]; lsum+=lc.sum; ln+=lc.n; }
+    const lConf=RC&&RC.fromPdf ? (local?100:0) : (ln?lsum/ln:0);          // a PDF page's own words: exact, at full confidence
     let bb=null; for(const ri of row.localRis){ const cell=C.cells[ri][ci]; if(cell){ bb=bb?{x0:Math.min(bb.x0,cell.bb.x0),y0:Math.min(bb.y0,cell.bb.y0),x1:Math.max(bb.x1,cell.bb.x1),y1:Math.max(bb.y1,cell.bb.y1)}:{...cell.bb}; } }
     const ym=(row.y0+row.y1)/2, ca=C.toImage(c.gutterX0,ym), cb=C.toImage(c.gutterX1,ym);
     const box={x0:Math.round(ca.x),y0:Math.round(row.y0),x1:Math.round(cb.x),y1:Math.round(row.y1)};   // the whole cell: row band × column span
     if(!bb) bb=box;
-    const others=Object.keys(engCell).map(name=>{ const gs=engCell[name][i][ci].slice().sort((a,b)=>a.bbox.x0-b.bbox.x0);
+    const others=Object.keys(engCell).map(name=>{ const gs=readingOrder(engCell[name][i][ci]);
       return {name, text:norm(gs.map(g=>g.text).join(' ')), conf:gs.length?100*gs.reduce((s,g)=>s+(g.confidence||0),0)/gs.length:0}; }).filter(o=>o.text);
-    return {local, api:apiText, others, localConf:lConf, apiConf, bb, box, text:'', source:'empty'};
+    return {local, api:apiText, others, localConf:lConf, apiConf, bb, box, text:'', source:'empty', apiY:rgs.length?rgs.reduce((s,g)=>s+g.yp,0)/rgs.length:null};
   }));
 
   /* ---- per-column statistics, then the choice --------------------------- */
@@ -286,6 +325,21 @@ export function buildFinal(){
   grid.forEach(row=>row.forEach((g,ci)=>{
     Object.assign(g, chooseCell(g,{apiPresent:!!api, numeric:numericCol[ci], shapeFreq:shapeFreq[ci]}));
   }));
+  /* ---- the invoice header taken for items (headerrows.js) ----------------
+     On a page without column titles the address block, the MIO, the mobile number, the delivery line reach the
+     table as leading rows. They are told from items by their values not fitting the columns (letters where the
+     columns hold numbers) and by their words being the words the other pages — and this one — printed above the
+     table. This page's own header words go out with the table for the pages after it. */
+  let headerRowsDropped=0;
+  { const own=[]; for(const w of words.concat(extraWords)) if(w.yp<topY) own.push(w.text);
+    for(let bi=0; bi<keepFrom && bi<band.length; bi++) cols.forEach((c,ci)=>{ const t=localText(bi,ci); if(t) own.push(t); });
+    out.headerWords=[...headerVocabulary(own)];
+    const vocab=headerVocabulary(own.concat(S.sharedHeaderWords||[]));
+    const fills=grid.map(r=>r.filter(g=>g.text).length).filter(x=>x>0).sort((a,b)=>a-b); const fillMed=fills.length?fills[fills.length>>1]:0;
+    const n=leadingHeaderRows(grid.map(r=>r.map(g=>g.text)), numericCol, vocab, {itemFill:fillMed,
+      isGroup:t=>!!groupNameOf(t), isTotal:t=>TOTAL_RE.test(t.join(' ')) && /\d/.test(t.join(' '))});
+    headerRowsDropped=n;
+    if(n){ grid.splice(0,n); rowList.splice(0,n); out.note=(out.note?out.note+' · ':'')+n+' leading row'+(n>1?'s':'')+' of the invoice header dropped'; } }
   /* ---- repairs on the finished grid --------------------------------------
      · a row the local join still left in two halves (the right half a row
        of its own) shows as two neighbouring rows whose filled columns do
@@ -293,10 +347,12 @@ export function buildFinal(){
      · a row without any text at all (a dotted rule the text stage kept)
        goes. */
   const filled=row=>{ const f=new Set(); row.forEach((g,ci)=>{ if(g.text) f.add(ci); }); return f; };
+  const itemH=(()=>{ const h=rowList.map(r=>r.yp1-r.yp0).filter(x=>x>0).sort((a,b)=>a-b); return h.length?h[h.length>>1]:0; })();
   const itemCols=(()=>{ const n=grid.map(r=>filled(r).size).filter(x=>x>0).sort((a,b)=>a-b); return n.length?n[n.length>>1]:cols.length; })();
   for(let i=0;i<grid.length-1;i++){
     const A=filled(grid[i]), B=filled(grid[i+1]);
     if(!A.size || !B.size || A.size>=itemCols || B.size>=itemCols) continue;
+    if(groupNameOf(grid[i].map(g=>g.text), grid[i].map(g=>g.source))) continue;   // an item group name on a row of its own is never joined into an item
     if([...A].some(ci=>B.has(ci)) || A.size+B.size<0.6*itemCols) continue;
     grid[i+1].forEach((g,ci)=>{ if(!grid[i][ci].text) grid[i][ci]=g; });
     rowList[i].localRis=rowList[i].localRis.concat(rowList[i+1].localRis); if(rowList[i].source==='local' && rowList[i+1].source==='api') rowList[i].source='api';
@@ -304,6 +360,38 @@ export function buildFinal(){
     grid.splice(i+1,1); rowList.splice(i+1,1); i--;
   }
   for(let i=grid.length-1;i>=0;i--) if(!filled(grid[i]).size){ grid.splice(i,1); rowList.splice(i,1); }
+  // the column titles printed again at the head of a group inside the table are not items
+  { const labels=cols.map(c=>c.label||''); let dropped=0;
+    for(let i=grid.length-1;i>=0;i--) if(isTitleRow(grid[i].map(g=>g.text), labels.some(Boolean)?labels:null)){ grid.splice(i,1); rowList.splice(i,1); dropped++; }
+    if(dropped) out.note=(out.note?out.note+' · ':'')+dropped+' repeated title row'+(dropped>1?'s':'')+' dropped'; }
+  /* ---- the invoice closes at its summary (invoiceclose.js) ---------------
+     The last page prints, under a section border, the invoice's own totals — Total Trade Price, Total VAT, Less
+     Discount Amount, Net Invoice Amount; Grand Total, Less Discount, Total Payable; the amount in words — and other
+     tables may follow (today's invoice summary, outstanding invoices). The first such line after an item closes the
+     invoice: the items are what lies between the column titles and it; nothing after it is an item. */
+  { const at=invoiceCloseAt(grid.map(r=>r.map(g=>g.text)));
+    if(at>=0){ const gone=grid.length-at; const line=grid[at].map(g=>g.text).filter(Boolean).join(' ').slice(0,60);
+      grid.splice(at); rowList.splice(at); out.invoiceClosed={line, rowsAfter:gone-1};
+      out.note=(out.note?out.note+' · ':'')+'the invoice closes at "'+line+'": '+gone+' row'+(gone>1?'s':'')+' from there dropped'; } }
+  // a group name read into a total row ("MSD Product" under the SubTotal box, in one region with it): the leading
+  // cells become a group row of their own — under the total when their words sit lower, above it otherwise
+  { const emptyCell=(g)=>({local:'', api:'', others:[], localConf:0, apiConf:0, bb:g.box, box:g.box, text:'', source:'empty'});
+    let split=0;
+    for(let i=0;i<grid.length;i++){
+      const g=groupInsideTotal(grid[i].map(x=>x.text), grid[i].map(x=>x.source)); if(!g) continue;
+      const row=grid[i], r=rowList[i];
+      const yOf=cis=>{ const ys=cis.map(ci=>row[ci].apiY).filter(y=>y!==null && y!==undefined); return ys.length?ys.reduce((a,b)=>a+b,0)/ys.length:null; };
+      const tot=row.map((x,ci)=>ci).filter(ci=>!g.cells.includes(ci) && row[ci].text);
+      const yg=yOf(g.cells), yt=yOf(tot); const below=yg===null||yt===null ? true : yg>yt;
+      const groupRow=row.map((x,ci)=>g.cells.includes(ci)?x:emptyCell(x));
+      for(const ci of g.cells) row[ci]=emptyCell(row[ci]);
+      const mid=(r.yp0+r.yp1)/2, ymid=(r.y0+r.y1)/2, tall=(r.yp1-r.yp0)>1.5*Math.max(1,itemH);
+      const gr={...r, localRis:r.localRis.slice(), source:'local'}; delete gr.apiRow; delete gr.groupCand;
+      if(tall){ if(below){ gr.yp0=mid; gr.y0=ymid; r.yp1=mid; r.y1=ymid; } else { gr.yp1=mid; gr.y1=ymid; r.yp0=mid; r.y0=ymid; } }
+      const at=below?i+1:i; grid.splice(at,0,groupRow); rowList.splice(at,0,gr); if(below) i++; split++;
+    }
+    if(split) out.note=(out.note?out.note+' · ':'')+split+' group name'+(split>1?'s':'')+' split out of a total row'; }
+  markGroups(grid, rowList, out);
 
   /* ---- column names: recheck -------------------------------------------
      A column the rule did not key and whose title the API words missed (a
@@ -337,13 +425,17 @@ export function buildFinal(){
         const r=resolvePackCell(pc, nameText); if(!r || r.text===pc.text) return;
         pc.packWas=pc.text; pc.text=r.text; pc.source=r.source==='name'?'name':r.source==='repair'?'manual':r.source; pc.packFrom=r.source;
         if(r.source==='name') pc.packFromName=true; counts[r.source]=(counts[r.source]||0)+1; });
-      const parts=Object.entries(counts).map(([k,v])=>v+' '+(k==='name'?'from the name':k==='repair'?'repaired (308 → 30S)':'from '+k));
+      // the column as a whole: an 8 or a 5 at the end of a pack where the other cells end with an S is that S
+      for(const rp of repairPacksByColumn(grid.map(row=>row[pi]?row[pi].text:''))){ const pc=grid[rp.index][pi];
+        if(pc.packWas===undefined) pc.packWas=pc.text; pc.text=rp.text; pc.source='manual'; pc.packFrom='column';
+        pc.packNote='the S read as a digit: the other pack cells of the column end with an S'; counts.column=(counts.column||0)+1; }
+      const parts=Object.entries(counts).map(([k,v])=>v+' '+(k==='name'?'from the name':k==='repair'?'repaired (308 → 30S)':k==='column'?'with the S the column ends with (5X98 → 5X9\'S)':'from '+k));
       if(parts.length) out.note=(out.note?out.note+' · ':'')+'pack sizes: '+parts.join(', '); } }
   if(named.renamed.length) out.note=(out.note?out.note+' · ':'')+'columns named on recheck: '+named.renamed.map(r=>(r.column+1)+'→'+r.key+' by '+r.by).join(', ');
   if(!named.keys.includes('qty')) out.note=(out.note?out.note+' · ':'')+'no quantity column found';
 
   out.grid=grid; out.rows=rowList; out.stats=count(grid,rowList);
-  out.stats.titleRows=titleRows.length; out.stats.droppedTop=Math.max(0,lastTitle+1-titleRows.length);
+  out.stats.titleRows=titleRows.length; out.stats.droppedTop=keepFrom; out.stats.keptAbove=top.above||0; out.stats.headerRowsDropped=headerRowsDropped;
   // the arithmetic check of the number columns (numcheck) on the finished grid:
   // roles, relations, per-row rule results, filled / fixed cells — drawn by
   // the NUMBERS stages and written into the JSON
@@ -358,6 +450,21 @@ export function buildFinal(){
 /* the final table in the shape analyseNumbers reads: header keys and labels,
    per row the cell texts, every engine's reading and the confidence of the
    chosen text (the OCR vote's: the API's or the local one, whichever won) */
+/* ---- item groups ---------------------------------------------------------
+   A row holding one text and no number that spans the table (RPL, RNL,
+   JBL: a manufacturer or a category) is an item group name (group.js): the
+   row stays where it is, marked kind "group", and every item row below it
+   carries the group's name down to the next group row. The number check,
+   the product match and the tables read the mark. */
+function markGroups(grid, rows, out){
+  const groups=groupRowsOf(grid.map(r=>r.map(g=>g.text)), grid.map(r=>r.map(g=>g.source)));
+  const byIdx=new Map(groups.map(g=>[g.index,g.name])); let cur=null;
+  rows.forEach((r,i)=>{ if(byIdx.has(i)){ r.kind='group'; r.groupName=byIdx.get(i); cur=r.groupName; } else { if(r.kind==='group'){ delete r.kind; delete r.groupName; } if(cur) r.group=cur; else delete r.group; } });
+  if(groups.length) out.note=(out.note?out.note+' · ':'')+groups.length+' item group'+(groups.length>1?'s':'')+': '+groups.map(g=>g.name).join(', ');
+  return groups;
+}
+export function isGroupRow(F, ri){ const r=F&&F.rows&&F.rows[ri]; return !!(r && r.kind==='group'); }
+
 export function tableForNumbers(F){
   if(!F || !F.grid) return {header:{keys:[],labels:[]}, rows:[]};
   const C=S.columns, keys=F.keys||(C&&C.columns||[]).map((c,i)=>c.key||('c'+(i+1)));
@@ -369,6 +476,7 @@ export function tableForNumbers(F){
   for(const cr of catalogueRelations(keys)) if(!relations.some(r=>r.key===cr.key)) relations.push(cr);
   return {header:{labels, keys}, relations,
     rows:F.grid.map((row,ri)=>{ const o={row:ri+1, cells:{}, readings:{}, confidence:{}, locked:{}};
+      if(isGroupRow(F,ri)) o.isGroup=true;                                            // an item group name: not a row to check
       row.forEach((g,ci)=>{ const k=keys[ci]; o.cells[k]=g.text; if(g.edited) o.locked[k]=true;   // typed by hand: the check never changes it
         const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[k]=r;
         if(g.text) o.confidence[k]=g.source==='local'||g.source==='local-only'?(g.localConf||0):g.source==='api'?(g.apiConf||0):Math.max(g.apiConf||0,g.localConf||0); });
@@ -388,8 +496,10 @@ export function finalTableJson(F){
     engines:(F.engines||[]).concat([{name:'local', label:'Tesseract.js (browser)', status:S.recognition&&S.recognition.available?'ok':'off'}]),
     header:{labels, keys},
     rows:F.grid.map((row,ri)=>{ const o={row:ri+1, source:F.rows?F.rows[ri].source:F.source, cells:{}, sources:{}, readings:{}};
+      { const fr=F.rows&&F.rows[ri]; if(fr&&fr.kind==='group'){ o.kind='group'; o.group=fr.groupName; } else if(fr&&fr.group) o.group=fr.group; }
       row.forEach((g,ci)=>{ o.cells[keys[ci]]=g.text; o.sources[keys[ci]]=g.source+(g.votes?':'+g.votes.join('+'):'');
-        const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[keys[ci]]=r; }); return o; }),
+        const r={paddle:g.api||''}; for(const x of g.others||[]) r[x.name]=x.text; r.local=g.local||''; o.readings[keys[ci]]=r;
+        if(g.packWas!==undefined){ o.pack={asRead:g.packWas, from:g.packFrom||g.source}; if(g.packNote) o.pack.note=g.packNote; } }); return o; }),
     stats:F.stats
   };
   if(F.edits && F.edits.length) json.edits=F.edits;                   // cells typed by hand in the editable table (stage 38)
@@ -406,7 +516,7 @@ export function finalTableJson(F){
     const nc=F.numbers && F.numbers.rows ? F.numbers : analyseNumbers(tableForNumbers(F));
     json.numberCheck={roles:nc.roles, model:nc.model, summary:nc.summary, note:nc.note, repaired:true};
     json.rows.forEach((row,ri)=>{ const r=nc.rows[ri]; if(!r) return;
-      row.isTotal=r.isTotal; row.check={}; row.asRead={};
+      row.isTotal=r.isTotal; if(r.isGroup) row.isGroup=true; row.check={}; row.asRead={};
       for(const k in r.cells){ const c=r.cells[k]; if(!nc.roles[k]) continue; row.check[k]=c.status+(c.note?' — '+c.note:'');
         if((c.status==='fixed'||c.status==='filled') && c.fixedText!==undefined){ row.asRead[k]=row.cells[k]; row.cells[k]=c.fixedText; } }
       if(!Object.keys(row.asRead).length) delete row.asRead;
@@ -425,6 +535,7 @@ export function finalTableJson(F){
       json.rows.forEach((row,ri)=>{ const r=P.results[ri]; if(!r) return;
         const st=r.status; if(st in counts) counts[st]++;
         const o={status:st, score:r.score||0}; if(r.manual) o.manual=true;   // picked by hand in the editable table's product popup
+        if(r.retry) o.retry=r.retry;                                          // matched on a retry from another engine's reading, or the readings' disagreement
         if(r.product){ const p=r.product; Object.assign(o,{id:p.id, code:p.code, name:p.name, strength:p.strength, category:p.category, manufacturer:p.manufacturer, mrp:p.mrp, purchasePrice:p.purchasePrice, tradePrice:p.tradePrice, unitConversion:p.unitConversion}); }
         if(r.price){ o.price={invoiceTp:r.price.invoiceTp, onFile:r.price.nearest, expected:r.price.expected, unitConversion:r.price.unitConversion, relDiff:r.price.relDiff, differs:r.price.differs}; if(r.price.differs) counts.priceDiff++; }
         // the pack's MRP (UnitSalePrice × the row's conversion) and the profit on the invoice's unit TP

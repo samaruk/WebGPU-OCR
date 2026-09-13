@@ -132,6 +132,20 @@ export const HEADER_RULES=[
       {key:'discountValue', label:'Disc Amt',        x0:0.77,  x1:0.87},
       {key:'net',           label:'Net Amount',      x0:0.87,  x1:1.00}
     ] },
+  { id:'opsonin', name:'Opsonin (Product Name · Pack · Batch · T.P · VAT · Qnty · TP+VAT · Net Val)',
+    // a dot-matrix invoice: the item table starts at this title row, under a key-value block of the same
+    // width; TP+VAT is the line's gross (Qnty × (T.P + VAT)), Net Val the gross less a discount the page
+    // does not print; the item groups ("Products of General-A: Territory: …") are rows of their own
+    columns:[
+      {key:'name',    label:'Product Name', x0:0.000, x1:0.288},
+      {key:'pack',    label:'Pack',         x0:0.288, x1:0.387},
+      {key:'batch',   label:'Batch',        x0:0.387, x1:0.495},
+      {key:'tp',      label:'T.P',          x0:0.495, x1:0.576},
+      {key:'unitvat', label:'VAT',          x0:0.576, x1:0.658},
+      {key:'qty',     label:'Qnty',         x0:0.658, x1:0.730},
+      {key:'tpVat',   label:'TP+VAT',       x0:0.730, x1:0.879, relation:'{qty}*({tp}+{unitvat})'},
+      {key:'net',     label:'Net Val',      x0:0.879, x1:1.000}
+    ] },
   { id:'tk-pack', name:'Sl.No · Product Code · TP(TK) PACK',
     columns:[
       {key:'sl',       label:'Sl.No',         x0:0.000, x1:0.065},

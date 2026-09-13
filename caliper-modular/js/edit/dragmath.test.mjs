@@ -1,0 +1,22 @@
+// node dragmath.test.mjs — the geometry of the column-boundary and table-edge drags
+import { boundariesOf, boundaryAt, clampBoundary, moveBoundaryIn, bandEdgeFor } from './dragmath.js';
+let failures=0;
+const check=(cond,msg)=>{ if(!cond){ failures++; console.log('  FAIL', msg); } else console.log('  ok  ', msg); };
+const cols=[{gutterX0:100,gutterX1:198},{gutterX0:202,gutterX1:398},{gutterX0:402,gutterX1:600}];
+console.log('[1] the boundaries between columns');
+check(boundariesOf(cols).join()==='100,200,400,600', 'edges and gutter middles: 100, 200, 400, 600');
+check(boundaryAt(cols,203,8)===1 && boundaryAt(cols,300,8)===-1 && boundaryAt(cols,598,8)===3, 'the boundary within reach, or none');
+console.log('[2] moving one');
+check(clampBoundary(cols,1,150)===150 && clampBoundary(cols,1,101)===104 && clampBoundary(cols,1,399)===394, 'kept so both neighbours stay four pixels wide');
+const m=moveBoundaryIn(cols,1,250);
+check(m[0].gutterX1===249 && m[1].gutterX0===251 && m[0].manual && m[1].manual && cols[0].gutterX1===198, 'boundary 1 at 250: the left column ends at 249, the right starts at 251, both marked manual; the input untouched');
+const e=moveBoundaryIn(cols,0,80); check(e[0].gutterX0===80 && e[1].gutterX0===202, 'the left edge moves alone');
+const r=moveBoundaryIn(cols,3,650); check(r[2].gutterX1===650, 'the right edge moves alone');
+console.log('[3] the table edges');
+const rows=[0,1,2,3,4,5,6].map(k=>({row:{dy:{y0:100+k*40, y1:130+k*40}}, kind:k===3?'merged':'table'}));
+check(JSON.stringify(bandEdgeFor(rows,2,5,'top',115))==='{"first":0,"last":5}', 'top dragged up to row 0');
+check(JSON.stringify(bandEdgeFor(rows,0,5,'top',275))==='{"first":4,"last":5}', 'top dragged down past the merged row 3 lands on row 4');
+check(JSON.stringify(bandEdgeFor(rows,0,3,'bottom',335))==='{"first":0,"last":5}', 'bottom dragged down to row 5');
+check(JSON.stringify(bandEdgeFor(rows,4,6,'bottom',50))==='{"first":4,"last":4}', 'bottom dragged above the top: the band keeps its first row');
+check(JSON.stringify(bandEdgeFor(rows,0,2,'top',999))==='{"first":2,"last":2}', 'top dragged below the bottom: the band keeps its last row');
+console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED'); process.exit(failures?1:0);

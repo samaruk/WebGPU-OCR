@@ -1,0 +1,25 @@
+// node borderlayout.test.mjs — one frame around the boxed header and the item table: two sections
+import { splitGridAtSection } from './borderlayout.js';
+let failures=0;
+const check=(cond,msg)=>{ if(!cond){ failures++; console.log('  FAIL', msg); } else console.log('  ok  ', msg); };
+const H=(y,x0,x1)=>({y,x0,x1}), V=(x,y0,y1)=>({x,y0,y1});
+console.log('[1] Healthcare page 2: the header box (three columns) over the item grid (twelve), one outer frame');
+const box={x0:95,y0:245,x1:1405,y1:1800};
+const hs=[H(245,95,1405),H(385,95,1405),H(650,95,1405)]; for(let y=690;y<=1800;y+=35) hs.push(H(y,95,1405));
+const vs=[V(95,245,1800),V(540,245,650),V(975,245,650),V(1405,245,1800)]; for(const x of [165,285,520,615,705,810,905,1000,1090,1195,1290]) vs.push(V(x,650,1800));
+vs.sort((a,b)=>a.x-b.x);
+const sp=splitGridAtSection(hs,vs,box,24);
+check(sp && sp.parts.length===2 && sp.splits.length===1 && Math.abs(sp.splits[0]-650)<=1, 'the grid splits at the rule under the customer block ('+JSON.stringify(sp&&sp.splits)+')');
+check(sp && sp.table.y0===650 && sp.table.y1===hs[hs.length-1].y, 'the item grid is the table: from the split rule to the bottom of the frame');
+check(sp && sp.parts[0].y0===245 && sp.parts[0].y1===650, 'the header box is the other part');
+console.log('[2] grids that must stay whole');
+const plain=[H(245,95,1405),H(280,95,1405),H(315,95,1405),H(350,95,1405)]; const pvs=[V(95,245,350),V(400,245,350),V(900,245,350),V(1405,245,350)];
+check(splitGridAtSection(plain,pvs,{x0:95,y0:245,x1:1405,y1:350},24)===null, 'a plain grid with the same verticals in every band is one section');
+const grp=[H(245,95,1405),H(285,95,1405),H(320,95,1405),H(355,95,1405)]; const gvs=[V(95,245,355),V(1405,245,355),V(400,285,355),V(900,285,355)];
+check(splitGridAtSection(grp,gvs,{x0:95,y0:245,x1:1405,y1:355},24)===null, 'a group-header band with no interior verticals over the item rows does not split (a band needs two verticals on each side)');
+const two=[H(245,95,1405),H(650,95,1405),H(1800,95,1405)]; const tvs=[V(95,245,1800),V(1405,245,1800),V(540,245,650),V(975,245,650),V(300,650,1800),V(700,650,1800),V(1100,650,1800)];
+const t2=splitGridAtSection(two,tvs,{x0:95,y0:245,x1:1405,y1:1800},24);
+check(t2!==null && t2.table.y0===650, 'two boxes with different separators: split, the one with more crossings is the table');
+const cont=[H(245,95,1405),H(650,95,1405),H(1800,95,1405)]; const cvs=[V(95,245,1800),V(1405,245,1800),V(540,245,1800),V(975,245,1800)];
+check(splitGridAtSection(cont,cvs,{x0:95,y0:245,x1:1405,y1:1800},24)===null, 'separators running through the boundary: one section');
+console.log(failures?`\n${failures} FAILURE(S)`:'\nALL PASSED'); process.exit(failures?1:0);

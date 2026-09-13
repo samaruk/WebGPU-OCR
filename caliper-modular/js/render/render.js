@@ -183,7 +183,7 @@ function renderBorderLayout(B,ctx,W,H,base,T){
   if(L.box){ box(L.box,'rgba(110,160,255,.95)','rgba(110,160,255,.10)');
     T.tag(L.box.x0+sw*2,L.box.y0-fs,'BOXED BLOCK - not the table','rgba(155,190,255,.97)'); }
   ctx.textBaseline='alphabetic';
-  T.badge('rules: '+B.horizontalRules.length+' h / '+B.verticalRules.length+' v   long: '+B.longCounts.h+' h / '+B.longCounts.v+' v   layout: '+L.kind+'   sections: '+L.sections.length+'   erased: '+B.erasedPixels.toLocaleString()+' px');
+  T.badge('rules: '+B.horizontalRules.length+' h / '+B.verticalRules.length+' v   long: '+B.longCounts.h+' h / '+B.longCounts.v+' v   layout: '+L.kind+(L.split&&L.split.length?' (one frame split at y '+L.split.map(y=>Math.round(y)).join(', ')+': the boxed header is not the table)':'')+'   sections: '+L.sections.length+'   erased: '+B.erasedPixels.toLocaleString()+' px');
 }
 
 /* ======================================================================
@@ -665,8 +665,9 @@ function renderFinalTable(F,ctx,W,H,base,T){
   for(const band of bands) for(const b of band) T.rect(b);
   if(F.header && F.header.cells){ ctx.lineWidth=sw*1.4; ctx.strokeStyle='rgba(255,220,120,.95)';
     F.header.cells.forEach((b,ci)=>{ T.rect(b); const label=F.header.labels[ci]||''; if(label){ fitText(ctx,label,b,0.6); ctx.fillStyle='rgba(255,230,140,.98)'; ctx.fillText(label,b.x0+3,(b.y0+b.y1)/2); } }); }
-  F.grid.forEach((row,ri)=>row.forEach((g,ci)=>{ const b=rows[ri][ci]; if(!b || !g.text) return;
-    fitText(ctx,g.text,{x0:b.x0+2,y0:b.y0,x1:b.x1-2,y1:b.y1},0.7); ctx.fillStyle=SRC_COLOR[g.source]||SRC_COLOR.agreed; ctx.fillText(g.text,b.x0+3,(b.y0+b.y1)/2); }));
+  F.grid.forEach((row,ri)=>{ const isGroup=!!(F.rows&&F.rows[ri]&&F.rows[ri].kind==='group'); row.forEach((g,ci)=>{ const b=rows[ri][ci]; if(!b || !g.text) return;
+    const text=isGroup?'▸ '+g.text:g.text;
+    fitText(ctx,text,{x0:b.x0+2,y0:b.y0,x1:b.x1-2,y1:b.y1},0.7); ctx.fillStyle=isGroup?PROD_COLOR.group:(SRC_COLOR[g.source]||SRC_COLOR.agreed); ctx.fillText(text,b.x0+3,(b.y0+b.y1)/2); }); });
   ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
   const st=F.stats;
   const eng=(F.engines||[]).map(e=>e.name+' '+e.status).join(', ');
@@ -721,7 +722,8 @@ function numbersPrelude(F,ctx,W,H,base,T,step){
 /* a cell's text in a colour, fitted */
 function numCellText(ctx,b,text,color,frac=0.7){ if(!b || !text) return; fitText(ctx,String(text),{x0:b.x0+2,y0:b.y0,x1:b.x1-2,y1:b.y1},frac); ctx.fillStyle=color; ctx.fillText(String(text),b.x0+3,(b.y0+b.y1)/2); }
 /* rule verdicts of one row → band colour and the failing ids */
-function rowVerdict(rules,isTotal){
+function rowVerdict(rules,isTotal,isGroup){
+  if(isGroup) return {color:NUM_COLOR.rowNone, label:'item group', fails:[]};
   if(isTotal) return {color:NUM_COLOR.rowTotal, label:'sub-total', fails:[]};
   const ev=(rules||[]).filter(r=>r.status!=='skip'), fails=ev.filter(r=>r.status==='fail');
   if(!ev.length) return {color:NUM_COLOR.rowNone, label:'no rule evaluable', fails:[]};
@@ -779,7 +781,7 @@ function renderNumRules(F,ctx,W,H,base,T,after){
   const tally={pass:0, fail:0, none:0, total:0};
   N.rows.forEach((nr,ri)=>{
     const band=rowBand(ri); if(!band) return;
-    const rules=after?nr.rules.after:nr.rules.before, v=rowVerdict(rules,nr.isTotal);
+    const rules=after?nr.rules.after:nr.rules.before, v=rowVerdict(rules,nr.isTotal,nr.isGroup);
     tally[nr.isTotal?'total':v.label==='pass'?'pass':v.label==='fail'?'fail':'none']++;
     ctx.fillStyle=v.color; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
     // cells of a failing rule outlined red; the failing rule ids at the right edge
@@ -802,7 +804,7 @@ function renderNumRepair(F,ctx,W,H,base,T){
   const S2=N.summary||{};
   N.rows.forEach((nr,ri)=>{
     const band=rowBand(ri); if(!band) return;
-    const v=rowVerdict(nr.rules.after,nr.isTotal); ctx.fillStyle=v.color; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
+    const v=rowVerdict(nr.rules.after,nr.isTotal,nr.isGroup); ctx.fillStyle=v.color; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
     keys.forEach((k,ci)=>{ const b=rows[ri][ci]; if(!b) return; const c=nr.cells[k]; if(!c) return;
       if(!N.roles[k]){ numCellText(ctx,b,c.text,'rgba(150,165,170,.55)'); return; }
       const st=c.status;
@@ -828,8 +830,8 @@ function renderNumRepair(F,ctx,W,H,base,T){
    column beside the table, and the TP cell flagged where the invoice
    price differs from the purchase price on file.
    ====================================================================== */
-const PROD_COLOR={match:'rgba(84,221,126,.97)', uncertain:'rgba(255,200,90,.97)', none:'rgba(255,90,90,.97)', total:'rgba(110,160,255,.9)', price:'rgba(255,120,230,.98)',
-                  band:{match:'rgba(84,221,126,.22)', uncertain:'rgba(255,200,90,.22)', none:'rgba(255,90,90,.24)', total:'rgba(110,160,255,.2)'}};
+const PROD_COLOR={match:'rgba(84,221,126,.97)', uncertain:'rgba(255,200,90,.97)', none:'rgba(255,90,90,.97)', total:'rgba(110,160,255,.9)', group:'rgba(255,225,130,.97)', price:'rgba(255,120,230,.98)',
+                  band:{match:'rgba(84,221,126,.22)', uncertain:'rgba(255,200,90,.22)', none:'rgba(255,90,90,.24)', total:'rgba(110,160,255,.2)', group:'rgba(255,225,130,.14)'}};
 function renderProducts(F,ctx,W,H,base,T){
   T.darken(base,0.65); ctx.textBaseline='alphabetic';
   if(!F.grid){ T.badge('PRODUCTS · '+finalHeader(F)); T.message(F.waitingApi?'waiting for the OCR API answer':'no final table yet'); return; }
@@ -855,10 +857,10 @@ function renderProducts(F,ctx,W,H,base,T){
   const allY=bands.flat().filter(Boolean); const ty0=Math.min(...allY.map(b=>b.y0)), ty1=Math.max(...allY.map(b=>b.y1));
   ctx.fillStyle='rgba(8,11,12,.75)'; ctx.fillRect(mx0,ty0,mrpW,ty1-ty0+1); ctx.lineWidth=sw*1.2; ctx.strokeStyle='rgba(110,220,255,.9)'; T.rect({x0:mx0,y0:ty0,x1:mx1,y1:ty1});
   if(F.header && F.header.cells){ const hb=F.header.cells.find(Boolean); if(hb){ const b={x0:mx0,y0:hb.y0,x1:mx1,y1:hb.y1}; fitText(ctx,'MRP',b,0.6); ctx.fillStyle='rgba(110,220,255,.98)'; ctx.fillText('MRP',b.x0+3,(b.y0+b.y1)/2); } }
-  const counts={match:0, uncertain:0, none:0, total:0, priceDiff:0};
+  const counts={match:0, uncertain:0, none:0, total:0, group:0, priceDiff:0, retry:0};
   (P.results||[]).forEach((r,ri)=>{
     const bs=(rows[ri]||[]).filter(Boolean); if(!bs.length || !r) return;
-    const st=r.status==='total'?'total':r.status||'none'; counts[st]=(counts[st]||0)+1;
+    const st=r.status==='total'?'total':r.status||'none'; counts[st]=(counts[st]||0)+1; if(r.retry&&r.retry.by) counts.retry++;
     const band={x0:Math.min(...bs.map(b=>b.x0)), x1:Math.max(...bs.map(b=>b.x1)), y0:Math.min(...bs.map(b=>b.y0)), y1:Math.max(...bs.map(b=>b.y1))};
     ctx.fillStyle=PROD_COLOR.band[st]; ctx.fillRect(band.x0,band.y0,band.x1-band.x0+1,band.y1-band.y0+1);
     F.grid[ri].forEach((g,ci)=>{ const b=rows[ri][ci]; if(!b || !g.text || ci===nameCi) return; numCellText(ctx,b,g.text,ci===tpCi?'rgba(235,245,250,.95)':'rgba(200,210,215,.8)'); });
@@ -866,9 +868,9 @@ function renderProducts(F,ctx,W,H,base,T){
     const nb=rows[ri][nameCi];
     if(nb){ const h=nb.y1-nb.y0+1, item=F.grid[ri][nameCi].text||'';
       if(r.product){ fitText(ctx,item,{x0:nb.x0+2,y0:nb.y0,x1:nb.x1-2,y1:nb.y0+h*0.55},0.9); ctx.fillStyle='rgba(235,245,250,.95)'; ctx.fillText(item,nb.x0+3,nb.y0+h*0.3);
-        const pn=[r.product.name, r.product.strength, r.product.category].filter(Boolean).join(' · ')+' ('+r.score+')';
+        const pn=[r.product.name, r.product.strength, r.product.category].filter(Boolean).join(' · ')+' ('+r.score+(r.retry&&r.retry.by?' ↻':'')+')';   // ↻ matched on a retry from another engine's reading
         fitText(ctx,pn,{x0:nb.x0+2,y0:nb.y0+h*0.5,x1:nb.x1-2,y1:nb.y1},0.9); ctx.fillStyle=PROD_COLOR[st]; ctx.fillText(pn,nb.x0+3,nb.y0+h*0.76); }
-      else numCellText(ctx,nb,item,st==='total'?PROD_COLOR.total:PROD_COLOR.none); }
+      else numCellText(ctx,nb,st==='group'?'▸ '+item:item,st==='total'?PROD_COLOR.total:st==='group'?PROD_COLOR.group:PROD_COLOR.none); }
     // the invoice TP against the purchase price on file
     if(tpCi>=0 && r.price && rows[ri][tpCi]){ const b=rows[ri][tpCi];
       if(r.price.differs){ counts.priceDiff++; ctx.lineWidth=sw*1.4; ctx.strokeStyle=PROD_COLOR.price; T.rect(b);
@@ -877,9 +879,9 @@ function renderProducts(F,ctx,W,H,base,T){
     // MRP
     const mb={x0:mx0,y0:band.y0,x1:mx1,y1:band.y1};
     if(r.product && r.product.mrp!==null && r.product.mrp!==undefined){ numCellText(ctx,mb,(+r.product.mrp).toFixed(2),PROD_COLOR[st],0.7); }
-    else if(st!=='total'){ numCellText(ctx,mb,'—','rgba(150,165,170,.6)'); }
+    else if(st!=='total' && st!=='group'){ numCellText(ctx,mb,'—','rgba(150,165,170,.6)'); }
   });
   drawLegend(ctx,T,W,H,[{label:'matched '+counts.match, color:PROD_COLOR.match},{label:'uncertain '+counts.uncertain, color:PROD_COLOR.uncertain},{label:'no match '+counts.none, color:PROD_COLOR.none},{label:'TP differs from purchase price '+counts.priceDiff, color:PROD_COLOR.price},{label:'MRP = product UnitSalePrice', color:'rgba(110,220,255,.9)'}]);
   ctx.textBaseline='alphabetic'; ctx.font=`600 ${T.fontSize}px "JetBrains Mono", monospace`;
-  T.badge('PRODUCTS · '+counts.match+' matched, '+counts.uncertain+' uncertain, '+counts.none+' unmatched of '+(P.rows.filter(r=>!r.isTotal).length)+' items · '+counts.priceDiff+' TP differ from the purchase price · matched in '+(P.matchMs||0)+' ms by the '+P.engine+', '+Math.round(P.ms)+' ms in all');
+  T.badge('PRODUCTS · '+counts.match+' matched, '+counts.uncertain+' uncertain, '+counts.none+' unmatched of '+(P.rows.filter(r=>!r.isTotal && !r.isGroup).length)+' items'+(counts.retry?' ('+counts.retry+' on a retry from another reading ↻)':'')+(counts.group?' · '+counts.group+' item group'+(counts.group>1?'s':'')+' ('+P.rows.filter(r=>r.isGroup).map(r=>r.name).join(', ')+')':'')+' · '+counts.priceDiff+' TP differ from the purchase price · matched in '+(P.matchMs||0)+' ms by the '+P.engine+', '+Math.round(P.ms)+' ms in all');
 }

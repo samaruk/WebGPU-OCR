@@ -459,6 +459,10 @@ export function detectColumns(textLines,params,prior=null,limits=null){
       }
     }
   }
+  // the table's rows set by hand (the top or bottom edge dragged on the Table Layout stage: js/edit/dragedit.js)
+  if(limits && limits.forceBand && rows.length){
+    const fb=limits.forceBand, f=Math.max(0,Math.min(rows.length-1,fb.first|0)), l=Math.max(f,Math.min(rows.length-1,fb.last|0));
+    if(f!==first || l!==last){ first=f; last=l; footerCut='set by hand'; } }
   for(let k=0;k<rows.length;k++) if(rows[k].kind!=='merged') rows[k].kind = k<first?'header':k>last?'footer':'table';
   let band=rows.slice(first,last+1).filter(r=>r.kind!=='merged');
 

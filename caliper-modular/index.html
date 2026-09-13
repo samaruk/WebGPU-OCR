@@ -15,13 +15,23 @@
       <line x1="24" y1="24" x2="26" y2="24"/>
     </svg>
     <div><div class="title">CALI<b>PER</b></div></div>
-    <div class="sub">WebGPU&nbsp;·&nbsp;rectify → borders → text lines → columns</div>
+    <div class="sub">WebGPU&nbsp;·&nbsp;beautify → borders → text lines → columns</div>
     <div class="gpu"><span class="dot" id="gpuDot"></span><span id="gpuTxt">checking webgpu…</span></div>
   </header>
 
+  <!-- the control sections as a bar: each section of #controls becomes a tab whose panel drops down from here (js/layout/ribbon.js) -->
+  <div class="ribbon" id="ribbon">
+    <button class="tab add" id="addPages" type="button" title="add the pages of the invoice (several files at once)">＋ Add pages</button>
+    <span class="ribbon-sep"></span>
+    <span id="ribbonSpacer" class="spacer"></span>
+    <span id="runGroup" class="run-group"></span>
+    <div class="ribbon-panel" id="ribbonPanel"></div>
+  </div>
+  <div class="err-banner" id="errBanner"></div>
+
   <div class="body">
-    <aside>
-      <div class="err-banner" id="errBanner"></div>
+    <aside class="pages" id="pagesPanel"></aside>
+    <div id="controls">
 
       <!-- 00 · source image -->
       <div class="grp">
@@ -29,9 +39,9 @@
         <div class="drop" id="drop">
           <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/></svg>
           <b>Drop image or click</b>
-          <span>PNG · JPG · WEBP · BMP</span>
+          <span>PNG · JPG · WEBP · BMP · PDF (every page)</span>
         </div>
-        <input type="file" id="file" accept="image/*" hidden>
+        <input type="file" id="file" accept="image/*,application/pdf,.pdf" hidden>
         <div class="meta" id="meta" style="display:none"></div>
         <div class="ctl" style="margin-top:9px">
           <label>Watermark contrast &le; <span class="val" id="wmContrastVal">0.15</span></label>
@@ -43,11 +53,6 @@
       </div>
 
       <!-- 00b · rectification -->
-      <div class="grp">
-        <h3><span class="ix">00b</span> Rectification</h3>
-        <label class="chk"><input type="checkbox" id="rectify" checked> Rectify image (lens + perspective) before processing</label>
-        <div class="hint">Checked: radial lens distortion is undone and the detected page quad is warped back to a rectangle; every later section works on that rectified image. Unchecked: both corrections are skipped and every section works on the original image as loaded.</div>
-      </div>
 
       <!-- 00c · OCR API: PaddleOCR + Tesseract 5 + EasyOCR -->
       <div class="grp">
@@ -334,6 +339,7 @@
       </div>
 
       <div class="grp">
+        <button class="ghost beautify" id="beautify" disabled title="warp every ready page flat from its corners (lens correction first); RUN PIPELINE then works on the beautified image — a page not beautified is processed as it was loaded">✦ Beautify</button>
         <button class="run" id="run" disabled>RUN PIPELINE</button>
         <div class="row2">
           <button class="ghost" id="savePng" disabled>↓ stage PNG</button>
@@ -343,7 +349,16 @@
 
       <!-- 07 · readout -->
       <div class="grp">
-        <h3><span class="ix">07</span> Readout</h3>
+        <h3><span class="ix">07</span> Profit range</h3>
+        <div class="hint">The profit on the invoice's unit TP — (pack MRP − TP) / TP × 100 — is fine inside this range and shown in the danger colour outside it, in the editable table and both summaries; a change re-checks every row at once.</div>
+        <div style="display:flex;gap:14px;align-items:center;margin:6px 0 4px">
+          <label style="display:flex;gap:6px;align-items:center;white-space:nowrap">min profit % <input id="profitMin" type="number" step="0.5" value="10" style="width:70px;background:#0a0e0f;color:#e6f0eb;border:1px solid rgba(166,255,63,.35);border-radius:3px;font:inherit;padding:3px 6px"></label>
+          <label style="display:flex;gap:6px;align-items:center;white-space:nowrap">max profit % <input id="profitMax" type="number" step="0.5" value="30" style="width:70px;background:#0a0e0f;color:#e6f0eb;border:1px solid rgba(166,255,63,.35);border-radius:3px;font:inherit;padding:3px 6px"></label>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3><span class="ix">08</span> Readout</h3>
         <div class="stats">
           <div class="stat"><div class="n" id="statRules">—</div><div class="l">rules h / v</div></div>
           <div class="stat"><div class="n g" id="statLines">—</div><div class="l">text lines</div></div>
@@ -361,7 +376,7 @@
           <pre id="finalJson" style="max-height:320px;overflow:auto;font-size:10px;line-height:1.35;white-space:pre-wrap;word-break:break-all;margin:0;padding:6px;background:#0a0e0f;border:1px solid #2a2a2a;border-radius:4px">no final table yet — run the pipeline</pre>
         </details>
       </div>
-    </aside>
+    </div>
 
     <main>
       <div class="viewport" id="viewport">
@@ -372,6 +387,13 @@
           <div>Load an image and run the pipeline.</div>
         </div>
         <div class="stagecap" id="stageCap" style="display:none"></div>
+        <!-- the source stage of a page not yet run: its corners, and what to do with them (js/pages/pages.js) -->
+        <div class="sourcebar" id="sourceBar" style="display:none">
+          <button id="srcDetect" type="button" title="find the page's four corners again with the detector (a corner moved by hand is put back where the detector sees it)">⌖ Detect corners</button>
+          <button id="srcBeautify" type="button" title="warp this page flat from its corners as they stand (lens correction first); RUN PIPELINE then works on the beautified image">✦ Beautify</button>
+          <button id="srcReset" type="button" title="this page as loaded: the beautified image dropped, the corners back where the detector put them">↶ Reset</button>
+          <span class="note" id="srcNote"></span>
+        </div>
         <div class="hud" id="hud" style="display:none">
           <button id="zOut">−</button>
           <span class="z" id="zVal">100%</span>

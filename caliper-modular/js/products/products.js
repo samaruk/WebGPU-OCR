@@ -14,16 +14,12 @@
        results  – per row the match: {status, score, product, price, candidates}
    ====================================================================== */
 import { S } from '../state/state.js';
-import { unitConversionOf, rowPackText, packColumnIndex } from '../final/pack.js';
+import { unitConversionOf, rowPackText, packColumnIndex, packByMrp } from '../final/pack.js';
+import { respace, spaceWords } from '../final/respace.js';
 
 /* the row's unit conversion: the invoice's own column of that meaning, else the operator's entry, else the pack size rule */
-export function rowConversion(F, ri){
-  const keys=F.keys||[]; const meta=F.rowMeta&&F.rowMeta[ri];
-  if(meta && meta.unitConversion!==undefined && meta.unitConversion!==null && isFinite(meta.unitConversion)) return {value:+meta.unitConversion, source:'typed'};
-  const ci=keys.indexOf('unitconversion'); if(ci>=0){ const v=parseFloat(String((F.grid[ri][ci]&&F.grid[ri][ci].text)||'').replace(/,/g,'')); if(isFinite(v) && v>0) return {value:v, source:'column'}; }
-  const pk=rowPackText(keys, F.grid, ri); const r=unitConversionOf(pk.text);
-  return {value:r.value, source:(pk.source==='name'?'pack from the name: ':'pack: ')+r.rule+(pk.text?' ('+pk.text+')':'')};
-}
+import { rowConversion } from './mrp.js';   // the row's units per pack (typed · the invoice's column · the pack rule), shared with the summaries
+export { rowConversion };
 
 let worker=null, ready=null, seq=0; const pending=new Map();
 function getWorker(){
@@ -67,6 +63,21 @@ async function askHere(rows,opts){
   const t=performance.now(); return {results:matchRows(mainIndex, rows, opts), ms:Math.round(performance.now()-t)};
 }
 
+/* the other readings of a name cell, for the matcher's retry when the chosen
+   text matches nothing: PaddleOCR's, EasyOCR's, Tesseract 5's and the local
+   reading, then the chosen text with its word gaps put back from them, and
+   each reading with its own gaps put back (respace.js) — every text once */
+const ENGINE_LABEL={paddle:'PaddleOCR', easyocr:'EasyOCR', tesseract5:'Tesseract 5', local:'local'};
+export function nameAlternatives(g, name){
+  if(!g) return [];
+  const reads=[['paddle',g.api]].concat((g.others||[]).map(o=>[o.name,o.text]), [['local',g.local]]).filter(r=>r[1]&&String(r[1]).trim());
+  const out=[], seen=new Set([String(name||'').toUpperCase().replace(/\s+/g,' ').trim()]);
+  const add=(by,t)=>{ t=String(t||'').replace(/\s+/g,' ').trim(); const k=t.toUpperCase(); if(!t || seen.has(k)) return; seen.add(k); out.push({by, text:t}); };
+  for(const [e,t] of reads) add(ENGINE_LABEL[e]||e, t);
+  try{ add('respaced', respace(name, reads.map(r=>r[1]))); for(const [e,t] of reads) add((ENGINE_LABEL[e]||e)+' respaced', spaceWords(t)); }catch(e){}
+  return out;
+}
+
 /* the rows to match from the final table: the item name (key name, else
    the widest text column), the pack size, the unit TP (the number check's
    unit TP role, else key tp), skipping sub-total rows */
@@ -82,7 +93,8 @@ export function rowsToMatch(F){
     const nr=F.numbers&&F.numbers.rows?F.numbers.rows[ri]:null;
     const name=nameCi>=0?(row[nameCi].text||''):'';
     let tp=null; if(tpCi>=0){ const c=nr&&nr.cells?nr.cells[keys[tpCi]]:null; tp=c&&c.value!==null&&c.value!==undefined?c.value:(parseFloat(String(row[tpCi].text||'').replace(/,/g,''))||null); }
-    return {row:ri, name, pack:rowPackText(keys, F.grid, ri).text, tp, conv:rowConversion(F,ri).value, isTotal:!!(nr&&nr.isTotal)};
+    const fr=F.rows&&F.rows[ri];
+    return {row:ri, name, alts:nameCi>=0?nameAlternatives(row[nameCi], name):[], pack:rowPackText(keys, F.grid, ri).text, tp, conv:rowConversion(F,ri).value, isTotal:!!(nr&&nr.isTotal), isGroup:!!(fr&&fr.kind==='group'), group:fr&&fr.group||null};
   });
 }
 
@@ -94,16 +106,38 @@ function manufacturerHint(){
   return '';
 }
 
+/* the pack sizes checked against the matched products' MRP (pack.js packByMrp):
+   a pack whose units make the MRP absurd against the invoice's TP is re-read
+   from the S the engine took for a digit, the other engines or the name; the
+   cell is rewritten (source manual, packFrom mrp), the row's conversion and
+   price follow. Returns how many cells changed. */
+async function packsByMrp(F, entry){
+  const keys=F.keys||[]; const pi=packColumnIndex(keys, F.grid); if(pi<0 || !entry.results) return 0;
+  const ni=keys.indexOf('name'); let n=0; const { priceOf }=await import('./matcher.js');
+  entry.results.forEach((r,ri)=>{
+    const row=entry.rows.find(x=>x.row===ri); const pc=F.grid[ri]&&F.grid[ri][pi];
+    if(!r || !r.product || !row || row.isTotal || !pc) return;
+    const cv=rowConversion(F,ri); if(!/^pack/.test(cv.source)) return;   // the operator's or the invoice's own conversion stands
+    const readings=[{name:'paddle', text:pc.api}].concat((pc.others||[]).map(o=>({name:o.name, text:o.text})), [{name:'local', text:pc.local}]);
+    const fix=packByMrp({packText:pc.text, readings, nameText:ni>=0&&F.grid[ri][ni]?F.grid[ri][ni].text:'', mrp:r.product.mrp, tp:row.tp});
+    if(!fix) return;
+    if(pc.packWas===undefined) pc.packWas=pc.text; pc.text=fix.text; pc.source='manual'; pc.packFrom='mrp';
+    pc.packNote='settled by the MRP: as read the profit on TP was '+fix.profitWas+' %, with '+fix.text+' ('+fix.by+') it is '+fix.profitNow+' %';
+    row.pack=fix.text; row.conv=unitConversionOf(fix.text).value; r.price=priceOf(r.product, row.tp, row.conv)||r.price; r.packByMrp=fix; n++; });
+  if(n) F.note=(F.note||'').replace(/ · \d+ pack sizes? settled by the MRP$/,'')+(F.note?' · ':'')+n+' pack size'+(n>1?'s':'')+' settled by the MRP';
+  return n;
+}
+
 export function startProductMatch(F){
   const rows=rowsToMatch(F);
   const entry={status:'pending', started:performance.now(), ms:0, rows, results:null, error:null, promise:null, engine:'worker'};
   const opts={manufacturer:manufacturerHint()};
-  const toMatch=rows.filter(r=>!r.isTotal && r.name);
+  const toMatch=rows.filter(r=>!r.isTotal && !r.isGroup && r.name);
   entry.promise=(typeof Worker==='undefined'?Promise.reject(new Error('no Worker')):ask(toMatch,opts))
     .catch(e=>{ entry.engine='main thread ('+(e.message||e)+')'; return askHere(toMatch,opts); })
-    .then(d=>{ const byRow=new Map(toMatch.map((r,i)=>[r.row,d.results[i]]));
-      entry.results=rows.map(r=>byRow.get(r.row)||{status:r.isTotal?'total':'none', score:0, product:null, candidates:[]});
-      entry.matchMs=d.ms; entry.status='done'; entry.ms=performance.now()-entry.started; return entry; })
+    .then(async d=>{ const byRow=new Map(toMatch.map((r,i)=>[r.row,d.results[i]]));
+      entry.results=rows.map(r=>byRow.get(r.row)||{status:r.isTotal?'total':r.isGroup?'group':'none', score:0, product:null, candidates:[]});
+      entry.matchMs=d.ms; entry.packRepairs=await packsByMrp(F, entry); entry.status='done'; entry.ms=performance.now()-entry.started; return entry; })
     .catch(e=>{ entry.status='error'; entry.error=e.message||String(e); entry.ms=performance.now()-entry.started; return entry; });
   return entry;
 }

@@ -28,7 +28,7 @@
 
 /* ---- vocabulary ---------------------------------------------------------- */
 const FORMS={
-  TABLET:['TAB','TABS','TABLET','TABLETS','TABLE','TABL','TB'],
+  TABLET:['FCT','TAB','TABS','TABLET','TABLETS','TABLE','TABL','TB'],
   CAPSULE:['CAP','CAPS','CAPSULE','CAPSULES','CAPSU','CAPSUL','LICAP','SOFTGEL','SOFTGELS'],
   SYRUP:['SYP','SYR','SYRUP','SYRP','SYRUPS'],
   SUSPENSION:['SUSP','SUS','SUSPENSION','SUSPN','SUSPENSN','PFS','P/S','DRYSYRUP'],   // PFS: powder for suspension (an invoice's abbreviation)
@@ -41,7 +41,7 @@ const FORMS={
   LOTION:['LOTION','LOT'],
   POWDER:['POWDER','PWD','PDR','POW'],
   SACHET:['SACHET','SACH','SACHETS'],
-  SPRAY:['SPRAY','SPRY'],
+  SPRAY:['SPRAY','SPRY','SPRAYS'],
   INHALER:['INHALER','INH','MDI','ACCUHALER','HALER','INHALATION','INHELAR'],
   SUPPOSITORY:['SUPP','SUPPOSITORY','SUPPO'],
   ELIXIR:['ELIXIR','ELX'],
@@ -59,7 +59,7 @@ const NEAR_FORMS=[...FORM_OF.keys()].filter(w=>/^[A-Z]{4,}$/.test(w));   // the 
 export const FORM_WORDS=[...FORM_OF.keys()];
 /* words that describe but do not name: dropped on both sides */
 const DESCRIPTORS=new Set(['EYE','EAR','NASAL','NOSE','ORAL','EXTERNAL','TOPICAL','FOR','OF','AND','THE','WITH','PER','PACK','BOX','STRIP','PCS','PC','PIECE','PIECES',
-  'DELAYED','RELEASE','EXTENDED','SUSTAINED','MODIFIED','PROLONGED','FILM','COATED','ENTERIC','SUGAR','FREE','ADULT','DRY','POWDER','FORMULA','USP','BP','IP','LIQUID','DISPERSIBLE','CHEWABLE','EFFERVESCENT','ORODISPERSIBLE',
+  'DELAYED','RELEASE','EXTENDED','SUSTAINED','MODIFIED','PROLONGED','FILM','COATED','FC','ENTERIC','BD','SUGAR','FREE','ADULT','DRY','POWDER','FORMULA','USP','BP','IP','LIQUID','DISPERSIBLE','CHEWABLE','EFFERVESCENT','ORODISPERSIBLE',
   'NEW','ORIGINAL','REGULAR','COMBI','KIT','SET','UNIT','UNITS','BOTTLE','BOTTLES','TUBE','SINGLE','DOUBLE','HUMAN',
   'PAED','PAEDIATRIC','PEDIATRIC','PED','SKIN','BODY','FACE','HAIR','POT','JAR','CONTAINER','SACHET','SACHETS','IVIM',
   'RESP','RESPIRATORY','RESPIROTY','RESPIRATOR','NEBULISER','NEBULIZER','NEB','NEBULE','NEBULES','INHALER','INHALATION','INH','REFILL','SPRAY','PUMP']);
@@ -67,15 +67,16 @@ export const DESCRIPTOR_WORDS=[...DESCRIPTORS];
 /* a bare number after one of these is a count of pieces ("POT 30", "BOX 100"), not a strength */
 const CONTAINERS=new Set(['POT','JAR','BOTTLE','BOTTLES','PACK','BOX','STRIP','STRIPS','CONTAINER','PCS','PC','PIECES']);
 /* unit words of a strength or a volume; grams and litres are scaled to mg / ml */
-const UNITS={MG:['MG','MGM','MGS'], MCG:['MCG','UG','µG','MICROGRAM','MICROGRAMS'], GM:['G','GM','GMS','GRAM','GRAMS'], ML:['ML','MLS'], L:['L','LTR','LITRE','LITER'], IU:['IU','I.U','U','UNIT'], PCT:['%','PCT','PERCENT'], MMOL:['MMOL'], MEQ:['MEQ']};
+const UNITS={PUFF:['PUFF','PUFFS'], MG:['MG','MGM','MGS'], MCG:['MCG','UG','µG','MICROGRAM','MICROGRAMS'], GM:['G','GM','GMS','GRAM','GRAMS'], ML:['ML','MLS'], L:['L','LTR','LITRE','LITER'], IU:['IU','I.U','U','UNIT'], PCT:['%','PCT','PERCENT'], MMOL:['MMOL'], MEQ:['MEQ']};
 const UNIT_OF=new Map(); for(const [u,ws] of Object.entries(UNITS)) for(const w of ws) UNIT_OF.set(w,u);
 
 /* ---- text → parts --------------------------------------------------------- */
 /* pack sizes are taken out first, before letters and digits are split:
    30's, 150s, 10x10, 5X10'S, 1x1's — a count of pieces, never a strength */
-const PACK_RE=/(?<![\d.])\d+\s*X\s*\d+\s*['’`]?S?\b|(?<![\d.])\d+['’`]S\b|\b(\d+)S\b/g;   // CAP20'S, TABLET30'S: the pack may be glued to the word before it
-/* a leading serial number of the invoice line: "8 CEFIXIM…", "12CORALTAB", "17.FEXOMIN" */
-const SERIAL_RE=/^\s*\d{1,3}\s*[.)\-]?\s*(?=[A-Z]{3})/;
+const PACK_RE=/(?<![\d.])\d+\s*X\s*\d+(?:\s*X\s*\d+)?\s*['’`]?S?\b|(?<![\d.])\d+['’`]S\b|\b(\d+)S\b/g;   // 1X3X10: pieces × per strip × strips   // CAP20'S, TABLET30'S: the pack may be glued to the word before it
+/* a leading serial number or product code of the invoice line: "8 CEFIXIM…", "12CORALTAB", "17.FEXOMIN", "1018 FLUTICON" (an
+   ACME code of four digits — left in, it would pass for a strength of 1018 and rule the right product out) */
+const SERIAL_RE=/^\s*\d{1,4}\s*[.)\-]?\s*(?=[A-Z]{3})/;
 const OCR_DIGIT={S:'5',O:'0',I:'1',L:'1',B:'8',Z:'2'};
 const up=s=>String(s||'').toUpperCase().replace(/µ/g,'U')
   .replace(/(\d)\s+([O0]{1,2})(ML|MG|MCG|GM)\b/g,'$1$2$3')                    // "5 Oml": a zero read as O and cut off its digit
@@ -90,7 +91,8 @@ const up=s=>String(s||'').toUpperCase().replace(/µ/g,'U')
   .replace(/(\d) (MG|MCG|ML|GM|IU)([A-Z]{2,})\b/g,'$1 $2 $3')                    // 20 MGCAP → 20 MG CAP
   .replace(/\.(?!\d)/g,' ')                                                    // PAED. → PAED (a decimal point stays)
   .replace(/\b(P|PD|PED|PAED)[-\/ ]?(DROPS?|DRPS?)\b/g,'PAED $2').replace(/\bP\/D\b/g,'PAED DROP')   // P-Drop, P/D, PD Drops: paediatric drops
-  .replace(/\bE[-\/.](DROPS?|DRPS?)\b/g,'EYE $1').replace(/\b(EE|E\/E)[-\/.]?(DROPS?|DRPS?)\b/g,'EYE EAR $2').replace(/\bN[-\/.](DROPS?|DRPS?)\b/g,'NASAL $1')   // E-Drop, E/E Drop, N-Drop: eye, eye/ear, nasal drops
+  .replace(/\bE[-\/.](DROPS?|DRPS?)\b/g,'EYE $1').replace(/\b(EE|E\/E)[-\/.]?(DROPS?|DRPS?)\b/g,'EYE EAR $2').replace(/\bN[-\/.](DROPS?|DRPS?|SPRAYS?)\b/g,'NASAL $1')   // E-Drop, E/E Drop, N-Drop, N-Spray: eye, eye/ear, nasal drops, nasal spray
+  .replace(/(?<![\d.])(\d)\s+(\d{2,})\s*(SPRAYS?|PUFFS?|DOSES?|ACTUATIONS?|P)\b/g,'$1$2 $3')                  // "1 20 sprays": a count of sprays read with a space in it
   .replace(/\bO[-\/.](PASTE|GEL|SOLN?|SOLUTION|SUSP|SUSPENSION|DROPS?|DRPS?|SPRAY|RINSE)\b/g,'ORAL $1')   // O-Paste, O-Gel, O-Soln: oral
   .replace(/([A-Z]{3,})(IV\/IM|IM\/IV)\b/g,'$1 IVIM').replace(/\b(IV\/IM|IM\/IV)\b/g,'IVIM')   // CEFAZIDIV/IM, Cefazid iv/im: the route, one descriptor
   .replace(/\bM[\s\-\/]?WASH\b/g,'MOUTHWASH').replace(/\bMOUTH[\s\-]WASH\b/g,'MOUTHWASH')   // M-Wash, M/Wash, Mouth Wash
@@ -106,7 +108,11 @@ export function parseName(text, extra, opts={}){
   if(opts.serial) raw=raw.replace(SERIAL_RE,'');                       // an invoice line: the serial number in front is not the name
   const packs=[]; const noPack=raw.replace(PACK_RE,m=>{ packs.push(m.replace(/\s+/g,'')); return ' '; });
   const s=up(noPack), toks=s.split(' ').filter(Boolean);
-  const brand=[], strength=[], forms=[]; let form=null, tail=false;   // tail: past the form word or the pack — a lone letter there is a fragment, not a qualifier
+  const brand=[], strength=[], forms=[], descriptors=[]; let form=null, tail=false, route=null;   // tail: past the form word or the pack — a lone letter there is a fragment, not a qualifier
+  // the route of an injection — IM, IV, IV/IM — is neither a brand qualifier nor a mere form word: TRIZON 500 mg IM and
+  // TRIZON 500 mg IV are two products, and an invoice's "TRIZON-IM" must not lose points for a qualifier the list "lacks"
+  const addRoute=r=>{ route=[...new Set((route||[]).concat(r))]; forms.push('INJECTION'); if(!form) form='INJECTION'; tail=true; };
+  const ROUTE={IM:['IM'], IV:['IV'], IVIM:['IV','IM'], IMIV:['IM','IV']};
   // a weight or volume (10 g, 200 ml) is the SIZE of a tube or bottle, not a dose: it is soft — it counts only
   // against a product that names a size, so "Togent Crm 10g" agrees with a cream filed by its 2%+0.1%
   const pushStrength=(v,u)=>{ let val=+v; if(!isFinite(val)) return; u=u||''; const size=u==='GM'||u==='L'||u==='ML'; if(u==='GM'){ val*=1000; u='MG'; } if(u==='L'){ val*=1000; u='ML'; }
@@ -114,36 +120,53 @@ export function parseName(text, extra, opts={}){
   for(let i=0;i<toks.length;i++){
     let t=toks[i];
     // pack sizes: 10X10, 5X10S, 30S, 1X1S — not a strength
-    if(/^\d+X\d+S?$/.test(t) || /^\d+S$/.test(t)){ packs.push(t); tail=true; continue; }
+    if(/^\d+X\d+(X\d+)?S?$/.test(t) || /^\d+S$/.test(t)){ packs.push(t); tail=true; continue; }
+    if(ROUTE[t]){ addRoute(ROUTE[t]); continue; }
     if(tail && /^[A-Z]$/.test(t)) continue;                             // "Maganta Plus Tab 100's T": the T is a scrap of the next column
     // DSCAP, SRTAB: a form word glued to a qualifier of two letters or more — the qualifier stays, the form is read
     if(/^[A-Z]{5,}$/.test(t) && !FORM_OF.has(t) && !DESCRIPTORS.has(t)){ const suf=GLUED_FORMS.find(sf=>t.length>=sf.length+2 && t.endsWith(sf));
       if(suf){ brand.push(t.slice(0,-suf.length)); const f2=FORM_OF.get(suf); if(f2){ forms.push(f2); if(!form) form=f2; } tail=true; continue; } }
     // "/5 ML", "/ML": the volume a dose is given per — not a strength, not a brand word
     if(/^\/\d*(\.\d+)?$/.test(t)){ if(UNIT_OF.has(toks[i+1])) i++; continue; }
-    // a/b strengths: 5/40, 5/500 (two numbers, unit may follow)
+    // "600 MG/400 IU" (600mg/400IU once letters and digits are split): two strengths, each with its own unit
+    { const mu=/^\d+(?:\.\d+)?$/.test(t) && toks[i+1] ? /^([A-Z%]+)\/(\d+(?:\.\d+)?)$/.exec(toks[i+1]) : null;
+      if(mu && UNIT_OF.has(mu[1])){ pushStrength(t, UNIT_OF.get(mu[1])); const u2=UNIT_OF.get(toks[i+2]||''); pushStrength(mu[2], u2||''); i+=u2?2:1; continue; } }
+    // a/b strengths: 5/40, 5/500 (two numbers, unit may follow) — the unit belongs to the second figure ("600/400IU" is
+    // 600 mg + 400 IU); the first keeps none, and a strength without a unit equals one of the same value in any unit
     let m=/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/.exec(t);
-    if(m){ const u=UNIT_OF.get(toks[i+1])||''; if(u){ i++; } pushStrength(m[1],u); pushStrength(m[2],u); continue; }
+    if(m){ const u=UNIT_OF.get(toks[i+1])||''; if(u){ i++; } pushStrength(m[1],''); pushStrength(m[2],u); continue; }
     // 20MG already split to "20 MG"; a bare number followed by a unit, or a bare number
     m=/^(\d+(?:\.\d+)?)$/.exec(t);
     if(m && i>0 && CONTAINERS.has(toks[i-1]) && !UNIT_OF.has(toks[i+1]||'')){ packs.push(t+'S'); continue; }   // "POT 30": a pot of 30
+    // "120 sprays", "200 puff", "120P" (the list's way), "60 doses": the count of sprays or puffs a spray or an inhaler
+    // holds — its strength, in puffs; the word "sprays" says the form as well
+    { const cw=m && toks[i+1] ? /^(SPRAYS?|PUFFS?|DOSES?|ACTUATIONS?|P)$/.exec(toks[i+1]) : null;
+      if(cw){ i++; pushStrength(m[1],'PUFF'); if(/^SPRAY/.test(cw[1])){ forms.push('SPRAY'); if(!form) form='SPRAY'; } tail=true; continue; } }
     if(m){ const nxt=toks[i+1]; const u=UNIT_OF.get(nxt);
       if(u){ i++; pushStrength(m[1],u); continue; }
-      if(nxt && /^(MG|MCG|ML|GM)\/(ML|GM|L)$/.test(nxt)){ i++; pushStrength(m[1],nxt.split('/')[0]==='G'?'GM':nxt.split('/')[0]); continue; }
+      // "3MG 50TAB", "500MG 14FCT", "50 PCS": a count before a form word once a strength with its unit is in, or before a
+      // container word, is the pack — "Seclo 20 Cap" (no unit strength before it) keeps its 20 as the strength
+      if(nxt && !packs.length && (CONTAINERS.has(nxt) || (FORM_OF.has(nxt) && strength.some(x=>x.u && !x.soft)))){ packs.push(m[1]+'S'); continue; }
+      // a unit given per something — "mg/ml", "IU/ml", "1 gm/vial", "500 mg/vial", "mcg/puff", "mg/sachet" — is that unit:
+      // the list's "1 gm/vial" is one gram, the dose an invoice writes "1gm"
+      { const pu=nxt ? /^([A-Z%.]+)\/[A-Z]+$/.exec(nxt) : null; if(pu && UNIT_OF.has(pu[1])){ i++; pushStrength(m[1],UNIT_OF.get(pu[1])); continue; } }
       pushStrength(m[1],''); continue; }
     // "MG" on its own after a number that was already taken, or stray units
     if(UNIT_OF.has(t)) continue;
     const f=FORM_OF.get(t); if(f){ forms.push(f); if(!form) form=f; tail=true; continue; }
     if(/^[A-Z]{4,}$/.test(t) && !DESCRIPTORS.has(t)){ const near=NEAR_FORMS.find(w=>w.length===t.length && lev(t,w)===1); if(near){ const nf=FORM_OF.get(near); forms.push(nf); if(!form) form=nf; tail=true; continue; } }   // SALN read for SOLN
-    if(DESCRIPTORS.has(t)) continue;
+    if(DESCRIPTORS.has(t)){ descriptors.push(t); continue; }                 // kept aside: a product whose category says NASAL too is preferred among same-name listings
     { let glued=null; for(let k=3;k<t.length-2 && !glued;k++) if(DESCRIPTORS.has(t.slice(0,k)) && FORM_OF.has(t.slice(k))) glued=FORM_OF.get(t.slice(k));   // EYEDROPS → EYE DROPS
       if(glued){ if(!form) form=glued; continue; } }
     if(t.includes('/') && !/\d/.test(t)) continue;                    // M/W, W/V, P/D and the like: descriptors, not brand words
     // hyphenated brand parts: FUNGIN-B → FUNGIN B, BACTIN-D → BACTIN D; SECLO-20 handled by the split above
-    const parts=t.split('-').filter(Boolean), shortPart=parts.some(x=>/^[A-Z]{1,2}$/.test(x));
-    for(const part of parts){ if(UNIT_OF.has(part) || DESCRIPTORS.has(part)) continue; /* TOMYCIN-EYE: EYE is a descriptor here too */
+    const parts=t.split('-').filter(Boolean), shortPart=parts.some(x=>/^[A-Z]{1,2}$/.test(x)), leading=!brand.length;
+    for(const part of parts){ if(ROUTE[part]){ addRoute(ROUTE[part]); continue; }   // TRIZON-IM, FAMICEF-IV: the route, not the brand's second half
       const pf=FORM_OF.get(part);
-      if(pf){ if(shortPart && parts.length>=2){ brand.push(part); continue; }   // E-GEL, V-GEL, E-CAP: the form word IS the brand's second half
+      if(!pf && (UNIT_OF.has(part) || DESCRIPTORS.has(part))) continue; /* TOMYCIN-EYE: EYE is a descriptor here too (SPRAY is a form first) */
+      // E-GEL, V-GEL, E-CAP: the form word IS the brand's second half — when the hyphenated word is the brand itself;
+      // after a brand word ("Angivent MR-Tab", "Seclo DS-Cap") it is the qualifier and the form
+      if(pf){ if(shortPart && parts.length>=2 && leading){ brand.push(part); continue; }
               if(!form) form=pf; continue; }
       if(/^\d+(\.\d+)?$/.test(part)){ pushStrength(part,''); continue; } if(part.length===1 && /\d/.test(part)) continue;
       // E-GELCAP: a form word glued to the end of a part (three letters or more on either side; GEL itself is left, it is a brand's half too often)
@@ -154,11 +177,18 @@ export function parseName(text, extra, opts={}){
   if(forms.includes('CAPSULE') && form==='GEL') form='CAPSULE';        // "Soft Gel Cap": a capsule, not a gel
   // "E-GEL 200GM" on a capsule: no capsule weighs 200 g — a gram figure over 5 g on a tablet or capsule is a milligram dose misprinted
   if(form==='TABLET' || form==='CAPSULE') for(let k=0;k<strength.length;k++){ const st=strength[k]; if(st.size && st.u==='MG' && st.v>5000) strength[k]={v:Math.round(st.v/1000*1000)/1000, u:'MG'}; }
+  // an injection's gram figure is its DOSE, not a size: "TRIZON-IV 1G" is 1000 mg and must equal "TRIZON 1 GM IV";
+  // over 5 g it is milligrams written as grams ("TRIZON 250GM" is 250 mg)
+  if(form==='INJECTION') for(let k=0;k<strength.length;k++){ const st=strength[k]; if(st.size && st.u==='MG') strength[k]={v:st.v>5000?Math.round(st.v/1000*1000)/1000:st.v, u:'MG'}; }
   // the pack column (200ml, 3gm): a soft volume or weight beside whatever the name says, unless the name gives one in that unit already
   if(extra){ const e=parseName(extra); for(const x of e.strength) if((x.u==='ML'||x.u==='MG') && !strength.some(y=>y.u===x.u)) strength.push({...x, soft:true}); if(!form && e.form) form=e.form; }
-  const packCount=packs.map(pk=>{ const m=/^(\d+)X(\d+)/.exec(pk); if(m) return +m[1]*+m[2]; const n=/^(\d+)/.exec(pk); return n?+n[1]:0; }).find(n=>n>0)||0;
-  return {brand, strength, form, packs, packCount, text:s};
+  const packCount=packs.map(pk=>{ const m=/^(\d+)X(\d+)(?:X(\d+))?/.exec(pk); if(m) return +m[1]*+m[2]*(m[3]?+m[3]:1); const n=/^(\d+)/.exec(pk); return n?+n[1]:0; }).find(n=>n>0)||0;
+  return {brand, strength, form, packs, packCount, descriptors, route, text:s};
 }
+/* the route named by a product's category: "IM Injection", "IV/IM Injection" */
+const routeOfCategory=cat=>{ const w=up(cat).split(/[^A-Z]+/); const r=[]; if(w.includes('IM')) r.push('IM'); if(w.includes('IV')) r.push('IV'); if(w.includes('IVIM')||w.includes('IMIV')) r.push('IV','IM'); return r.length?[...new Set(r)]:null; };
+/* two routes agree when they share one; a route on one side only is not a disagreement */
+const routeFactor=(a,b)=>(!a || !b) ? 1 : (a.some(x=>b.includes(x)) ? 1 : 0.5);
 
 /* ---- similarity ------------------------------------------------------------ */
 function lev(a,b){ if(a===b) return 0; const m=a.length,n=b.length; if(!m) return n; if(!n) return m; let prev=new Array(n+1); for(let j=0;j<=n;j++) prev[j]=j;
@@ -178,7 +208,8 @@ function strengthFactor(qIn,p){
   // a soft strength (the pack column's 200 ml) only counts against a product that names a volume in that unit:
   // "ANTANIL SUS" + pack 200ml against "(200 mg+125 mg)/5 ml" is not a disagreement
   // a percentage (0.3 %) likewise: the list often files a tube by its weight (3 GM), and the two do not disagree
-  const q=qIn.filter(s=>(!s.soft && s.u!=='PCT') || p.some(b=>b.u===s.u && (!s.size || b.size)));
+  // a size on the invoice counts against a product that names a size in ANY unit: a 5 g tube is not a 60 ml bottle
+  const q=qIn.filter(s=>(!s.soft && s.u!=='PCT') || p.some(b=>(b.u===s.u && (!s.size || b.size)) || (s.size && b.size)));
   if(!q.length && !p.length) return 0.95;
   if(!q.length || !p.length) return 0.8;
   const hit=q.filter(a=>p.some(b=>strengthEq(a,b))).length;
@@ -214,10 +245,15 @@ export function buildIndex(PRODUCTS, COLUMNS){
     // says what it is for ("ZOX 30 ml POWDER" / "Powder For Suspension" is a suspension)
     const cat=up(r[col.Category]||''); if(!p.form || p.form==='POWDER'){ for(const w of cat.split(/[ -]/)){ const f=FORM_OF.get(w); if(f && f!=='POWDER'){ p.form=f; break; } if(f && !p.form) p.form=f; } }
     if(p.form==='TABLET' || p.form==='CAPSULE') p.strength=p.strength.map(st=>st.size && st.u==='MG' && st.v>5000 ? {v:Math.round(st.v/1000*1000)/1000, u:'MG'} : st);   // "200GM" on a capsule: milligrams
+    if(p.form==='INJECTION') p.strength=p.strength.map(st=>st.size && st.u==='MG' ? {v:st.v>5000?Math.round(st.v/1000*1000)/1000:st.v, u:'MG'} : st);   // an injection's grams are its dose; "250 GM" is 250 mg
+    const route=p.route || routeOfCategory(r[col.Category]||'');
+    // a cream, ointment, gel or paste filed with a bare milligram figure ("CLOTRIM 10MG CREAM") is a tube of that many
+    // grams — no cream is dosed in milligrams — so the size is what identifies it: an invoice's 5GM is another tube
+    if(['CREAM','OINTMENT','GEL','PASTE'].includes(p.form) && p.strength.length===1 && p.strength[0].u==='MG' && !p.strength[0].size && p.strength[0].v<=1000) p.strength=[{v:p.strength[0].v*1000, u:'MG', size:true, soft:true}];
     const generic=up(r[col.GenericName]||'').split(' ').filter(w=>w.length>2);
     const mfr=up(r[col.Manufacturer]||'');
     if(!p.brand.length){ if(generic.length) p.brand=generic.slice(0,1); else return; }
-    const it={i, brand:p.brand, strength:p.strength, form:p.form, generic, mfr, name, first:p.brand[0], conv:+r[col.UnitConversion]||0};
+    const it={i, brand:p.brand, strength:p.strength, form:p.form, generic, mfr, name, first:p.brand[0], conv:+r[col.UnitConversion]||0, cat, route};
     items.push(it);
     add(byFirst,it.first,items.length-1);
     add(byPrefix,it.first.slice(0,3),items.length-1);
@@ -298,13 +334,23 @@ function matchParsed(index, q, opts){
     const bs=tokenSim(first,it.first); if(bs<0.72) continue;
     // qualifiers the invoice took from the generic name are not disagreements
     const qBrand=q.brand.filter((t,k)=>k===0 || !it.generic.some(g=>tokenSim(t,g)>=0.85));
-    let score=bs*qualifierFactor(qBrand,it.brand)*strengthFactor(q.strength,it.strength)*formFactor(q.form,it.form);
+    let score=bs*qualifierFactor(qBrand,it.brand)*strengthFactor(q.strength,it.strength)*formFactor(q.form,it.form)*routeFactor(q.route,it.route);
+    // a line that names a size (5GM, 100ML) is a tube or a bottle, never a tablet or a capsule: "CLOTRIM 5GM" is not the
+    // Cotrim tablet a one-letter slip would otherwise let in
+    if(q.strength.some(s=>s.size) && (it.form==='TABLET' || it.form==='CAPSULE')) score*=0.5;
     if(mfrHint.length && mfrHint.some(w=>it.mfr.includes(w))) score=Math.min(1, score+0.03);
     // the invoice's TP equal to the product's trade or purchase price on file (per unit or per pack): a confirmation
     if(q.tp!==null && q.tp!==undefined && bs>=0.85){ const pr=priceOf(productOf(index,it), q.tp); if(pr && pr.differs===false) score=Math.min(1, score+0.05); }
     if(q.packCount && it.conv===q.packCount) score=Math.min(1, score+0.03);   // the invoice's 30's is the product's pack of 30
+    // the invoice's descriptor (NASAL, EYE, ORAL …) printed in the product's name or category: among two listings of
+    // one name, "Fluticon · NASAL SPRAY" is the one for "FLUTICON NASAL SPRAY"
+    if(q.descriptors && q.descriptors.length){ const hay=it.name.toUpperCase()+' '+it.cat; if(q.descriptors.some(d=>hay.includes(d))) score=Math.min(1, score+0.02); }
     scored.push({i, score, brandSim:bs});
   }
+  // the invoice's brand is in the list, spelled so: a candidate whose brand is merely SIMILAR (NYCLOBET for ACLOBET,
+  // FLUTICA for FLUTICON — two edits, another company) is another product, whatever its size or form agrees on; when
+  // no brand comes close to exact, the slips the OCR makes are allowed as before
+  { const bestBs=scored.reduce((m,c)=>Math.max(m,c.brandSim),0); if(bestBs>=0.95) for(let i=scored.length-1;i>=0;i--) if(scored[i].brandSim<0.85) scored.splice(i,1); }
   // an invoice line that names no strength is not penalised when the brand
   // comes in one strength only (nothing to tell apart)
   if(!q.strength.some(s=>!s.soft)){                                   // no strength of its own (the pack column's volume aside)
@@ -346,7 +392,21 @@ export function priceOf(p, tp, conv){
 }
 export function matchRows(index, rows, opts={}){
   return rows.map(row=>{
-    const m=matchItem(index, row, opts);
+    let m=matchItem(index, row, opts);
+    /* no match: the OTHER readings of the name — PaddleOCR's, EasyOCR's, Tesseract 5's, the local one, and each with
+       its word gaps put back (row.alts) — are tried in turn. Only a confident match counts (the same bar as the first
+       try), and only when every reading that matches names the same product: two readings pointing at different
+       products leave the row unmatched, with the disagreement noted. An invoice must not be matched wrongly, and a
+       product missing from the list stays "no match". */
+    if(m.status==='none' && row.alts && row.alts.length){
+      // two readings that differ only in spacing or case are one reading: the second engine joins the first's entry
+      const key=t=>up(t).replace(/\s+/g,' ').trim(); const tried=new Map([[key(row.name||''),null]]); const found=[];
+      for(const a of row.alts){ const t=String(a.text||'').replace(/\s+/g,' ').trim(); if(!t) continue; const k=key(t);
+        if(tried.has(k)){ const f=tried.get(k); if(f && !f.by.includes(a.by)) f.by.push(a.by); continue; }
+        const m2=matchItem(index, {name:t, pack:row.pack, tp:row.tp}, opts); const f=m2.status==='match'?{m:m2, by:[a.by], text:t}:null; tried.set(k,f); if(f) found.push(f); }
+      if(found.length){ const ids=new Set(found.map(f=>up(f.m.product.name)+'|'+up(f.m.product.strength||'')));
+        if(ids.size===1){ const f=found[0]; m={...f.m, retry:{by:found.flatMap(x=>x.by), text:f.text, was:row.name||''}}; }
+        else m.retry={disagree:found.map(f=>f.by.join(' / ')+' → '+f.m.product.name+(f.m.product.strength?' '+f.m.product.strength:''))}; } }
     if(m.product){ const pr=priceOf(m.product, row.tp, row.conv); if(pr) m.price=pr; }
     return m;
   });

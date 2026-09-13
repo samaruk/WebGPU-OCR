@@ -218,7 +218,7 @@ function optAbsent(R, presentRoles){ return (R.optional||[]).filter(x=>!presentR
    by the quantity, and a little drift on large amounts */
 function tolerance(R, v, target){
   const q=R.perUnit && v.qty ? Math.abs(v.qty) : 1;
-  return 0.0151 + 0.0051*q + 0.0006*Math.abs(target||0);
+  return 0.0151 + 0.0051*q + 0.0006*Math.abs(target||0) + (R.slack ? R.slack(v, target) : 0);   // slack: a relation's own looseness (the inferred VAT rate's spread)
 }
 
 /* ---- the analysis --------------------------------------------------------- */
@@ -254,6 +254,7 @@ export function analyseNumbers(table, opts={}){
   const isTotalRow=[];
   const textKeys=keys.filter(k=>!numericKey[k]);
   table.rows.forEach((row,ri)=>{
+    if(row.isGroup){ isTotalRow.push(false); return; }                       // an item group name: neither an item nor a total
     const txt=Object.values(row.cells||{}).join(' ').toLowerCase();
     if(/\b(sub\s*total|grand total|total)\b/.test(txt)){ isTotalRow.push(true); return; }
     // no label: a row with its text columns (name, batch …) mostly blank whose
@@ -270,7 +271,7 @@ export function analyseNumbers(table, opts={}){
   });
 
   /* 3 · resolve the ambiguous roles and pick relation variants ------------- */
-  const itemIdx=table.rows.map((_,i)=>i).filter(i=>!isTotalRow[i]);
+  const itemIdx=table.rows.map((_,i)=>i).filter(i=>!isTotalRow[i] && !table.rows[i].isGroup);
   const rowVals=ri=>{ const v={}; for(const k of keys){ const r=roleOfKey[k]; if(!r) continue; const p=parsedRows[ri][k].parsed; if(p) v[r]=p.value; } return v; };
   const ambiguous=Object.keys(roleOfKey).filter(k=>roleOfKey[k].endsWith('?'));
   const options={ 'vat?':['unitVat','vatPct','totalVat'], 'disc?':['discAmt','unitDisc','discPct'] };
@@ -317,15 +318,20 @@ export function analyseNumbers(table, opts={}){
   const activeSet=new Set(active.map(e=>e.R));
   const reserve=[]; for(const g of Object.values(groups)) for(const e of g) if(!activeSet.has(e.R) && e.n>0 && e.rate>=0.5) reserve.push(e);
   // the implied VAT rate turns unit/total TP into unit/total VAT checks
+  // the rate was accepted with the rows agreeing within 0.3 points of it, so the check allows the same spread:
+  // a VAT the page rounds its own way (104.3 for 599.7 × 17.41 % = 104.41) is not a misread
   if(vatRate!==null){
-    if(present.has('unitTp') && present.has('unitVat')) active.push({R:rel('uvat*',`unitVat = unitTp × ${vatRate}%`,['unitVat','unitTp'],(r,v)=>r==='unitVat'?v.unitTp*vatRate/100:div(v.unitVat*100,vatRate),{skipZero:['unitVat']}), n:0, k:0, rate:1, derived:true});
-    if(present.has('totalTp') && present.has('totalVat')) active.push({R:rel('tvatpct*',`totalVat = totalTp × ${vatRate}%`,['totalVat','totalTp'],(r,v)=>r==='totalVat'?v.totalTp*vatRate/100:div(v.totalVat*100,vatRate),{perUnit:true, skipZero:['totalVat']}), n:0, k:0, rate:1, derived:true});
+    if(present.has('unitTp') && present.has('unitVat')) active.push({R:rel('uvat*',`unitVat = unitTp × ${vatRate}%`,['unitVat','unitTp'],(r,v)=>r==='unitVat'?v.unitTp*vatRate/100:div(v.unitVat*100,vatRate),{skipZero:['unitVat'], slack:v=>0.003*Math.abs(v.unitTp||0)}), n:0, k:0, rate:1, derived:true});
+    if(present.has('totalTp') && present.has('totalVat')) active.push({R:rel('tvatpct*',`totalVat = totalTp × ${vatRate}%`,['totalVat','totalTp'],(r,v)=>r==='totalVat'?v.totalTp*vatRate/100:div(v.totalVat*100,vatRate),{perUnit:true, skipZero:['totalVat'], slack:v=>0.003*Math.abs(v.totalTp||0)}), n:0, k:0, rate:1, derived:true});
   }
   // a relation does not apply to a row where one of its skipZero values is
   // exactly 0 (a VAT-exempt item has no rate to check) or missing
   const applies=(R,m)=>!(R.skipZero||[]).some(x=>m[x]===0 || m[x]===undefined);
   // the derived relations were not part of the model search: count their rows now
   for(const e of active) if(e.derived){ let n=0,k=0; for(const ri of itemIdx){ const m=valsWith(ri,roles); if(!e.R.vars.every(x=>m[x]!==undefined) || !applies(e.R,m)) continue; const t=e.R.solve(e.R.vars[0],m); if(t===null) continue; n++; if(Math.abs(t-m[e.R.vars[0]])<=tolerance(e.R,m,t)) k++; } e.n=n; e.k=k; e.rate=n?k/n:0; }
+  // a derived relation, like any other, must hold on most of the rows it can be tested on — a VAT the page computes
+  // on another base than the TP would otherwise be "fixed" row by row towards a rate it never followed
+  for(let i=active.length-1;i>=0;i--){ const e=active[i]; if(e.derived && e.n>0 && e.rate<0.5) active.splice(i,1); }
   // roles no active relation reaches (bonus, MRP …) are reported as unchecked
   const covered=new Set(); for(const e of active) for(const x of e.R.vars) covered.add(x);
 
@@ -339,6 +345,7 @@ export function analyseNumbers(table, opts={}){
     // value: the working value (replaced when filled or fixed); raw: the number as read, kept for the record
     const cells={}; for(const k of keys){ const c=parsedRows[ri][k]; cells[k]={text:c.text, value:c.parsed?c.parsed.value:null, raw:c.parsed?c.parsed.value:null, status:c.text?(roles[k]?(covered.has(roles[k])?'unverified':'unchecked'):'text'):'blank',
       weak:!!(roles[k] && c.text && conf[k]!==undefined && conf[k]<o.weakBelow && !locked[k]), confidence:conf[k], locked:!!locked[k]}; }
+    if(row.isGroup) return {row:row.row||ri+1, isGroup:true, isTotal:false, cells, issues:[], rules:{before:[], after:[]}};
     if(isTotalRow[ri]) return {row:row.row||ri+1, isTotal:true, cells, issues:[], rules:{before:[], after:[]}};
     const issues=[];
     const v=()=>{ const m={}; for(const r in keyOfRole){ const c=cells[keyOfRole[r]]; if(c.value!==null) m[r]=c.value; } return m; };
@@ -442,7 +449,7 @@ export function analyseNumbers(table, opts={}){
   /* 5 · sub-total rows: sums settle a lone doubtful cell --------------------- */
   outRows.forEach((tr,ti)=>{ if(!tr.isTotal) return;
     // items above this total, back to the previous total
-    let start=ti-1; while(start>=0 && !outRows[start].isTotal) start--; const items=outRows.slice(start+1,ti).filter(r=>!r.isTotal);
+    let start=ti-1; while(start>=0 && !outRows[start].isTotal) start--; const items=outRows.slice(start+1,ti).filter(r=>!r.isTotal && !r.isGroup);
     for(const k of keys){ if(!roles[k] || roles[k]==='qty' && false) continue; const total=tr.cells[k]; if(total.value===null) continue;
       const vals=items.map(r=>r.cells[k]); const known=vals.filter(c=>c.value!==null); const sum=known.reduce((s,c)=>s+c.value,0);
       const tol=0.011+0.003*items.length+0.0005*Math.abs(total.value);
@@ -455,7 +462,7 @@ export function analyseNumbers(table, opts={}){
   });
 
   /* summary */
-  const summary={rows:outRows.length, itemRows:outRows.filter(r=>!r.isTotal).length, cells:0, verified:0, filled:0, fixed:0, conflicts:0, unverified:0, unchecked:0, blank:0};
+  const summary={rows:outRows.length, itemRows:outRows.filter(r=>!r.isTotal && !r.isGroup).length, groupRows:outRows.filter(r=>r.isGroup).length, cells:0, verified:0, filled:0, fixed:0, conflicts:0, unverified:0, unchecked:0, blank:0};
   for(const r of outRows) for(const k of keys){ if(!roles[k]) continue; const s=r.cells[k].status; summary.cells++; if(s==='verified') summary.verified++; else if(s==='filled') summary.filled++; else if(s==='fixed') summary.fixed++; else if(s==='conflict') summary.conflicts++; else if(s==='unverified') summary.unverified++; else if(s==='unchecked') summary.unchecked++; else if(s==='blank') summary.blank++; }
   return {
     roles, model:{ vatRate, relations:active.map(e=>({id:e.R.id, formula:e.R.formula, testedRows:e.n, satisfied:e.k, derived:!!e.derived, rule:!!e.R.rule, source:e.R.source||'builtin'})) },
